@@ -38,7 +38,7 @@ const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;
 function esc(s) { return s.replace(/[&<>"']/g, (c) => ESC[c]); }
 
 const USERNAME_ALLOWED_RE = /^[A-Za-z0-9]+(?: [A-Za-z0-9]+)*$/;
-const MENTION_IN_ESCAPED_TEXT_RE = /@([A-Za-z0-9]+(?: [A-Za-z0-9]+)*)/g;
+const MENTION_IN_ESCAPED_TEXT_RE = /(?:^|[^\w])@([A-Za-z0-9]+(?: [A-Za-z0-9]+)*)/g;
 
 function normalizeUsernameInput(s) {
   return String(s ?? "").trim().replace(/\s+/g, " ");
