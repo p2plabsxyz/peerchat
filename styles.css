@@ -366,7 +366,8 @@ html, body {
 
 .msg-bubble {
   padding: 0.55rem 0.85rem; border-radius: 16px;
-  word-wrap: break-word; font-size: 0.9rem;
+  word-wrap: break-word; word-break: break-word; overflow-wrap: break-word;
+  font-size: 0.9rem; max-width: 100%;
 }
 .msg-left .msg-bubble  { background: var(--msg-other); border-top-left-radius: 4px; }
 .msg-right .msg-bubble { background: var(--msg-self); border-top-right-radius: 4px; }
