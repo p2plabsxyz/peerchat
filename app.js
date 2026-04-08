@@ -62,8 +62,17 @@ function validateUsernameOrAlert(username) {
 }
 
 function mentionizeEscapedPlain(escapedPlain) {
-  return escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
+  const withMentions = escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
     `${prefix}<span class="mention" data-mention="${esc(name)}">@${esc(name)}</span>`);
+  return applyMarkdownFormatting(withMentions);
+}
+
+function applyMarkdownFormatting(escapedText) {
+  return escapedText
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/~(.+?)~/g, '<del>$1</del>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
 }
 
 function peerIdEq(a, b) {
@@ -118,7 +127,10 @@ function formatFileSize(bytes) {
 }
 
 function isHyperFileUrl(url) {
-  return /^hyper:\/\//i.test(url) && !isImageFile(url) && !isVideoFile(url);
+  if (!(/^hyper:\/\//i.test(url))) return false;
+  if (isImageFile(url) || isVideoFile(url)) return false;
+  const match = url.match(/^hyper:\/\/[^\/]+\/(.+)/i);
+  return !!(match && match[1]);
 }
 
 function sanitizeDownloadFilename(name) {
@@ -362,7 +374,7 @@ function linkify(text, msg) {
   if (/^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed) && isHyperFileUrl(trimmed)) {
     return fileAttachHtml(trimmed, msg?.fileName, msg?.fileSize);
   }
-  const re = /\b(https?|hyper|ipfs|ipns):\/\/[^\s<>"']+/gi;
+  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
@@ -371,7 +383,7 @@ function linkify(text, msg) {
     if (isImageFile(url)) {
       parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
     } else if (isVideoFile(url)) {
-      parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata"></video>`);
+      parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
     } else if (isHyperFileUrl(url)) {
       parts.push(fileAttachHtml(url, null, null));
     } else {
@@ -1197,9 +1209,10 @@ function showMsgInfo(e, msg) {
 }
 
 function setReply(msg) {
-  const name = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
-  replyTarget = { id: msg.id, sender: msg.sender, sn: name, text: msg.message };
-  $("reply-preview").innerHTML = `<span class="reply-author">${esc(name)}</span>${esc(msg.message.slice(0, 100))}`;
+  const displayName = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
+  const actualName = msg.senderName || msg.sender;
+  replyTarget = { id: msg.id, sender: msg.sender, sn: actualName, text: msg.message };
+  $("reply-preview").innerHTML = `<span class="reply-author">${esc(displayName)}</span>${esc(msg.message.slice(0, 100))}`;
   $("reply-bar").style.display = "flex";
   $("message-input").focus();
 }
@@ -2053,13 +2066,15 @@ $("room-menu")?.addEventListener("click", async (e) => {
   if (!room) return;
 
   if (action === "pin") {
-    await chat.updateRoom(ctxTarget, { isPinned: !room.isPinned });
-    room.isPinned = !room.isPinned;
+    const newPinState = !room.isPinned;
+    room.isPinned = newPinState;
     renderRoomList();
+    await chat.updateRoom(ctxTarget, { isPinned: newPinState });
   } else if (action === "mute") {
-    await chat.updateRoom(ctxTarget, { isMuted: !room.isMuted });
-    room.isMuted = !room.isMuted;
+    const newMuteState = !room.isMuted;
+    room.isMuted = newMuteState;
     renderRoomList();
+    await chat.updateRoom(ctxTarget, { isMuted: newMuteState });
   } else if (action === "copy") {
     copyText(ctxTarget);
   } else if (action === "delete") {

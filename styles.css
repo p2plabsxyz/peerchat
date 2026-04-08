@@ -366,7 +366,8 @@ html, body {
 
 .msg-bubble {
   padding: 0.55rem 0.85rem; border-radius: 16px;
-  word-wrap: break-word; font-size: 0.9rem;
+  word-wrap: break-word; word-break: break-word; overflow-wrap: break-word;
+  font-size: 0.9rem; max-width: 100%;
 }
 .msg-left .msg-bubble  { background: var(--msg-other); border-top-left-radius: 4px; }
 .msg-right .msg-bubble { background: var(--msg-self); border-top-right-radius: 4px; }
@@ -384,8 +385,13 @@ html, body {
   border: 1px solid var(--border); box-shadow: 0 1px 4px rgba(0,0,0,0.12);
   z-index: 2; transition: background 0.15s;
 }
+.msg-react-trigger::before {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 8px;
+}
 .msg-right .msg-bubble .msg-react-trigger { left: -28px; right: auto; }
+.msg-right .msg-bubble .msg-react-trigger::before { left: 100%; }
 .msg-left .msg-bubble .msg-react-trigger  { right: -28px; left: auto; }
+.msg-left .msg-bubble .msg-react-trigger::before { right: 100%; }
 .msg-react-trigger img { display: block; width: 16px; height: 16px; filter: invert(50%); transition: filter 0.15s; }
 .message:hover .msg-react-trigger { display: flex; }
 .msg-react-trigger:hover { display: flex; background: var(--hover); }
@@ -790,7 +796,24 @@ a:hover { text-decoration: none; }
   border-radius: 8px; margin-top: 6px;
   cursor: pointer; display: block;
 }
+.msg-file-img[src$=".mp4"],
+.msg-file-img[src$=".webm"],
+.msg-file-img[src$=".mov"],
+.msg-file-img[src$=".ogg"] {
+  min-height: 180px;
+  background: var(--base01);
+}
 .msg-bubble-body { display: block; min-width: 0; }
+.msg-bubble-body strong { font-weight: 700; }
+.msg-bubble-body em { font-style: italic; }
+.msg-bubble-body del { text-decoration: line-through; opacity: 0.8; }
+.msg-bubble-body code {
+  background: rgba(0, 0, 0, 0.15);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.85em;
+}
 
 /* Hyper file attachment (Discord-style) */
 .msg-file-attach {
