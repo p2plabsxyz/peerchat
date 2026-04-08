@@ -62,8 +62,17 @@ function validateUsernameOrAlert(username) {
 }
 
 function mentionizeEscapedPlain(escapedPlain) {
-  return escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
+  const withMentions = escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
     `${prefix}<span class="mention" data-mention="${esc(name)}">@${esc(name)}</span>`);
+  return applyMarkdownFormatting(withMentions);
+}
+
+function applyMarkdownFormatting(escapedText) {
+  return escapedText
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/~(.+?)~/g, '<del>$1</del>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
 }
 
 function peerIdEq(a, b) {

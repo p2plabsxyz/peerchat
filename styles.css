@@ -804,6 +804,16 @@ a:hover { text-decoration: none; }
   background: var(--base01);
 }
 .msg-bubble-body { display: block; min-width: 0; }
+.msg-bubble-body strong { font-weight: 700; }
+.msg-bubble-body em { font-style: italic; }
+.msg-bubble-body del { text-decoration: line-through; opacity: 0.8; }
+.msg-bubble-body code {
+  background: rgba(0, 0, 0, 0.15);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.85em;
+}
 
 /* Hyper file attachment (Discord-style) */
 .msg-file-attach {
