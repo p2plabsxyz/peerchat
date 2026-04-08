@@ -38,7 +38,7 @@ const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;
 function esc(s) { return s.replace(/[&<>"']/g, (c) => ESC[c]); }
 
 const USERNAME_ALLOWED_RE = /^[A-Za-z0-9]+(?: [A-Za-z0-9]+)*$/;
-const MENTION_IN_ESCAPED_TEXT_RE = /@([A-Za-z0-9]+(?: [A-Za-z0-9]+)*)/g;
+const MENTION_IN_ESCAPED_TEXT_RE = /(^|[^\w])@([A-Za-z0-9]+(?: [A-Za-z0-9]+)*)/g;
 
 function normalizeUsernameInput(s) {
   return String(s ?? "").trim().replace(/\s+/g, " ");
@@ -62,8 +62,8 @@ function validateUsernameOrAlert(username) {
 }
 
 function mentionizeEscapedPlain(escapedPlain) {
-  return escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (_, name) =>
-    `<span class="mention" data-mention="${esc(name)}">@${esc(name)}</span>`);
+  return escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
+    `${prefix}<span class="mention" data-mention="${esc(name)}">@${esc(name)}</span>`);
 }
 
 function peerIdEq(a, b) {
@@ -1753,9 +1753,9 @@ function insertMention(m) {
   const cursor = input.selectionStart;
   const before = val.slice(0, cursor);
   const atIdx = before.lastIndexOf("@");
-  const newVal = val.slice(0, atIdx) + "@" + m.username + " " + val.slice(cursor);
+  const newVal = val.slice(0, atIdx) + "@" + m.username + "  " + val.slice(cursor);
   input.value = newVal;
-  input.selectionStart = input.selectionEnd = atIdx + m.username.length + 2;
+  input.selectionStart = input.selectionEnd = atIdx + m.username.length + 3;
   popup.classList.remove("open"); mentionIdx = -1;
   input.focus();
   resizeMessageField();

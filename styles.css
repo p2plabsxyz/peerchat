@@ -669,7 +669,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .muted { color: var(--muted); font-size: 0.85rem; }
 .small { font-size: 0.75rem; }
 #ri-members { width: 100%; text-align: left; }
-#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 300px; overflow-y: auto; }
 .member-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 0.8rem; padding: 4px 0;
