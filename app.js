@@ -127,7 +127,10 @@ function formatFileSize(bytes) {
 }
 
 function isHyperFileUrl(url) {
-  return /^hyper:\/\//i.test(url) && !isImageFile(url) && !isVideoFile(url);
+  if (!(/^hyper:\/\//i.test(url))) return false;
+  if (isImageFile(url) || isVideoFile(url)) return false;
+  const match = url.match(/^hyper:\/\/[^\/]+\/(.+)/i);
+  return !!(match && match[1]);
 }
 
 function sanitizeDownloadFilename(name) {
