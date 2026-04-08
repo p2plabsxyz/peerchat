@@ -371,7 +371,7 @@ function linkify(text, msg) {
     if (isImageFile(url)) {
       parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
     } else if (isVideoFile(url)) {
-      parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata"></video>`);
+      parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
     } else if (isHyperFileUrl(url)) {
       parts.push(fileAttachHtml(url, null, null));
     } else {

@@ -790,6 +790,13 @@ a:hover { text-decoration: none; }
   border-radius: 8px; margin-top: 6px;
   cursor: pointer; display: block;
 }
+.msg-file-img[src$=".mp4"],
+.msg-file-img[src$=".webm"],
+.msg-file-img[src$=".mov"],
+.msg-file-img[src$=".ogg"] {
+  min-height: 180px;
+  background: var(--base01);
+}
 .msg-bubble-body { display: block; min-width: 0; }
 
 /* Hyper file attachment (Discord-style) */
