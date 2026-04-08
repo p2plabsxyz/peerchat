@@ -385,8 +385,13 @@ html, body {
   border: 1px solid var(--border); box-shadow: 0 1px 4px rgba(0,0,0,0.12);
   z-index: 2; transition: background 0.15s;
 }
+.msg-react-trigger::before {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 8px;
+}
 .msg-right .msg-bubble .msg-react-trigger { left: -28px; right: auto; }
+.msg-right .msg-bubble .msg-react-trigger::before { left: 100%; }
 .msg-left .msg-bubble .msg-react-trigger  { right: -28px; left: auto; }
+.msg-left .msg-bubble .msg-react-trigger::before { right: 100%; }
 .msg-react-trigger img { display: block; width: 16px; height: 16px; filter: invert(50%); transition: filter 0.15s; }
 .message:hover .msg-react-trigger { display: flex; }
 .msg-react-trigger:hover { display: flex; background: var(--hover); }
