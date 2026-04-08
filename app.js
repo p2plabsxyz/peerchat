@@ -374,7 +374,7 @@ function linkify(text, msg) {
   if (/^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed) && isHyperFileUrl(trimmed)) {
     return fileAttachHtml(trimmed, msg?.fileName, msg?.fileSize);
   }
-  const re = /\b(https?|hyper|ipfs|ipns):\/\/[^\s<>"']+/gi;
+  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
