@@ -1209,9 +1209,10 @@ function showMsgInfo(e, msg) {
 }
 
 function setReply(msg) {
-  const name = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
-  replyTarget = { id: msg.id, sender: msg.sender, sn: name, text: msg.message };
-  $("reply-preview").innerHTML = `<span class="reply-author">${esc(name)}</span>${esc(msg.message.slice(0, 100))}`;
+  const displayName = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
+  const actualName = msg.senderName || msg.sender;
+  replyTarget = { id: msg.id, sender: msg.sender, sn: actualName, text: msg.message };
+  $("reply-preview").innerHTML = `<span class="reply-author">${esc(displayName)}</span>${esc(msg.message.slice(0, 100))}`;
   $("reply-bar").style.display = "flex";
   $("message-input").focus();
 }
