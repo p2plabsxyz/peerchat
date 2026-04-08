@@ -2053,13 +2053,15 @@ $("room-menu")?.addEventListener("click", async (e) => {
   if (!room) return;
 
   if (action === "pin") {
-    await chat.updateRoom(ctxTarget, { isPinned: !room.isPinned });
-    room.isPinned = !room.isPinned;
+    const newPinState = !room.isPinned;
+    room.isPinned = newPinState;
     renderRoomList();
+    await chat.updateRoom(ctxTarget, { isPinned: newPinState });
   } else if (action === "mute") {
-    await chat.updateRoom(ctxTarget, { isMuted: !room.isMuted });
-    room.isMuted = !room.isMuted;
+    const newMuteState = !room.isMuted;
+    room.isMuted = newMuteState;
     renderRoomList();
+    await chat.updateRoom(ctxTarget, { isMuted: newMuteState });
   } else if (action === "copy") {
     copyText(ctxTarget);
   } else if (action === "delete") {
