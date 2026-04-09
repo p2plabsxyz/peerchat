@@ -29,6 +29,17 @@ let mentionIdx = -1;
 let _dmiRoomKey = null;
 let driveUrl = null;
 let draftDriveUrl = null;
+const DRAFT_STORAGE_KEY = "peerchat-msg-drafts";
+function saveDraft(roomKey, text) {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) || "{}");
+    if (text.trim()) drafts[roomKey] = text; else delete drafts[roomKey];
+    localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+  } catch {}
+}
+function loadDraft(roomKey) {
+  try { return JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) || "{}")[roomKey] || ""; } catch { return ""; }
+}
 let pendingAvatar = null;
 let pendingRoomAvatar = null;
 let creatingRoom = false;
@@ -924,6 +935,11 @@ function applyDMComposerGate(roomKey) {
 }
 
 async function openRoom(roomKey) {
+  const prevRoom = S.activeRoom;
+  if (prevRoom && prevRoom !== roomKey) {
+    const input = $("message-input");
+    if (input) saveDraft(prevRoom, input.value);
+  }
   S.activeRoom = roomKey;
   const room = S.rooms[roomKey];
   if (!room) return;
@@ -943,6 +959,9 @@ async function openRoom(roomKey) {
   $("messages").innerHTML = "";
 
   applyDMComposerGate(roomKey);
+
+  const _draftInput = $("message-input");
+  if (_draftInput) { _draftInput.value = loadDraft(roomKey); resizeMessageField(); }
 
   room.unreadCount = 0;
   room.unreadMentions = 0;
@@ -1702,6 +1721,12 @@ $("join-room-form")?.addEventListener("submit", async (e) => {
 
 $("message-input")?.addEventListener("focus", initAudio, { once: true });
 
+let _draftTimer = null;
+$("message-input")?.addEventListener("input", () => {
+  clearTimeout(_draftTimer);
+  _draftTimer = setTimeout(() => { if (S.activeRoom) saveDraft(S.activeRoom, $("message-input").value); }, 600);
+});
+
 $("message-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const input = $("message-input");
@@ -1709,6 +1734,7 @@ $("message-form")?.addEventListener("submit", async (e) => {
   if (!msg || !S.activeRoom) return;
   input.value = "";
   resizeMessageField();
+  saveDraft(S.activeRoom, "");
   const body = { message: msg };
   if (replyTarget) { body.replyTo = replyTarget; replyTarget = null; $("reply-bar").style.display = "none"; }
   try {
