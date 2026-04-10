@@ -1876,39 +1876,60 @@ $("chat-header-main")?.addEventListener("click", () => {
   $("ri-creator").textContent = room.createdByName || room.createdBy || "Unknown";
   $("ri-date").textContent = formatDate(room.createdAt);
 
-  const memberList = $('ri-member-list');
-  memberList.innerHTML = "";
-  let memberCount = 0;
-  if (room.isDM && room.dmWith) {
-    const dmId = room.dmWith;
-    const dmProfile = S.peerProfiles[dmId] || {};
-    const dmName = dmProfile.username || room.name || dmId;
-    const dmAv = dmProfile.avatar || room.avatar || null;
-    const isOn = S.onlinePeers.has(dmId);
-    const row = document.createElement("div");
-    row.className = "member-row";
-    row.innerHTML = `<img src="${esc(avatar(dmName, 22, dmAv))}" /><span>${esc(dmName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
-    row.style.cursor = "pointer";
-    row.addEventListener("click", () => { closeAllModals(); showUserInfo(dmId, dmName); });
-    memberList.appendChild(row);
-    memberCount = 1;
-  } else {
-    const members = room.members || {};
-    memberCount = Object.keys(members).length;
-    for (const [id, m] of Object.entries(members)) {
-      const row = document.createElement("div");
-      row.className = "member-row";
-      const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
-      const memberAvatar = S.peerProfiles[id]?.avatar || m.avatar || null;
-      const memberName = S.peerProfiles[id]?.username || m.username || id;
-      row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
-      row.style.cursor = "pointer";
-      row.addEventListener("click", () => { closeAllModals(); showUserInfo(id, memberName); });
-      memberList.appendChild(row);
+  const renderMemberList = (searchQuery = "") => {
+    const memberList = $('ri-member-list');
+    memberList.innerHTML = "";
+    let memberCount = 0;
+    const query = searchQuery.toLowerCase().trim();
+    
+    if (room.isDM && room.dmWith) {
+      const dmId = room.dmWith;
+      const dmProfile = S.peerProfiles[dmId] || {};
+      const dmName = dmProfile.username || room.name || dmId;
+      if (!query || dmName.toLowerCase().includes(query)) {
+        const dmAv = dmProfile.avatar || room.avatar || null;
+        const isOn = S.onlinePeers.has(dmId);
+        const row = document.createElement("div");
+        row.className = "member-row";
+        row.innerHTML = `<img src="${esc(avatar(dmName, 22, dmAv))}" /><span>${esc(dmName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
+        row.style.cursor = "pointer";
+        row.addEventListener("click", () => { closeAllModals(); showUserInfo(dmId, dmName); });
+        memberList.appendChild(row);
+      }
+      memberCount = 1;
+    } else {
+      const members = room.members || {};
+      memberCount = Object.keys(members).length;
+      for (const [id, m] of Object.entries(members)) {
+        const memberAvatar = S.peerProfiles[id]?.avatar || m.avatar || null;
+        const memberName = S.peerProfiles[id]?.username || m.username || id;
+        if (!query || memberName.toLowerCase().includes(query)) {
+          const row = document.createElement("div");
+          row.className = "member-row";
+          const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
+          row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
+          row.style.cursor = "pointer";
+          row.addEventListener("click", () => { closeAllModals(); showUserInfo(id, memberName); });
+          memberList.appendChild(row);
+        }
+      }
+    }
+    const countEl = $("ri-member-count");
+    if (countEl) countEl.textContent = `(${memberCount})`;
+  };
+  
+  renderMemberList();
+  
+  const searchInput = $("ri-member-search");
+  if (searchInput) {
+    searchInput.value = "";
+    if (room.isDM) {
+      searchInput.style.display = "none";
+    } else {
+      searchInput.style.display = "";
+      searchInput.oninput = (e) => renderMemberList(e.target.value);
     }
   }
-  const countEl = $("ri-member-count");
-  if (countEl) countEl.textContent = `(${memberCount})`;
 
   const keyRow = $("ri-copy-key").parentElement;
   if (PRE_JOINED_ROOM_KEY && S.activeRoom === PRE_JOINED_ROOM_KEY) {

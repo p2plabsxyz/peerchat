@@ -675,6 +675,20 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 .muted { color: var(--muted); font-size: 0.85rem; }
 .small { font-size: 0.75rem; }
 #ri-members { width: 100%; text-align: left; }
+#ri-member-search {
+  width: 100%;
+  padding: 6px 10px;
+  margin-top: 8px;
+  border: 1px solid var(--base02);
+  border-radius: 6px;
+  background: var(--base01);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+#ri-member-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 #ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 300px; overflow-y: auto; }
 .member-row {
   display: flex; align-items: center; gap: 8px;
