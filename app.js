@@ -1900,13 +1900,20 @@ $("chat-header-main")?.addEventListener("click", () => {
     } else {
       const members = room.members || {};
       memberCount = Object.keys(members).length;
-      for (const [id, m] of Object.entries(members)) {
-        const memberAvatar = S.peerProfiles[id]?.avatar || m.avatar || null;
+      const memberEntries = Object.entries(members).map(([id, m]) => {
+        const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
         const memberName = S.peerProfiles[id]?.username || m.username || id;
+        return { id, m, isOn, memberName };
+      }).sort((a, b) => {
+        if (a.isOn === b.isOn) return 0;
+        return a.isOn ? -1 : 1;
+      });
+      
+      for (const { id, m, isOn, memberName } of memberEntries) {
         if (!query || memberName.toLowerCase().includes(query)) {
           const row = document.createElement("div");
           row.className = "member-row";
-          const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
+          const memberAvatar = S.peerProfiles[id]?.avatar || m.avatar || null;
           row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
           row.style.cursor = "pointer";
           row.addEventListener("click", () => { closeAllModals(); showUserInfo(id, memberName); });
