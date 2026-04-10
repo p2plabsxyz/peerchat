@@ -738,13 +738,23 @@ async function init() {
   }
 }
 
+let _roomsLoaded = false;
 async function loadRooms() {
+  const prevRooms = _roomsLoaded ? S.rooms : null;
   const data = await chat.getRooms();
-  S.rooms = {};
   S.peerProfiles = data.peerProfiles || {};
   S.onlinePeers = new Set(data.onlinePeers || []);
   S.pendingDMs = data.pendingDMs || {};
-  for (const r of data.rooms) S.rooms[r.roomKey] = r;
+  const next = {};
+  for (const r of data.rooms) {
+    next[r.roomKey] = r;
+    if (prevRooms?.[r.roomKey]) {
+      next[r.roomKey].unreadCount = prevRooms[r.roomKey].unreadCount || 0;
+      next[r.roomKey].unreadMentions = prevRooms[r.roomKey].unreadMentions || 0;
+    }
+  }
+  S.rooms = next;
+  _roomsLoaded = true;
 }
 
 function showOnboarding() {
@@ -2348,7 +2358,7 @@ function openMediaViewer(src, type, hint) {
 }
 
 $("media-viewer")?.addEventListener("click", (e) => {
-  if (e.target.id === "media-viewer" || e.target.id === "media-viewer-close") {
+  if (e.target.id === "media-viewer" || e.target.closest("#media-viewer-close")) {
     $("media-viewer").classList.remove("open");
     $("media-viewer-body").innerHTML = "";
   }
