@@ -1878,6 +1878,7 @@ $("chat-header-main")?.addEventListener("click", () => {
 
   const memberList = $('ri-member-list');
   memberList.innerHTML = "";
+  let memberCount = 0;
   if (room.isDM && room.dmWith) {
     const dmId = room.dmWith;
     const dmProfile = S.peerProfiles[dmId] || {};
@@ -1890,8 +1891,10 @@ $("chat-header-main")?.addEventListener("click", () => {
     row.style.cursor = "pointer";
     row.addEventListener("click", () => { closeAllModals(); showUserInfo(dmId, dmName); });
     memberList.appendChild(row);
+    memberCount = 1;
   } else {
     const members = room.members || {};
+    memberCount = Object.keys(members).length;
     for (const [id, m] of Object.entries(members)) {
       const row = document.createElement("div");
       row.className = "member-row";
@@ -1904,6 +1907,8 @@ $("chat-header-main")?.addEventListener("click", () => {
       memberList.appendChild(row);
     }
   }
+  const countEl = $("ri-member-count");
+  if (countEl) countEl.textContent = `(${memberCount})`;
 
   const keyRow = $("ri-copy-key").parentElement;
   if (PRE_JOINED_ROOM_KEY && S.activeRoom === PRE_JOINED_ROOM_KEY) {
