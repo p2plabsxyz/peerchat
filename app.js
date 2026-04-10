@@ -30,6 +30,7 @@ let _dmiRoomKey = null;
 let driveUrl = null;
 let draftDriveUrl = null;
 const DRAFT_STORAGE_KEY = "peerchat-msg-drafts";
+const ACTIVE_ROOM_KEY = "peerchat-active-room";
 function saveDraft(roomKey, text) {
   try {
     const drafts = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) || "{}");
@@ -801,9 +802,12 @@ function showApp() {
   renderRoomList();
   initAudio();
   resizeMessageField();
-  if (S.activeRoom && S.rooms[S.activeRoom]) {
-    openRoom(S.activeRoom);
-  }
+  try {
+    const savedRoom = localStorage.getItem(ACTIVE_ROOM_KEY);
+    if (savedRoom && S.rooms[savedRoom]) {
+      openRoom(savedRoom);
+    }
+  } catch {}
 }
 
 function resizeMessageField() {
@@ -951,6 +955,7 @@ async function openRoom(roomKey) {
     if (input) saveDraft(prevRoom, input.value);
   }
   S.activeRoom = roomKey;
+  try { localStorage.setItem(ACTIVE_ROOM_KEY, roomKey); } catch {}
   const room = S.rooms[roomKey];
   if (!room) return;
 
@@ -1354,8 +1359,9 @@ async function refreshActiveRoom() {
       const { messages: fresh } = await chat.getHistory(S.activeRoom);
       const _existing = S.messages[S.activeRoom] || [];
       if (fresh && fresh.length > _existing.length) {
+        const firstRender = _existing.length === 0;
         S.messages[S.activeRoom] = extractReactions(S.activeRoom, mergeWithHistory(_existing, fresh));
-        renderMessages(S.activeRoom, false);
+        renderMessages(S.activeRoom, firstRender);
       }
       updateRoomPeerCount(S.activeRoom);
     }
