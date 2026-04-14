@@ -960,6 +960,8 @@ async function openRoom(roomKey) {
   if (!room) return;
 
   resetMessageSearch();
+  replyTarget = null;
+  $("reply-bar").style.display = "none";
 
   // Capture unread state before clearing for "New Messages" divider
   const hasUnread = (room.unreadCount || 0) > 0;
