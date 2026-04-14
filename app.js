@@ -386,13 +386,15 @@ function linkify(text, msg) {
   if (/^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed) && isHyperFileUrl(trimmed)) {
     return fileAttachHtml(trimmed, msg?.fileName, msg?.fileSize);
   }
-  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+/gi;
+  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) parts.push(mentionizeEscapedPlain(esc(text.slice(last, m.index))));
     const url = m[0];
-    if (isImageFile(url)) {
+    if (url.includes('@') && !url.includes('://')) {
+      parts.push(`<a href="mailto:${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
+    } else if (isImageFile(url)) {
       parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
     } else if (isVideoFile(url)) {
       parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
