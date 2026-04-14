@@ -2435,4 +2435,26 @@ document.addEventListener("click", (e) => {
   }
 });
 
+// Scroll-to-bottom button logic
+const scrollBtn = $("scroll-to-bottom");
+const messagesContainer = $("messages");
+
+if (messagesContainer && scrollBtn) {
+  messagesContainer.addEventListener("scroll", () => {
+    const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    // Show button if scrolled up more than 300px from bottom
+    if (distanceFromBottom > 300) {
+      scrollBtn.style.display = "flex";
+    } else {
+      scrollBtn.style.display = "none";
+    }
+  });
+
+  scrollBtn.addEventListener("click", () => {
+    messagesContainer.scrollTo({ top: messagesContainer.scrollHeight + 1000, behavior: "smooth" });
+    scrollBtn.style.display = "none";
+  });
+}
+
 init();

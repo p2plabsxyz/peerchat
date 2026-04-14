@@ -335,6 +335,35 @@ html, body {
 #messages::-webkit-scrollbar { width: 5px; }
 #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
+.scroll-to-bottom {
+  position: absolute;
+  bottom: 5rem;
+  right: 1.5rem;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--bg);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+.scroll-to-bottom:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.scroll-to-bottom:active {
+  transform: scale(0.95);
+}
+.scroll-to-bottom img {
+  filter: brightness(0) invert(1);
+}
+
 /* Messages */
 .message {
   display: flex; flex-direction: column;
