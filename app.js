@@ -30,6 +30,7 @@ let _dmiRoomKey = null;
 let driveUrl = null;
 let draftDriveUrl = null;
 const DRAFT_STORAGE_KEY = "peerchat-msg-drafts";
+const ACTIVE_ROOM_KEY = "peerchat-active-room";
 function saveDraft(roomKey, text) {
   try {
     const drafts = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY) || "{}");
@@ -385,13 +386,15 @@ function linkify(text, msg) {
   if (/^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed) && isHyperFileUrl(trimmed)) {
     return fileAttachHtml(trimmed, msg?.fileName, msg?.fileSize);
   }
-  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+/gi;
+  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) parts.push(mentionizeEscapedPlain(esc(text.slice(last, m.index))));
     const url = m[0];
-    if (isImageFile(url)) {
+    if (url.includes('@') && !url.includes('://')) {
+      parts.push(`<a href="mailto:${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
+    } else if (isImageFile(url)) {
       parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
     } else if (isVideoFile(url)) {
       parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
@@ -738,13 +741,23 @@ async function init() {
   }
 }
 
+let _roomsLoaded = false;
 async function loadRooms() {
+  const prevRooms = _roomsLoaded ? S.rooms : null;
   const data = await chat.getRooms();
-  S.rooms = {};
   S.peerProfiles = data.peerProfiles || {};
   S.onlinePeers = new Set(data.onlinePeers || []);
   S.pendingDMs = data.pendingDMs || {};
-  for (const r of data.rooms) S.rooms[r.roomKey] = r;
+  const next = {};
+  for (const r of data.rooms) {
+    next[r.roomKey] = r;
+    if (prevRooms?.[r.roomKey]) {
+      next[r.roomKey].unreadCount = prevRooms[r.roomKey].unreadCount || 0;
+      next[r.roomKey].unreadMentions = prevRooms[r.roomKey].unreadMentions || 0;
+    }
+  }
+  S.rooms = next;
+  _roomsLoaded = true;
 }
 
 function showOnboarding() {
@@ -791,9 +804,12 @@ function showApp() {
   renderRoomList();
   initAudio();
   resizeMessageField();
-  if (S.activeRoom && S.rooms[S.activeRoom]) {
-    openRoom(S.activeRoom);
-  }
+  try {
+    const savedRoom = localStorage.getItem(ACTIVE_ROOM_KEY);
+    if (savedRoom && S.rooms[savedRoom]) {
+      openRoom(savedRoom);
+    }
+  } catch {}
 }
 
 function resizeMessageField() {
@@ -941,10 +957,13 @@ async function openRoom(roomKey) {
     if (input) saveDraft(prevRoom, input.value);
   }
   S.activeRoom = roomKey;
+  try { localStorage.setItem(ACTIVE_ROOM_KEY, roomKey); } catch {}
   const room = S.rooms[roomKey];
   if (!room) return;
 
   resetMessageSearch();
+  replyTarget = null;
+  $("reply-bar").style.display = "none";
 
   // Capture unread state before clearing for "New Messages" divider
   const hasUnread = (room.unreadCount || 0) > 0;
@@ -1344,8 +1363,9 @@ async function refreshActiveRoom() {
       const { messages: fresh } = await chat.getHistory(S.activeRoom);
       const _existing = S.messages[S.activeRoom] || [];
       if (fresh && fresh.length > _existing.length) {
+        const firstRender = _existing.length === 0;
         S.messages[S.activeRoom] = extractReactions(S.activeRoom, mergeWithHistory(_existing, fresh));
-        renderMessages(S.activeRoom, false);
+        renderMessages(S.activeRoom, firstRender);
       }
       updateRoomPeerCount(S.activeRoom);
     }
@@ -2348,7 +2368,7 @@ function openMediaViewer(src, type, hint) {
 }
 
 $("media-viewer")?.addEventListener("click", (e) => {
-  if (e.target.id === "media-viewer" || e.target.id === "media-viewer-close") {
+  if (e.target.id === "media-viewer" || e.target.closest("#media-viewer-close")) {
     $("media-viewer").classList.remove("open");
     $("media-viewer-body").innerHTML = "";
   }
@@ -2414,5 +2434,27 @@ document.addEventListener("click", (e) => {
     openMediaViewer(_blobToDataCache.get(av.src) || av.src, "image", avHint);
   }
 });
+
+// Scroll-to-bottom button logic
+const scrollBtn = $("scroll-to-bottom");
+const messagesContainer = $("messages");
+
+if (messagesContainer && scrollBtn) {
+  messagesContainer.addEventListener("scroll", () => {
+    const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    // Show button if scrolled up more than 300px from bottom
+    if (distanceFromBottom > 300) {
+      scrollBtn.style.display = "flex";
+    } else {
+      scrollBtn.style.display = "none";
+    }
+  });
+
+  scrollBtn.addEventListener("click", () => {
+    messagesContainer.scrollTo({ top: messagesContainer.scrollHeight + 1000, behavior: "smooth" });
+    scrollBtn.style.display = "none";
+  });
+}
 
 init();
