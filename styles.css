@@ -719,7 +719,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   outline: none;
   border-color: var(--accent);
 }
-#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 300px; overflow-y: auto; }
+#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 200px; overflow-y: auto; }
 .member-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 0.8rem; padding: 4px 0;
