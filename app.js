@@ -797,9 +797,9 @@ $("onboard-submit")?.addEventListener("click", async () => {
       await chat.joinRoom(PRE_JOINED_ROOM_KEY).catch(() => {});
       await loadRooms();
       const lower = username.toLowerCase();
-      const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) => S.onlinePeers.has(id) && p.username?.toLowerCase() === lower);
+      const profileTaken = Object.values(S.peerProfiles).some(p => p.username?.toLowerCase() === lower);
       const preRoom = S.rooms[PRE_JOINED_ROOM_KEY];
-      const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) => S.onlinePeers.has(id) && m.username?.toLowerCase() === lower);
+      const memberTaken = preRoom && Object.values(preRoom.members || {}).some(m => m.username?.toLowerCase() === lower);
       if (profileTaken || memberTaken) {
         alert("Username is already taken. Please choose a different one.");
         return;
@@ -2161,12 +2161,14 @@ $("settings-form")?.addEventListener("submit", async (e) => {
   if (oldUsername?.toLowerCase() !== lower) {
     try { await loadRooms(); } catch (_) {}
     cleanupStaleSelfEntries();
+    const isSelfStale = (id) => id !== S.profile?.id && !S.onlinePeers.has(id) &&
+      (S.peerProfiles[id]?.username || "").toLowerCase() === oldUsername?.toLowerCase();
     const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) =>
-      id !== S.profile?.id && S.onlinePeers.has(id) && p.username?.toLowerCase() === lower
+      id !== S.profile?.id && !isSelfStale(id) && p.username?.toLowerCase() === lower
     );
     const preRoom = PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY];
     const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) =>
-      id !== S.profile?.id && S.onlinePeers.has(id) && m.username?.toLowerCase() === lower
+      id !== S.profile?.id && !isSelfStale(id) && m.username?.toLowerCase() === lower
     );
     if (profileTaken || memberTaken) {
       alert("Username is already taken. Please choose a different one.");
