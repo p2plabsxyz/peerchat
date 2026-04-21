@@ -730,6 +730,7 @@ async function init() {
     S.profile = profile;
     S.settings.notifications = profile.notifications ?? true;
     await loadRooms();
+    cleanupStaleSelfEntries();
     showApp();
     connectGlobalSSE();
     getDriveUrl().catch(() => {});
@@ -760,6 +761,22 @@ async function loadRooms() {
   _roomsLoaded = true;
 }
 
+function cleanupStaleSelfEntries() {
+  const myId = S.profile?.id;
+  if (!myId) return;
+  const myAvatar = S.profile?.avatar;
+  for (const room of Object.values(S.rooms)) {
+    if (!room.members?.[myId]) continue;
+    for (const [id, m] of Object.entries(room.members)) {
+      if (id === myId || S.onlinePeers.has(id)) continue;
+      const peerAvatar = S.peerProfiles[id]?.avatar || m.avatar;
+      if (myAvatar && peerAvatar && myAvatar === peerAvatar) {
+        delete room.members[id];
+      }
+    }
+  }
+}
+
 function showOnboarding() {
   $("onboarding")?.removeAttribute("hidden");
   $("app")?.setAttribute("hidden", "");
@@ -776,13 +793,22 @@ $("onboard-submit")?.addEventListener("click", async () => {
     btn.textContent = "Loading…";
   }
   try {
+    if (PRE_JOINED_ROOM_KEY && !/^0+$/.test(PRE_JOINED_ROOM_KEY)) {
+      await chat.joinRoom(PRE_JOINED_ROOM_KEY).catch(() => {});
+      await loadRooms();
+      const lower = username.toLowerCase();
+      const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) => S.onlinePeers.has(id) && p.username?.toLowerCase() === lower);
+      const preRoom = S.rooms[PRE_JOINED_ROOM_KEY];
+      const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) => S.onlinePeers.has(id) && m.username?.toLowerCase() === lower);
+      if (profileTaken || memberTaken) {
+        alert("Username is already taken. Please choose a different one.");
+        return;
+      }
+    }
     const { profile } = await chat.saveProfile({ username, bio: $("onboard-bio").value.trim() });
     S.profile = profile;
     S.settings.sounds = true;
     S.settings.notifications = profile.notifications ?? true;
-    if (PRE_JOINED_ROOM_KEY && !/^0+$/.test(PRE_JOINED_ROOM_KEY)) {
-      await chat.joinRoom(PRE_JOINED_ROOM_KEY).catch(() => {});
-    }
     await loadRooms();
     showApp();
     connectGlobalSSE();
@@ -2127,6 +2153,23 @@ $("settings-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const username = validateUsernameOrAlert($("set-username").value);
   if (!username) return;
+  const oldUsername = S.profile?.username;
+  const lower = username.toLowerCase();
+  if (oldUsername?.toLowerCase() !== lower) {
+    try { await loadRooms(); } catch (_) {}
+    cleanupStaleSelfEntries();
+    const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) =>
+      id !== S.profile?.id && S.onlinePeers.has(id) && p.username?.toLowerCase() === lower
+    );
+    const preRoom = PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY];
+    const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) =>
+      id !== S.profile?.id && S.onlinePeers.has(id) && m.username?.toLowerCase() === lower
+    );
+    if (profileTaken || memberTaken) {
+      alert("Username is already taken. Please choose a different one.");
+      return;
+    }
+  }
   try {
     const sounds = $("set-sounds").checked;
     const notifications = $("set-notifications").checked;
@@ -2136,6 +2179,19 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     S.profile = profile;
     S.settings.sounds = sounds;
     S.settings.notifications = notifications;
+    if (oldUsername && oldUsername.toLowerCase() !== username.toLowerCase()) {
+      for (const room of Object.values(S.rooms)) {
+        if (!room.members) continue;
+        for (const [id, m] of Object.entries(room.members)) {
+          if (id === S.profile.id) {
+            m.username = username;
+          } else if (m.username?.toLowerCase() === oldUsername.toLowerCase() && !S.onlinePeers.has(id)) {
+            delete room.members[id];
+          }
+        }
+      }
+    }
+    cleanupStaleSelfEntries();
     $("sidebar-avatar").src = avatar(username, 32, profile.avatar);
     $("sidebar-username").textContent = username;
     pendingAvatar = null;
