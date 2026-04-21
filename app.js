@@ -1941,15 +1941,20 @@ $("chat-header-main")?.addEventListener("click", () => {
       memberCount = 1;
     } else {
       const members = room.members || {};
-      memberCount = Object.keys(members).length;
-      const memberEntries = Object.entries(members).map(([id, m]) => {
+      const seen = new Map();
+      for (const [id, m] of Object.entries(members)) {
         const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
         const memberName = S.peerProfiles[id]?.username || m.username || id;
-        return { id, m, isOn, memberName };
-      }).sort((a, b) => {
+        const existing = seen.get(memberName);
+        if (!existing || (isOn && !existing.isOn)) {
+          seen.set(memberName, { id, m, isOn, memberName });
+        }
+      }
+      const memberEntries = [...seen.values()].sort((a, b) => {
         if (a.isOn === b.isOn) return 0;
         return a.isOn ? -1 : 1;
       });
+      memberCount = memberEntries.length;
       
       for (const { id, m, isOn, memberName } of memberEntries) {
         if (!query || memberName.toLowerCase().includes(query)) {
