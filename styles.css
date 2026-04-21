@@ -523,6 +523,7 @@ html, body {
   border-radius: 8px; max-height: 180px; overflow-y: auto;
   box-shadow: 0 -3px 12px color-mix(in srgb, var(--browser-theme-text-color) 20%, var(--surface-mix));
   margin-bottom: 4px;
+  z-index: 10;
 }
 .mention-popup.open { display: block; }
 
