@@ -810,6 +810,9 @@ $("onboard-submit")?.addEventListener("click", async () => {
     S.settings.sounds = true;
     S.settings.notifications = profile.notifications ?? true;
     await loadRooms();
+    if (PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY]) {
+      S.rooms[PRE_JOINED_ROOM_KEY].lastMessage = null;
+    }
     showApp();
     connectGlobalSSE();
   } catch (err) {
