@@ -2018,8 +2018,7 @@ $("chat-header-main")?.addEventListener("click", () => {
   if (PRE_JOINED_ROOM_KEY && S.activeRoom === PRE_JOINED_ROOM_KEY) {
     keyRow.style.display = "none";
   } else if (room.isDM) {
-    const dmPeerOnline = room.dmWith && S.onlinePeers.has(room.dmWith);
-    keyRow.style.display = dmPeerOnline ? "none" : "";
+    keyRow.style.display = "none";
   } else {
     keyRow.style.display = "";
   }
@@ -2212,9 +2211,9 @@ function showCtxMenu(e, roomKey) {
   menu.querySelector('[data-action="mute"]').textContent = room?.isMuted ? "Unmute" : "Mute";
   const copyBtn = menu.querySelector('[data-action="copy"]');
   if (copyBtn) {
-    const dmOnline = room?.isDM && room.dmWith && S.onlinePeers.has(room.dmWith);
+    const isDM = room?.isDM;
     const isPreJoined = PRE_JOINED_ROOM_KEY && roomKey === PRE_JOINED_ROOM_KEY;
-    copyBtn.style.display = (dmOnline || isPreJoined) ? "none" : "";
+    copyBtn.style.display = (isDM || isPreJoined) ? "none" : "";
   }
   menu.style.top = e.clientY + "px";
   menu.style.left = e.clientX + "px";
