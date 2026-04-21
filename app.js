@@ -1170,6 +1170,12 @@ function makeMsgEl(msg) {
     showReactPicker(reactTrigger, S.activeRoom, msg.id);
   });
   bubble.appendChild(reactTrigger);
+  
+  bubble.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showMsgMenu(e, msg);
+  });
+  
   el.appendChild(bubble);
 
   const rk = S.activeRoom;
@@ -1185,11 +1191,6 @@ function makeMsgEl(msg) {
   time.className = "msg-time";
   time.textContent = formatTime(msg.timestamp);
   el.appendChild(time);
-
-  el.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    showMsgMenu(e, msg);
-  });
 
   el.addEventListener("dblclick", (e) => {
     if (e.target.closest("a, .msg-file-attach-open, .msg-file-attach-dl-btn, .msg-reply-quote, img, video, button, .msg-react-trigger, .reaction-bubble")) return;
@@ -1210,10 +1211,26 @@ function scrollToMsg(id) {
 
 function showMsgMenu(e, msg) {
   const menu = $("msg-menu");
-  menu.style.top = e.clientY + "px";
-  menu.style.left = e.clientX + "px";
   menu.classList.add("open");
   menu._msg = msg;
+  
+  const menuRect = menu.getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  
+  let top = e.clientY;
+  let left = e.clientX;
+  
+  if (left + menuRect.width > viewportWidth) {
+    left = viewportWidth - menuRect.width - 10;
+  }
+  
+  if (top + menuRect.height > viewportHeight) {
+    top = viewportHeight - menuRect.height - 10;
+  }
+  
+  menu.style.top = top + "px";
+  menu.style.left = left + "px";
 }
 
 $("msg-menu")?.addEventListener("click", (e) => {
