@@ -1237,8 +1237,13 @@ $("msg-menu")?.addEventListener("click", (e) => {
   const action = e.target.dataset.action;
   const menu = $("msg-menu");
   const msg = menu._msg;
+  const menuRect = menu.getBoundingClientRect();
   menu.classList.remove("open");
   if (!action || !msg) return;
+  if (action === "react") {
+    const anchor = { getBoundingClientRect: () => ({ top: menuRect.top, left: menuRect.left, right: menuRect.right, bottom: menuRect.bottom }) };
+    showReactPicker(anchor, S.activeRoom, msg.id);
+  }
   if (action === "reply") setReply(msg);
   if (action === "copy-msg") copyText(msg.message);
   if (action === "info") showMsgInfo(e, msg);
