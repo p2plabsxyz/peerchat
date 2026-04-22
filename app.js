@@ -730,6 +730,7 @@ async function init() {
     S.profile = profile;
     S.settings.notifications = profile.notifications ?? true;
     await loadRooms();
+    cleanupStaleSelfEntries();
     showApp();
     connectGlobalSSE();
     getDriveUrl().catch(() => {});
@@ -760,6 +761,22 @@ async function loadRooms() {
   _roomsLoaded = true;
 }
 
+function cleanupStaleSelfEntries() {
+  const myId = S.profile?.id;
+  if (!myId) return;
+  const myAvatar = S.profile?.avatar;
+  for (const room of Object.values(S.rooms)) {
+    if (!room.members?.[myId]) continue;
+    for (const [id, m] of Object.entries(room.members)) {
+      if (id === myId || S.onlinePeers.has(id)) continue;
+      const peerAvatar = S.peerProfiles[id]?.avatar || m.avatar;
+      if (myAvatar && peerAvatar && myAvatar === peerAvatar) {
+        delete room.members[id];
+      }
+    }
+  }
+}
+
 function showOnboarding() {
   $("onboarding")?.removeAttribute("hidden");
   $("app")?.setAttribute("hidden", "");
@@ -776,14 +793,26 @@ $("onboard-submit")?.addEventListener("click", async () => {
     btn.textContent = "Loading…";
   }
   try {
+    if (PRE_JOINED_ROOM_KEY && !/^0+$/.test(PRE_JOINED_ROOM_KEY)) {
+      await chat.joinRoom(PRE_JOINED_ROOM_KEY).catch(() => {});
+      await loadRooms();
+      const lower = username.toLowerCase();
+      const profileTaken = Object.values(S.peerProfiles).some(p => p.username?.toLowerCase() === lower);
+      const preRoom = S.rooms[PRE_JOINED_ROOM_KEY];
+      const memberTaken = preRoom && Object.values(preRoom.members || {}).some(m => m.username?.toLowerCase() === lower);
+      if (profileTaken || memberTaken) {
+        alert("Username is already taken. Please choose a different one.");
+        return;
+      }
+    }
     const { profile } = await chat.saveProfile({ username, bio: $("onboard-bio").value.trim() });
     S.profile = profile;
     S.settings.sounds = true;
     S.settings.notifications = profile.notifications ?? true;
-    if (PRE_JOINED_ROOM_KEY && !/^0+$/.test(PRE_JOINED_ROOM_KEY)) {
-      await chat.joinRoom(PRE_JOINED_ROOM_KEY).catch(() => {});
-    }
     await loadRooms();
+    if (PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY]) {
+      S.rooms[PRE_JOINED_ROOM_KEY].lastMessage = null;
+    }
     showApp();
     connectGlobalSSE();
   } catch (err) {
@@ -1170,6 +1199,12 @@ function makeMsgEl(msg) {
     showReactPicker(reactTrigger, S.activeRoom, msg.id);
   });
   bubble.appendChild(reactTrigger);
+  
+  bubble.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showMsgMenu(e, msg);
+  });
+  
   el.appendChild(bubble);
 
   const rk = S.activeRoom;
@@ -1185,11 +1220,6 @@ function makeMsgEl(msg) {
   time.className = "msg-time";
   time.textContent = formatTime(msg.timestamp);
   el.appendChild(time);
-
-  el.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    showMsgMenu(e, msg);
-  });
 
   el.addEventListener("dblclick", (e) => {
     if (e.target.closest("a, .msg-file-attach-open, .msg-file-attach-dl-btn, .msg-reply-quote, img, video, button, .msg-react-trigger, .reaction-bubble")) return;
@@ -1210,18 +1240,39 @@ function scrollToMsg(id) {
 
 function showMsgMenu(e, msg) {
   const menu = $("msg-menu");
-  menu.style.top = e.clientY + "px";
-  menu.style.left = e.clientX + "px";
   menu.classList.add("open");
   menu._msg = msg;
+  
+  const menuRect = menu.getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  
+  let top = e.clientY;
+  let left = e.clientX;
+  
+  if (left + menuRect.width > viewportWidth) {
+    left = viewportWidth - menuRect.width - 10;
+  }
+  
+  if (top + menuRect.height > viewportHeight) {
+    top = viewportHeight - menuRect.height - 10;
+  }
+  
+  menu.style.top = top + "px";
+  menu.style.left = left + "px";
 }
 
 $("msg-menu")?.addEventListener("click", (e) => {
   const action = e.target.dataset.action;
   const menu = $("msg-menu");
   const msg = menu._msg;
+  const menuRect = menu.getBoundingClientRect();
   menu.classList.remove("open");
   if (!action || !msg) return;
+  if (action === "react") {
+    const anchor = { getBoundingClientRect: () => ({ top: menuRect.top, left: menuRect.left, right: menuRect.right, bottom: menuRect.bottom }) };
+    showReactPicker(anchor, S.activeRoom, msg.id);
+  }
   if (action === "reply") setReply(msg);
   if (action === "copy-msg") copyText(msg.message);
   if (action === "info") showMsgInfo(e, msg);
@@ -1494,16 +1545,16 @@ function connectGlobalSSE() {
         room = S.rooms[data.roomKey];
       }
 
-      // Preserve unread counts for the active room (managed locally)
+      // Preserve locally-managed state (unread counts and lastMessage)
       const prevUnread = room.unreadCount;
       const prevMentions = room.unreadMentions;
+      const prevLastMessage = room.lastMessage;
 
       Object.assign(room, data);
 
-      if (data.roomKey === S.activeRoom) {
-        room.unreadCount = prevUnread;
-        room.unreadMentions = prevMentions;
-      }
+      room.unreadCount = prevUnread;
+      room.unreadMentions = prevMentions;
+      if (prevLastMessage) room.lastMessage = prevLastMessage;
 
       renderRoomList();
 
@@ -1919,15 +1970,20 @@ $("chat-header-main")?.addEventListener("click", () => {
       memberCount = 1;
     } else {
       const members = room.members || {};
-      memberCount = Object.keys(members).length;
-      const memberEntries = Object.entries(members).map(([id, m]) => {
+      const seen = new Map();
+      for (const [id, m] of Object.entries(members)) {
         const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
         const memberName = S.peerProfiles[id]?.username || m.username || id;
-        return { id, m, isOn, memberName };
-      }).sort((a, b) => {
+        const existing = seen.get(memberName);
+        if (!existing || (isOn && !existing.isOn)) {
+          seen.set(memberName, { id, m, isOn, memberName });
+        }
+      }
+      const memberEntries = [...seen.values()].sort((a, b) => {
         if (a.isOn === b.isOn) return 0;
         return a.isOn ? -1 : 1;
       });
+      memberCount = memberEntries.length;
       
       for (const { id, m, isOn, memberName } of memberEntries) {
         if (!query || memberName.toLowerCase().includes(query)) {
@@ -1962,8 +2018,7 @@ $("chat-header-main")?.addEventListener("click", () => {
   if (PRE_JOINED_ROOM_KEY && S.activeRoom === PRE_JOINED_ROOM_KEY) {
     keyRow.style.display = "none";
   } else if (room.isDM) {
-    const dmPeerOnline = room.dmWith && S.onlinePeers.has(room.dmWith);
-    keyRow.style.display = dmPeerOnline ? "none" : "";
+    keyRow.style.display = "none";
   } else {
     keyRow.style.display = "";
   }
@@ -2017,7 +2072,7 @@ async function openDM(peerId, peerUsername) {
     const roomKey = await dmRoomKey(myId, peerId);
     closeAllModals();
     if (S.rooms[roomKey]) {
-      openRoom(roomKey);
+      await openRoom(roomKey);
       return;
     }
     const peer = S.peerProfiles[peerId];
@@ -2038,7 +2093,7 @@ async function openDM(peerId, peerUsername) {
       delete S.pendingDMs?.[result.roomKey];
       await loadRooms();
       renderRoomList();
-      openRoom(result.roomKey);
+      await openRoom(result.roomKey);
     }
   } catch (err) {
     console.error("[chat] DM error:", err);
@@ -2056,7 +2111,7 @@ async function acceptDM(roomKey) {
       delete S.pendingDMs?.[result.roomKey];
       await loadRooms();
       renderRoomList();
-      openRoom(result.roomKey);
+      await openRoom(result.roomKey);
       refreshRoomHeader(result.roomKey);
     }
   } catch (err) {
@@ -2100,6 +2155,25 @@ $("settings-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const username = validateUsernameOrAlert($("set-username").value);
   if (!username) return;
+  const oldUsername = S.profile?.username;
+  const lower = username.toLowerCase();
+  if (oldUsername?.toLowerCase() !== lower) {
+    try { await loadRooms(); } catch (_) {}
+    cleanupStaleSelfEntries();
+    const isSelfStale = (id) => id !== S.profile?.id && !S.onlinePeers.has(id) &&
+      (S.peerProfiles[id]?.username || "").toLowerCase() === oldUsername?.toLowerCase();
+    const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) =>
+      id !== S.profile?.id && !isSelfStale(id) && p.username?.toLowerCase() === lower
+    );
+    const preRoom = PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY];
+    const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) =>
+      id !== S.profile?.id && !isSelfStale(id) && m.username?.toLowerCase() === lower
+    );
+    if (profileTaken || memberTaken) {
+      alert("Username is already taken. Please choose a different one.");
+      return;
+    }
+  }
   try {
     const sounds = $("set-sounds").checked;
     const notifications = $("set-notifications").checked;
@@ -2109,6 +2183,19 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     S.profile = profile;
     S.settings.sounds = sounds;
     S.settings.notifications = notifications;
+    if (oldUsername && oldUsername.toLowerCase() !== username.toLowerCase()) {
+      for (const room of Object.values(S.rooms)) {
+        if (!room.members) continue;
+        for (const [id, m] of Object.entries(room.members)) {
+          if (id === S.profile.id) {
+            m.username = username;
+          } else if (m.username?.toLowerCase() === oldUsername.toLowerCase() && !S.onlinePeers.has(id)) {
+            delete room.members[id];
+          }
+        }
+      }
+    }
+    cleanupStaleSelfEntries();
     $("sidebar-avatar").src = avatar(username, 32, profile.avatar);
     $("sidebar-username").textContent = username;
     pendingAvatar = null;
@@ -2124,9 +2211,9 @@ function showCtxMenu(e, roomKey) {
   menu.querySelector('[data-action="mute"]').textContent = room?.isMuted ? "Unmute" : "Mute";
   const copyBtn = menu.querySelector('[data-action="copy"]');
   if (copyBtn) {
-    const dmOnline = room?.isDM && room.dmWith && S.onlinePeers.has(room.dmWith);
+    const isDM = room?.isDM;
     const isPreJoined = PRE_JOINED_ROOM_KEY && roomKey === PRE_JOINED_ROOM_KEY;
-    copyBtn.style.display = (dmOnline || isPreJoined) ? "none" : "";
+    copyBtn.style.display = (isDM || isPreJoined) ? "none" : "";
   }
   menu.style.top = e.clientY + "px";
   menu.style.left = e.clientX + "px";

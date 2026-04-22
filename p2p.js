@@ -643,7 +643,17 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "dm-invite") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             if (msg.toId && normPeerId(msg.toId) !== normPeerId(localId)) continue;
-            if (savedData.rooms[msg.roomKey]) continue;
+            if (savedData.rooms[msg.roomKey]) {
+              try {
+                conn.write(JSON.stringify({
+                  type: "dm-accept", roomKey: msg.roomKey,
+                  fromId: localId, fromUsername: savedData.profile?.username || localId,
+                  fromAvatar: savedData.profile?.avatar || null,
+                  fromBio: savedData.profile?.bio || "",
+                }) + "\n");
+              } catch {}
+              continue;
+            }
             const fromName = clamp(msg.fromUsername, MAX_NAME_LEN) || msg.fromId || "Unknown";
             const fromAvatar = sanitizeAvatar(msg.fromAvatar);
             const fromBio = clamp(msg.fromBio, MAX_BIO_LEN);
