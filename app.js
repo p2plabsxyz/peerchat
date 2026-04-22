@@ -1545,16 +1545,16 @@ function connectGlobalSSE() {
         room = S.rooms[data.roomKey];
       }
 
-      // Preserve unread counts for the active room (managed locally)
+      // Preserve locally-managed state (unread counts and lastMessage)
       const prevUnread = room.unreadCount;
       const prevMentions = room.unreadMentions;
+      const prevLastMessage = room.lastMessage;
 
       Object.assign(room, data);
 
-      if (data.roomKey === S.activeRoom) {
-        room.unreadCount = prevUnread;
-        room.unreadMentions = prevMentions;
-      }
+      room.unreadCount = prevUnread;
+      room.unreadMentions = prevMentions;
+      if (prevLastMessage) room.lastMessage = prevLastMessage;
 
       renderRoomList();
 
@@ -2072,7 +2072,7 @@ async function openDM(peerId, peerUsername) {
     const roomKey = await dmRoomKey(myId, peerId);
     closeAllModals();
     if (S.rooms[roomKey]) {
-      openRoom(roomKey);
+      await openRoom(roomKey);
       return;
     }
     const peer = S.peerProfiles[peerId];
@@ -2093,7 +2093,7 @@ async function openDM(peerId, peerUsername) {
       delete S.pendingDMs?.[result.roomKey];
       await loadRooms();
       renderRoomList();
-      openRoom(result.roomKey);
+      await openRoom(result.roomKey);
     }
   } catch (err) {
     console.error("[chat] DM error:", err);
@@ -2111,7 +2111,7 @@ async function acceptDM(roomKey) {
       delete S.pendingDMs?.[result.roomKey];
       await loadRooms();
       renderRoomList();
-      openRoom(result.roomKey);
+      await openRoom(result.roomKey);
       refreshRoomHeader(result.roomKey);
     }
   } catch (err) {
