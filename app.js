@@ -118,6 +118,16 @@ function dateLabelFor(ts) {
   return d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
 }
 
+function replyDisplayText(msg) {
+  const text = (msg.message || msg.text || "").trim();
+  if (msg.fileName) return "📎 " + msg.fileName;
+  if (/^hyper:\/\//i.test(text) && !/\s/.test(text)) {
+    const name = displayNameFromHyperPath(text);
+    if (name && name !== text) return "📎 " + name;
+  }
+  return text;
+}
+
 function displayNameFromHyperPath(url) {
   try {
     const u = url.replace(/\/+$/, "");
@@ -1180,7 +1190,8 @@ function makeMsgEl(msg) {
   if (msg.replyTo) {
     const quote = document.createElement("div");
     quote.className = "msg-reply-quote";
-    quote.innerHTML = `<div class="reply-author">${esc(msg.replyTo.sn || msg.replyTo.sender || "")}</div>${esc((msg.replyTo.text || "").slice(0, 120)).replace(/\n/g, "<br>")}`;
+    const quoteText = replyDisplayText(msg.replyTo);
+    quote.innerHTML = `<div class="reply-author">${esc(msg.replyTo.sn || msg.replyTo.sender || "")}</div>${esc(quoteText.slice(0, 120)).replace(/\n/g, "<br>")}`;
     quote.addEventListener("click", () => scrollToMsg(msg.replyTo.id));
     bubble.appendChild(quote);
   }
@@ -1300,8 +1311,9 @@ function showMsgInfo(e, msg) {
 function setReply(msg) {
   const displayName = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
   const actualName = msg.senderName || msg.sender;
-  replyTarget = { id: msg.id, sender: msg.sender, sn: actualName, text: msg.message };
-  $("reply-preview").innerHTML = `<span class="reply-author">${esc(displayName)}</span>${esc(msg.message.slice(0, 100))}`;
+  const replyText = replyDisplayText(msg);
+  replyTarget = { id: msg.id, sender: msg.sender, sn: actualName, text: replyText };
+  $("reply-preview").innerHTML = `<span class="reply-author">${esc(displayName)}</span>${esc(replyText.slice(0, 100))}`;
   $("reply-bar").style.display = "flex";
   $("message-input").focus();
 }
