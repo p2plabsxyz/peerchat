@@ -76,6 +76,21 @@ const ABUSE_PATTERNS = [
   /\bshoot\s*up\b/i,
   /\brape\s*(you|u|her|him|them)\b/i,
   /\bi('?ll|m\s*going\s*to)\s*(rape|murder|stalk)\b/i,
+  // Common profanity
+  /\bf+u+c+k+\b/i,
+  /\bfuck\s*(you|u|off|ing|er|ed)\b/i,
+  /\bsh[i1!]+t+\b/i,
+  /\bb[i1!]tch\b/i,
+  /\bass\s*hole\b/i,
+  /\bdamn\s*(you|it)\b/i,
+  /\bstfu\b/i,
+  /\bwtf\b/i,
+  /\bmotherf/i,
+  /\bdick\s*head\b/i,
+  /\bdouche\s*bag\b/i,
+  /\bwh[o0]re\b/i,
+  /\bslut\b/i,
+  /\bbastard\b/i,
 ];
 
 /**
@@ -107,6 +122,23 @@ const NSFW_PATTERNS = [
   /\bnude(?:s|z)\b/i,
   /\bnsfw\b/i,
   /\bdick\s*pic\b/i,
+  // Body / sexual terms
+  /\bboob(?:s|ies)?\b/i,
+  /\btit(?:s|ties)\b/i,
+  /\bdick\b/i,
+  /\bcock\b/i,
+  /\bpussy\b/i,
+  /\bass\b/i,
+  /\banus\b/i,
+  /\bsex(?:y|ual|ting)?\b/i,
+  /\berotic\b/i,
+  /\bfetish\b/i,
+  /\bstripper\b/i,
+  /\bhooker\b/i,
+  /\bprostitut/i,
+  /\bhorny\b/i,
+  /\bjerk\s*off\b/i,
+  /\bfap\b/i,
 ];
 
 /**
