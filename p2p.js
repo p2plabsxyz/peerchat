@@ -6,6 +6,10 @@ import {
   randomBytes,
 } from "crypto";
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import {
+  checkMessage as moderationCheck,
+  isKicked as moderationIsKicked,
+} from "./moderation.js";
 import b4a from "b4a";
 
 export const CHAT_STORAGE = "peersky-chat-rooms.json";
@@ -609,6 +613,8 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "join") {
             if (!msg.roomKey || !msg.peerId) continue;
+            // Block join if the peer is currently kicked from this room
+            if (moderationIsKicked(msg.peerId, msg.roomKey)) continue;
             const joinName = clamp(msg.username, 50) || msg.peerId;
             const room = savedData.rooms[msg.roomKey];
             const alreadyKnownMember = !!(room?.members?.[msg.peerId]?.joinedAt);
@@ -833,6 +839,33 @@ export function initChat(sdk, options = {}) {
 
           if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
           if (!trackId(msg.id)) continue;
+
+          // --- Moderation gate for incoming peer messages ---
+          try {
+            let plaintext = "";
+            if (msg.ct && msg.iv && msg.tag) {
+              try { plaintext = decryptMsg(msg.ct, msg.iv, msg.tag, msg.roomKey); } catch {}
+            }
+            const modResult = moderationCheck(remoteId, msg.roomKey, plaintext);
+            if (!modResult.allowed) {
+              const peerName = clamp(msg.sn, 50) || savedData.peerProfiles[remoteId]?.username || remoteId;
+              let sysText;
+              if (modResult.action === "kick") {
+                sysText = `\uD83D\uDEAB ${peerName} was auto-kicked (${modResult.reason})`;
+              } else if (modResult.action === "final-warn") {
+                sysText = `\uD83D\uDEA8 Final warning for ${peerName} (${modResult.reason})`;
+              } else {
+                sysText = `\u26A0\uFE0F ${peerName}: message filtered (${modResult.reason})`;
+              }
+              const sysId = `mod-${msg.id || Date.now()}-${Math.random().toString(36).slice(2)}`;
+              appendToFeed(msg.roomKey, { id: sysId, type: "system", text: sysText, ts: msg.ts || Date.now() }).catch(() => {});
+              continue;
+            }
+          } catch (modErr) {
+            console.warn("[chat] Moderation check error:", modErr.message);
+            // On error, allow the message through rather than silently dropping
+          }
+          // --- End moderation gate ---
 
           appendToFeed(msg.roomKey, {
             id: msg.id, sender: remoteId, sn: clamp(msg.sn, 50) || remoteId,
@@ -1062,6 +1095,13 @@ export async function handleChatRequest(req, sdk) {
         const body = await req.json();
         const message = clamp(body.message, MAX_MSG_LEN);
         if (!message) return respond(400, { error: "Empty message" });
+
+        // --- Moderation gate for outgoing messages ---
+        const modResult = moderationCheck(localId, roomKey, message);
+        if (!modResult.allowed) {
+          return respond(403, { error: `Message blocked: ${modResult.reason}`, moderation: true });
+        }
+        // --- End moderation gate ---
 
         const id = randomBytes(16).toString("hex");
         if (!trackId(id)) return respond(200, { message: "Duplicate" });

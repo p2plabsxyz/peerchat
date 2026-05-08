@@ -1340,6 +1340,19 @@ function appendSystemMsg(roomKey, text) {
   if (atBottom) container.scrollTop = container.scrollHeight;
 }
 
+function showModerationToast(message) {
+  // Remove any existing toast
+  document.querySelector(".moderation-toast")?.remove();
+  const toast = document.createElement("div");
+  toast.className = "moderation-toast";
+  toast.innerHTML = `<span class="moderation-toast-icon">⚠️</span><span class="moderation-toast-text">${esc(message)}</span><button type="button" class="moderation-toast-close" aria-label="Dismiss">&times;</button>`;
+  toast.querySelector(".moderation-toast-close").addEventListener("click", () => toast.remove());
+  const panel = $("chat-active") || document.body;
+  panel.appendChild(toast);
+  // Auto-dismiss after 6 seconds
+  setTimeout(() => { if (toast.parentNode) toast.remove(); }, 6000);
+}
+
 function appendMessage(roomKey, msg) {
   if (!chatMessageRenders(msg)) return false;
   if (!S.messages[roomKey]) S.messages[roomKey] = [];
@@ -1815,6 +1828,7 @@ $("message-form")?.addEventListener("submit", async (e) => {
   const input = $("message-input");
   const msg = input.value.trim();
   if (!msg || !S.activeRoom) return;
+  const savedMsg = msg;
   input.value = "";
   resizeMessageField();
   saveDraft(S.activeRoom, "");
@@ -1824,7 +1838,16 @@ $("message-form")?.addEventListener("submit", async (e) => {
     const resp = await chat.sendMessage(S.activeRoom, body);
     if (resp.sent) appendMessage(S.activeRoom, resp.sent);
     playSound("send");
-  } catch (err) { console.error("Send failed:", err); }
+  } catch (err) {
+    console.error("Send failed:", err);
+    // Check for moderation block (403)
+    if (err.message && err.message.includes("Message blocked")) {
+      input.value = savedMsg;
+      resizeMessageField();
+      saveDraft(S.activeRoom, savedMsg);
+      showModerationToast(err.message);
+    }
+  }
 });
 
 function buildMentionPopup() {
