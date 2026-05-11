@@ -17,11 +17,16 @@ async function apiRequest(action, opts = {}) {
   const res = await fetch(`${API}${qs}`, init);
   if (!res.ok) {
     let errMsg = `${action}: ${res.statusText}`;
+    let errBody = null;
     try {
       const body = await res.json();
+      errBody = body;
       if (body.error) errMsg = body.error;
     } catch {}
-    throw new Error(errMsg);
+    const err = new Error(errMsg);
+    err.status = res.status;
+    if (errBody && typeof errBody === "object") Object.assign(err, errBody);
+    throw err;
   }
   return res.json();
 }

@@ -1099,7 +1099,13 @@ export async function handleChatRequest(req, sdk) {
         // --- Moderation gate for outgoing messages ---
         const modResult = moderationCheck(localId, roomKey, message);
         if (!modResult.allowed) {
-          return respond(403, { error: `Message blocked: ${modResult.reason}`, moderation: true });
+          return respond(403, {
+            error: `Message blocked: ${modResult.reason}`,
+            moderation: true,
+            action: modResult.action,
+            blockedUntil: modResult.blockedUntil,
+            remainingMs: modResult.remainingMs,
+          });
         }
         // --- End moderation gate ---
 

@@ -1,33 +1,8 @@
-/**
- * PeerChat Local Moderation Engine
- *
- * Evaluates messages for spam, NSFW content, abusive language, and adult domain links.
- * Enforcement is purely local — each peer runs moderation independently.
- * All state is in-memory and resets on restart (no permanent bans in a hostless system).
- */
-
-// ---------------------------------------------------------------------------
-// Configuration constants (easy to tune)
-// ---------------------------------------------------------------------------
-
-/** Maximum messages a single peer may send per sliding window */
 export const MAX_MSGS_PER_WINDOW = 10;
-
-/** Sliding-window length in milliseconds */
 export const WINDOW_MS = 10_000;
-
-/** Number of violations before the first warning is issued */
 export const WARNING_THRESHOLD = 1;
-
-/** Number of violations that triggers an auto-kick */
 export const KICK_THRESHOLD = 3;
-
-/** How long (ms) a kicked peer is blocked from rejoining the room */
 export const ROOM_REJOIN_COOLDOWN_MS = 5 * 60_000;
-
-// ---------------------------------------------------------------------------
-// Internal state (in-memory, per peer+room)
-// ---------------------------------------------------------------------------
 
 /**
  * peerId:roomKey → array of message timestamps (sliding window)
@@ -47,15 +22,6 @@ const violationTracker = new Map();
  */
 const kickList = new Map();
 
-// ---------------------------------------------------------------------------
-// Keyword / pattern lists
-// ---------------------------------------------------------------------------
-
-/**
- * Conservative abuse keyword list — focused on slurs and direct harassment.
- * Avoids words like "kill" or "die" that are common in gaming contexts.
- * Each entry is a regex pattern matched against the full message (case-insensitive).
- */
 const ABUSE_PATTERNS = [
   // Slurs and hate speech
   /\bn[i1!][g9]{1,2}[e3]r\b/i,
@@ -93,9 +59,6 @@ const ABUSE_PATTERNS = [
   /\bbastard\b/i,
 ];
 
-/**
- * NSFW content patterns — catches explicit sexual content keywords.
- */
 const NSFW_PATTERNS = [
   /\bp[o0]rn(?:o|ography|hub)?\b/i,
   /\bhentai\b/i,
@@ -141,14 +104,8 @@ const NSFW_PATTERNS = [
   /\bfap\b/i,
 ];
 
-/**
- * URL extraction regex — matches http(s), hyper, and bare domain patterns.
- */
-const URL_RE = /(?:https?:\/\/|hyper:\/\/)?(?:www\.)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,})(?:[\/\?#][^\s]*)?/gi;
 
-// ---------------------------------------------------------------------------
-// Adult domain set — loaded lazily from bundled JSON
-// ---------------------------------------------------------------------------
+const URL_RE = /(?:https?:\/\/|hyper:\/\/)?(?:www\.)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,})(?:[\/\?#][^\s]*)?/gi;
 
 /** @type {Set<string>|null} */
 let _adultDomains = null;
@@ -374,6 +331,28 @@ export function isKicked(peerId, roomKey, now) {
 }
 
 /**
+ * Get the active room block timing for a peer, if any.
+ * @param {string} peerId
+ * @param {string} roomKey
+ * @param {number} [now]
+ * @returns {{ kickedAt: number, blockedUntil: number, remainingMs: number } | null}
+ */
+export function getKickStatus(peerId, roomKey, now) {
+  const key = peerRoomKey(peerId, roomKey);
+  const kickedAt = kickList.get(key);
+  if (kickedAt == null) return null;
+
+  const ts = now ?? Date.now();
+  const blockedUntil = kickedAt + ROOM_REJOIN_COOLDOWN_MS;
+  const remainingMs = Math.max(0, blockedUntil - ts);
+  if (remainingMs <= 0) {
+    kickList.delete(key);
+    return null;
+  }
+  return { kickedAt, blockedUntil, remainingMs };
+}
+
+/**
  * Add a peer to the kick list for a room.
  * @param {string} peerId
  * @param {string} roomKey
@@ -393,18 +372,22 @@ export function addKick(peerId, roomKey, now) {
  * @param {string} roomKey – room the message is in
  * @param {string} text    – plaintext message content
  * @param {number} [now]   – optional timestamp override (for testing)
- * @returns {{ allowed: boolean, reason: string, action: 'none' | 'warn' | 'final-warn' | 'kick' }}
+ * @returns {{ allowed: boolean, reason: string, action: 'none' | 'warn' | 'final-warn' | 'kick', blockedUntil?: number, remainingMs?: number }}
  */
 export function checkMessage(peerId, roomKey, text, now) {
   // 1. Is the peer currently kicked?
-  if (isKicked(peerId, roomKey, now)) {
-    return { allowed: false, reason: "temporarily blocked from this room", action: "kick" };
+  const kickStatus = getKickStatus(peerId, roomKey, now);
+  if (kickStatus) {
+    return { allowed: false, reason: "temporarily blocked from this room", action: "kick", ...kickStatus };
   }
 
   // 2. Spam check
   if (checkSpam(peerId, roomKey, now)) {
     const action = recordViolation(peerId, roomKey);
-    if (action === "kick") addKick(peerId, roomKey, now);
+    if (action === "kick") {
+      addKick(peerId, roomKey, now);
+      return { allowed: false, reason: "spam (too many messages)", action, ...getKickStatus(peerId, roomKey, now) };
+    }
     return { allowed: false, reason: "spam (too many messages)", action };
   }
 
@@ -412,7 +395,10 @@ export function checkMessage(peerId, roomKey, text, now) {
   const abuse = checkAbuse(text);
   if (abuse.flagged) {
     const action = recordViolation(peerId, roomKey);
-    if (action === "kick") addKick(peerId, roomKey, now);
+    if (action === "kick") {
+      addKick(peerId, roomKey, now);
+      return { allowed: false, reason: abuse.reason, action, ...getKickStatus(peerId, roomKey, now) };
+    }
     return { allowed: false, reason: abuse.reason, action };
   }
 
@@ -420,7 +406,10 @@ export function checkMessage(peerId, roomKey, text, now) {
   const nsfw = checkNSFW(text);
   if (nsfw.flagged) {
     const action = recordViolation(peerId, roomKey);
-    if (action === "kick") addKick(peerId, roomKey, now);
+    if (action === "kick") {
+      addKick(peerId, roomKey, now);
+      return { allowed: false, reason: nsfw.reason, action, ...getKickStatus(peerId, roomKey, now) };
+    }
     return { allowed: false, reason: nsfw.reason, action };
   }
 
@@ -428,7 +417,10 @@ export function checkMessage(peerId, roomKey, text, now) {
   const adultDomain = checkAdultDomains(text);
   if (adultDomain.flagged) {
     const action = recordViolation(peerId, roomKey);
-    if (action === "kick") addKick(peerId, roomKey, now);
+    if (action === "kick") {
+      addKick(peerId, roomKey, now);
+      return { allowed: false, reason: `adult domain link (${adultDomain.domain})`, action, ...getKickStatus(peerId, roomKey, now) };
+    }
     return { allowed: false, reason: `adult domain link (${adultDomain.domain})`, action };
   }
 

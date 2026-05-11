@@ -261,6 +261,7 @@ html, body {
 #chat-active {
   flex: 1; display: flex; flex-direction: column; min-height: 0;
   background: var(--chat-bg);
+  position: relative;
 }
 
 #chat-header {
@@ -988,14 +989,13 @@ a:hover { text-decoration: none; }
 /* ---- Moderation Toast ---- */
 .moderation-toast {
   position: absolute;
-  bottom: 5rem;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 4.25rem;
+  right: 1rem;
   z-index: 50;
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: min(440px, calc(100% - 2rem));
+  max-width: min(520px, calc(100% - 2rem));
   padding: 10px 14px;
   background: color-mix(in srgb, var(--badge-bg) 18%, var(--popup-bg));
   border: 1px solid var(--badge-bg);
@@ -1028,6 +1028,6 @@ a:hover { text-decoration: none; }
   color: var(--text);
 }
 @keyframes modToastSlideIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

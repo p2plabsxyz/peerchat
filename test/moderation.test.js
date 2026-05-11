@@ -1,11 +1,3 @@
-/**
- * Unit tests for the PeerChat local moderation engine.
- *
- * Run with: node --test test/moderation.test.js
- *
- * Uses Node.js built-in test runner (node:test) — no external dependencies.
- */
-
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -23,6 +15,7 @@ import {
   getViolations,
   resetViolations,
   isKicked,
+  getKickStatus,
   addKick,
   resetAll,
   setAdultDomains,
@@ -324,6 +317,8 @@ describe("Moderation Engine", () => {
       const result = checkMessage(PEER, ROOM, "hello nice weather");
       assert.equal(result.allowed, false);
       assert.ok(result.reason.includes("temporarily blocked"));
+      assert.equal(typeof result.remainingMs, "number");
+      assert.equal(typeof result.blockedUntil, "number");
     });
 
     it("should block spam bursts", () => {
@@ -352,14 +347,18 @@ describe("Moderation Engine", () => {
 
       const r3 = checkMessage(PEER, ROOM, "xxx images", now + (WINDOW_MS * 2) + 200);
       assert.equal(r3.action, "kick");
+      assert.equal(r3.remainingMs, ROOM_REJOIN_COOLDOWN_MS);
+      assert.equal(r3.blockedUntil, now + (WINDOW_MS * 2) + 200 + ROOM_REJOIN_COOLDOWN_MS);
 
       // Peer should be blocked from the room
       const afterKick = now + (WINDOW_MS * 2) + 300;
       assert.equal(isKicked(PEER, ROOM, afterKick), true);
+      assert.equal(getKickStatus(PEER, ROOM, afterKick).remainingMs, ROOM_REJOIN_COOLDOWN_MS - 100);
 
       // Even clean messages should be blocked
       const r4 = checkMessage(PEER, ROOM, "sorry about that", afterKick + 1000);
       assert.equal(r4.allowed, false);
+      assert.equal(r4.remainingMs, ROOM_REJOIN_COOLDOWN_MS - 1100);
 
       // After cooldown, peer should be allowed back
       const afterCooldown = afterKick + ROOM_REJOIN_COOLDOWN_MS;
