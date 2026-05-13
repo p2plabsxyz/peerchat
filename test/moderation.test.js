@@ -10,6 +10,7 @@ import {
   checkAbuse,
   checkNSFW,
   checkAdultDomains,
+  getAdultDomains,
   checkMessage,
   recordViolation,
   getViolations,
@@ -167,6 +168,20 @@ describe("Moderation Engine", () => {
       const result = checkAdultDomains("go to www.pornhub.com");
       assert.equal(result.flagged, true);
       assert.equal(result.domain, "pornhub.com");
+    });
+
+    it("should flag deep subdomains of adult domains", () => {
+      setAdultDomains(new Set(["adult.example.com"]));
+      const result = checkAdultDomains("go to https://assets.media.adult.example.com/video");
+      assert.equal(result.flagged, true);
+      assert.equal(result.domain, "adult.example.com");
+    });
+
+    it("should load the generated NSFW domain list", () => {
+      resetAll();
+      const domains = getAdultDomains();
+      assert.ok(domains.size > 1000);
+      assert.equal(domains.has("pornhub.com"), true);
     });
 
     it("should not flag normal domains", () => {

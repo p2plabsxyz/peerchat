@@ -1,3 +1,5 @@
+import adultDomainList from "./lib/adult-domains.js";
+
 export const MAX_MSGS_PER_WINDOW = 10;
 export const WINDOW_MS = 10_000;
 export const WARNING_THRESHOLD = 1;
@@ -111,8 +113,8 @@ const URL_RE = /(?:https?:\/\/|hyper:\/\/)?(?:www\.)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0
 let _adultDomains = null;
 
 /**
- * Load the adult domain blocklist. Works in both Node.js (fs) and browser (fetch) contexts.
- * Falls back to a hardcoded top-50 list if the JSON file is unavailable.
+ * Load the adult domain blocklist.
+ * Falls back to a hardcoded top-50 list if the generated list is unavailable.
  * @returns {Set<string>}
  */
 export function getAdultDomains() {
@@ -135,22 +137,12 @@ export function getAdultDomains() {
 
   _adultDomains = new Set(FALLBACK);
 
-  // Try to load extended list from JSON (async not needed — sync is fine for init)
-  try {
-    // Node.js path
-    if (typeof require !== "undefined") {
-      const fs = require("fs");
-      const path = require("path");
-      const jsonPath = path.join(__dirname, "lib", "adult-domains.json");
-      if (fs.existsSync(jsonPath)) {
-        const list = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
-        if (Array.isArray(list)) {
-          for (const d of list) _adultDomains.add(d.toLowerCase());
-        }
+  if (Array.isArray(adultDomainList)) {
+    for (const domain of adultDomainList) {
+      if (typeof domain === "string") {
+        _adultDomains.add(domain.toLowerCase());
       }
     }
-  } catch {
-    // Fallback is already loaded, no action needed
   }
 
   return _adultDomains;
@@ -164,9 +156,15 @@ export function setAdultDomains(domains) {
   _adultDomains = domains;
 }
 
-// ---------------------------------------------------------------------------
-// Core detection functions
-// ---------------------------------------------------------------------------
+function getDomainSuffixes(domain) {
+  const parts = domain.toLowerCase().split(".").filter(Boolean);
+  const suffixes = [];
+  for (let i = 0; i < parts.length - 1; i++) {
+    suffixes.push(parts.slice(i).join("."));
+  }
+  return suffixes;
+}
+
 
 /**
  * Composit key for per-peer-per-room tracking.
@@ -250,16 +248,9 @@ export function checkAdultDomains(text) {
     const domain = match[1]?.toLowerCase();
     if (!domain) continue;
 
-    // Check exact match and parent domain match (e.g. "www.pornhub.com" → "pornhub.com")
-    if (domains.has(domain)) {
-      return { flagged: true, domain };
-    }
-    // Strip leading subdomain
-    const parts = domain.split(".");
-    if (parts.length > 2) {
-      const parent = parts.slice(-2).join(".");
-      if (domains.has(parent)) {
-        return { flagged: true, domain: parent };
+    for (const candidate of getDomainSuffixes(domain)) {
+      if (domains.has(candidate)) {
+        return { flagged: true, domain: candidate };
       }
     }
   }
