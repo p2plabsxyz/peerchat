@@ -177,7 +177,7 @@ describe("Moderation Engine", () => {
       assert.equal(result.domain, "adult.example.com");
     });
 
-    it("should load the generated NSFW domain list", () => {
+    it("should load the fetched NSFW hosts list", () => {
       resetAll();
       const domains = getAdultDomains();
       assert.ok(domains.size > 1000);

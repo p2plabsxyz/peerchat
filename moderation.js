@@ -1,5 +1,3 @@
-import adultDomainList from "./lib/adult-domains.js";
-
 export const MAX_MSGS_PER_WINDOW = 10;
 export const WINDOW_MS = 10_000;
 export const WARNING_THRESHOLD = 1;
@@ -108,42 +106,69 @@ const NSFW_PATTERNS = [
 
 
 const URL_RE = /(?:https?:\/\/|hyper:\/\/)?(?:www\.)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,})(?:[\/\?#][^\s]*)?/gi;
+const HOSTS_LIST_URL = new URL("./lib/adult-domains.hosts", import.meta.url);
+const LOCALHOST_IP_RE = /^(?:0\.0\.0\.0|127\.0\.0\.1|::1)$/i;
+const HOSTS_DOMAIN_RE = /^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{2,63}$/i;
 
 /** @type {Set<string>|null} */
 let _adultDomains = null;
 
+function readAdultHostsFile() {
+  if (typeof XMLHttpRequest !== "undefined") {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", HOSTS_LIST_URL.href, false);
+      xhr.send(null);
+      if ((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) {
+        return xhr.responseText || "";
+      }
+    } catch {
+      // Fall through to Node-style file loading when available.
+    }
+  }
+
+  const getBuiltinModule = globalThis.process?.getBuiltinModule;
+  if (typeof getBuiltinModule === "function") {
+    try {
+      const fs = getBuiltinModule("fs");
+      const { fileURLToPath } = getBuiltinModule("url");
+      return fs.readFileSync(fileURLToPath(HOSTS_LIST_URL), "utf8");
+    } catch {
+      // The caller will use an empty domain set if the hosts file is unavailable.
+    }
+  }
+
+  return "";
+}
+
+function addHostsDomains(target, hostsText) {
+  for (const rawLine of hostsText.split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*/, "").trim();
+    if (!line) continue;
+
+    const parts = line.split(/\s+/);
+    const domain = (parts.length >= 2 && LOCALHOST_IP_RE.test(parts[0])
+      ? parts[1]
+      : parts[0]).toLowerCase();
+
+    if (!HOSTS_DOMAIN_RE.test(domain)) continue;
+
+    target.add(domain);
+    if (domain.startsWith("www.")) {
+      target.add(domain.slice(4));
+    }
+  }
+}
+
 /**
  * Load the adult domain blocklist.
- * Falls back to a hardcoded top-50 list if the generated list is unavailable.
  * @returns {Set<string>}
  */
 export function getAdultDomains() {
   if (_adultDomains) return _adultDomains;
 
-  // Hardcoded fallback — the top-50 most trafficked adult domains
-  const FALLBACK = [
-    "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com", "redtube.com",
-    "youporn.com", "tube8.com", "spankbang.com", "beeg.com", "thumbzilla.com",
-    "porntrex.com", "eporner.com", "hqporner.com", "tnaflix.com", "drtuber.com",
-    "txxx.com", "voyeurhit.com", "hdzog.com", "sunporno.com", "proporn.com",
-    "pornone.com", "4tube.com", "fapcat.com", "zbporn.com", "ashemaletube.com",
-    "brazzers.com", "realitykings.com", "bangbros.com", "naughtyamerica.com",
-    "digitalplayground.com", "mofos.com", "babes.com", "twistys.com", "vixen.com",
-    "blacked.com", "tushy.com", "deeper.com", "slayedofficial.com",
-    "onlyfans.com", "chaturbate.com", "livejasmin.com", "stripchat.com",
-    "bongacams.com", "cam4.com", "myfreecams.com", "camsoda.com",
-    "flirt4free.com", "streamate.com", "imlive.com", "jerkmate.com",
-  ];
-
-  _adultDomains = new Set(FALLBACK);
-
-  if (Array.isArray(adultDomainList)) {
-    for (const domain of adultDomainList) {
-      if (typeof domain === "string") {
-        _adultDomains.add(domain.toLowerCase());
-      }
-    }
-  }
+  _adultDomains = new Set();
+  addHostsDomains(_adultDomains, readAdultHostsFile());
 
   return _adultDomains;
 }
