@@ -405,22 +405,36 @@ describe("Moderation Engine", () => {
       assert.equal(getViolations(PEER, ROOM), 0);
     });
 
-    it("should let local moderation block content without kicking the local user", () => {
+    it("should kick the local user after repeated local content violations", () => {
       const now = 1000000;
 
-      for (let i = 0; i < KICK_THRESHOLD; i++) {
-        const result = checkMessage(PEER, ROOM, "you retard", now + i, {
-          allowKick: false,
-          checkSpam: false,
-        });
-        assert.equal(result.allowed, false);
-      }
-
-      assert.equal(isKicked(PEER, ROOM, now + KICK_THRESHOLD), false);
-      assert.equal(checkMessage(PEER, ROOM, "hello", now + KICK_THRESHOLD, {
-        allowKick: false,
+      const r1 = checkMessage(PEER, ROOM, "you retard", now, {
+        allowKick: true,
         checkSpam: false,
-      }).allowed, true);
+      });
+      assert.equal(r1.allowed, false);
+      assert.equal(r1.action, "warn");
+
+      const r2 = checkMessage(PEER, ROOM, "you retard", now + 1, {
+        allowKick: true,
+        checkSpam: false,
+      });
+      assert.equal(r2.allowed, false);
+      assert.equal(r2.action, "final-warn");
+
+      const r3 = checkMessage(PEER, ROOM, "you retard", now + 2, {
+        allowKick: true,
+        checkSpam: false,
+      });
+      assert.equal(r3.allowed, false);
+      assert.equal(r3.action, "kick");
+      assert.equal(typeof r3.blockedUntil, "number");
+
+      assert.equal(isKicked(PEER, ROOM, now + 3), true);
+      assert.equal(checkMessage(PEER, ROOM, "hello", now + 4, {
+        allowKick: true,
+        checkSpam: false,
+      }).allowed, false);
     });
 
     it("should let moderation bookkeeping be cleaned up after it is stale", () => {

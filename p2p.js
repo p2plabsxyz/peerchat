@@ -36,6 +36,7 @@ const joinedRooms = new Set();
 const discoveryKeys = new Set();
 const seenIds = new Set();
 const rateCounters = new Map();
+const decryptedMessageCache = new Map();
 
 let peers = [];
 let localId = "";
@@ -277,6 +278,29 @@ async function appendToFeed(roomKey, entry) {
   await feed.append(entry);
 }
 
+function messageCacheKey(roomKey, msgId) {
+  return `${roomKey}:${msgId}`;
+}
+
+function cacheDecryptedMessage(roomKey, msgId, plaintext) {
+  if (!msgId || typeof plaintext !== "string") return;
+  decryptedMessageCache.set(messageCacheKey(roomKey, msgId), plaintext);
+}
+
+function consumeCachedDecryptedMessage(roomKey, msgId) {
+  if (!msgId) return null;
+  const key = messageCacheKey(roomKey, msgId);
+  if (!decryptedMessageCache.has(key)) return null;
+  const plaintext = decryptedMessageCache.get(key);
+  decryptedMessageCache.delete(key);
+  return plaintext;
+}
+
+function isModerationNoticeEntry(entry) {
+  return entry?.moderationNotice === true ||
+    (entry?.type === "system" && typeof entry.id === "string" && entry.id.startsWith("mod-"));
+}
+
 function feedEntryToMsg(entry, roomKey) {
   if (entry.type === "system") {
     return { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
@@ -289,7 +313,7 @@ function feedEntryToMsg(entry, roomKey) {
       id: entry.id,
       sender: entry.sender,
       senderName: entry.sn || entry.sender,
-      message: decryptMsg(entry.ct, entry.iv, entry.tag, roomKey),
+      message: consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey),
       timestamp: entry.ts,
       replyTo: entry.replyTo || null,
     };
@@ -315,6 +339,7 @@ async function syncRoomHistoryTo(conn, rk) {
     try {
       if (conn.destroyed) return;
       const e = await feed.get(i);
+      if (isModerationNoticeEntry(e)) continue;
       const syncType = e.type === "system" ? "sync-system" : e.type === "reaction" ? "sync-reaction" : "sync";
       const ok = conn.write(JSON.stringify({ type: syncType, roomKey: rk, ...e }) + "\n");
       if (!ok) {
@@ -366,6 +391,7 @@ function appendModerationNotice(roomKey, sourceId, peerName, modResult, ts) {
   return appendToFeed(roomKey, {
     id: sysId,
     type: "system",
+    moderationNotice: true,
     text: moderationSystemText(peerName, modResult),
     ts: ts || Date.now(),
   }).catch(() => {});
@@ -871,6 +897,7 @@ export function initChat(sdk, options = {}) {
               }, msg.ts);
               continue;
             }
+            cacheDecryptedMessage(msg.roomKey, msg.id, decrypted.plaintext);
             appendToFeed(msg.roomKey, {
               id: msg.id, sender: clamp(msg.sender, MAX_SENDER_LEN), sn: clamp(msg.sn, 50),
               ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
@@ -896,9 +923,11 @@ export function initChat(sdk, options = {}) {
           if (!trackId(msg.id)) continue;
 
           // --- Moderation gate for incoming peer messages ---
+          let moderatedPlaintext = "";
           try {
             const decrypted = decryptIncomingChat(msg, "peer message");
             if (!decrypted.ok) continue;
+            moderatedPlaintext = decrypted.plaintext;
             const modResult = moderationCheck(remoteId, msg.roomKey, decrypted.plaintext);
             if (!modResult.allowed) {
               const peerName = clamp(msg.sn, 50) || savedData.peerProfiles[remoteId]?.username || remoteId;
@@ -911,6 +940,7 @@ export function initChat(sdk, options = {}) {
           }
           // --- End moderation gate ---
 
+          cacheDecryptedMessage(msg.roomKey, msg.id, moderatedPlaintext);
           appendToFeed(msg.roomKey, {
             id: msg.id, sender: remoteId, sn: clamp(msg.sn, 50) || remoteId,
             ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
@@ -1142,7 +1172,7 @@ export async function handleChatRequest(req, sdk) {
 
         // --- Moderation gate for outgoing messages ---
         const modResult = moderationCheck(localId, roomKey, message, undefined, {
-          allowKick: false,
+          allowKick: true,
           checkSpam: false,
         });
 
@@ -1184,6 +1214,7 @@ export async function handleChatRequest(req, sdk) {
           ...(fileSize != null && fileName && { fileSize }),
         };
 
+        cacheDecryptedMessage(roomKey, id, message);
         await appendToFeed(roomKey, entry);
         relayToPeers(JSON.stringify({ ...entry, roomKey }) + "\n");
         return respond(200, {

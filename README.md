@@ -82,7 +82,7 @@ try {
   await chat.sendMessage(roomKey, { message: "Hello!" });
 } catch (err) {
   if (err.status === 403 && err.moderation === true) {
-    // Message was blocked locally; err.action and err.reason/error describe why.
+    // Message was blocked locally; check err.error, err.action, and err.remainingMs for details.
   }
 }
 
