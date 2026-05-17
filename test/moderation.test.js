@@ -6,9 +6,11 @@ import {
   WINDOW_MS,
   KICK_THRESHOLD,
   ROOM_REJOIN_COOLDOWN_MS,
+  TRACKER_IDLE_TTL_MS,
   checkSpam,
   checkAbuse,
   checkNSFW,
+  checkContent,
   checkAdultDomains,
   getAdultDomains,
   checkMessage,
@@ -18,6 +20,7 @@ import {
   isKicked,
   getKickStatus,
   addKick,
+  cleanupModerationState,
   resetAll,
   setAdultDomains,
 } from "../moderation.js";
@@ -136,6 +139,19 @@ describe("Moderation Engine", () => {
       assert.equal(checkNSFW("hello world").flagged, false);
       assert.equal(checkNSFW("this is a great project").flagged, false);
       assert.equal(checkNSFW("let me analyze this data").flagged, false);
+    });
+
+    it("should avoid broad sexual false positives", () => {
+      assert.equal(checkNSFW("same-sex marriage equality").flagged, false);
+      assert.equal(checkNSFW("sexual harassment training").flagged, false);
+      assert.equal(checkNSFW("that was a kick ass demo").flagged, false);
+      assert.equal(checkNSFW("Dick joined the meeting").flagged, false);
+    });
+
+    it("should flag nude singular and explicit sexual context", () => {
+      assert.equal(checkNSFW("send nude").flagged, true);
+      assert.equal(checkNSFW("want sex").flagged, true);
+      assert.equal(checkNSFW("sexual content").flagged, true);
     });
   });
 
@@ -381,6 +397,43 @@ describe("Moderation Engine", () => {
 
       // Clean message should go through after cooldown (violations still counted though)
       // Note: violations persist, so the next violation will be another kick
+    });
+
+    it("should support content-only moderation without tracking violations", () => {
+      const result = checkContent("go to https://xvideos.com/latest");
+      assert.equal(result.flagged, true);
+      assert.equal(getViolations(PEER, ROOM), 0);
+    });
+
+    it("should let local moderation block content without kicking the local user", () => {
+      const now = 1000000;
+
+      for (let i = 0; i < KICK_THRESHOLD; i++) {
+        const result = checkMessage(PEER, ROOM, "you retard", now + i, {
+          allowKick: false,
+          checkSpam: false,
+        });
+        assert.equal(result.allowed, false);
+      }
+
+      assert.equal(isKicked(PEER, ROOM, now + KICK_THRESHOLD), false);
+      assert.equal(checkMessage(PEER, ROOM, "hello", now + KICK_THRESHOLD, {
+        allowKick: false,
+        checkSpam: false,
+      }).allowed, true);
+    });
+
+    it("should let moderation bookkeeping be cleaned up after it is stale", () => {
+      const now = 1000000;
+      assert.equal(checkSpam(PEER, ROOM, now), false);
+      recordViolation(PEER, ROOM, now);
+      addKick(PEER, ROOM, now);
+
+      cleanupModerationState(now + TRACKER_IDLE_TTL_MS + ROOM_REJOIN_COOLDOWN_MS + 1);
+
+      assert.equal(getViolations(PEER, ROOM), 0);
+      assert.equal(isKicked(PEER, ROOM, now + TRACKER_IDLE_TTL_MS + ROOM_REJOIN_COOLDOWN_MS + 1), false);
+      assert.equal(checkSpam(PEER, ROOM, now + TRACKER_IDLE_TTL_MS + ROOM_REJOIN_COOLDOWN_MS + 2), false);
     });
   });
 });

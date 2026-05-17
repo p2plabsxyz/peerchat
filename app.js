@@ -1878,7 +1878,7 @@ $("message-form")?.addEventListener("submit", async (e) => {
   } catch (err) {
     console.error("Send failed:", err);
     // Check for moderation block (403)
-    if (err.message && err.message.includes("Message blocked")) {
+    if (err?.status === 403 && err?.moderation === true) {
       input.value = savedMsg;
       resizeMessageField();
       saveDraft(S.activeRoom, savedMsg);

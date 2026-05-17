@@ -3,6 +3,7 @@ export const WINDOW_MS = 10_000;
 export const WARNING_THRESHOLD = 1;
 export const KICK_THRESHOLD = 3;
 export const ROOM_REJOIN_COOLDOWN_MS = 5 * 60_000;
+export const TRACKER_IDLE_TTL_MS = 30 * 60_000;
 
 /**
  * peerId:roomKey → array of message timestamps (sliding window)
@@ -17,10 +18,18 @@ const spamTracker = new Map();
 const violationTracker = new Map();
 
 /**
+ * peerId:roomKey -> last violation timestamp
+ * @type {Map<string, number>}
+ */
+const violationTouchedAt = new Map();
+
+/**
  * peerId:roomKey → timestamp when the peer was kicked
  * @type {Map<string, number>}
  */
 const kickList = new Map();
+
+let lastCleanupAt = 0;
 
 const ABUSE_PATTERNS = [
   // Slurs and hate speech
@@ -82,18 +91,16 @@ const NSFW_PATTERNS = [
   /\bdeepthroat\b/i,
   /\bgangbang\b/i,
   /\bhardcore\s*sex\b/i,
-  /\bnude(?:s|z)\b/i,
+  /\bnude(?:s|z)?\b/i,
   /\bnsfw\b/i,
   /\bdick\s*pic\b/i,
   // Body / sexual terms
   /\bboob(?:s|ies)?\b/i,
   /\btit(?:s|ties)\b/i,
-  /\bdick\b/i,
-  /\bcock\b/i,
-  /\bpussy\b/i,
-  /\bass\b/i,
-  /\banus\b/i,
-  /\bsex(?:y|ual|ting)?\b/i,
+  /\b(?:dick|cock|pussy)\s*(?:pic|pics|photo|photos|video|videos)\b/i,
+  /\bsext(?:ing)?\b/i,
+  /\bsexual\s+(?:content|chat|image|images|photo|photos|video|videos|message|messages|acts?)\b/i,
+  /\b(?:have|having|had|want|wants|wanted)\s+sex\b/i,
   /\berotic\b/i,
   /\bfetish\b/i,
   /\bstripper\b/i,
@@ -192,10 +199,47 @@ function getDomainSuffixes(domain) {
 
 
 /**
- * Composit key for per-peer-per-room tracking.
+ * Composite key for per-peer-per-room tracking.
  */
 function peerRoomKey(peerId, roomKey) {
   return `${peerId}:${roomKey}`;
+}
+
+/**
+ * Evict stale moderation bookkeeping.
+ * @param {number} [now]
+ */
+export function cleanupModerationState(now) {
+  const ts = now ?? Date.now();
+
+  const spamCutoff = ts - WINDOW_MS;
+  for (const [key, window] of spamTracker.entries()) {
+    while (window.length > 0 && window[0] <= spamCutoff) {
+      window.shift();
+    }
+    if (window.length === 0) spamTracker.delete(key);
+  }
+
+  const violationCutoff = ts - TRACKER_IDLE_TTL_MS;
+  for (const [key, touchedAt] of violationTouchedAt.entries()) {
+    if (touchedAt <= violationCutoff) {
+      violationTouchedAt.delete(key);
+      violationTracker.delete(key);
+    }
+  }
+
+  for (const [key, kickedAt] of kickList.entries()) {
+    if (ts - kickedAt >= ROOM_REJOIN_COOLDOWN_MS) {
+      kickList.delete(key);
+    }
+  }
+}
+
+function maybeCleanupModerationState(now) {
+  const ts = now ?? Date.now();
+  if (ts - lastCleanupAt < WINDOW_MS) return;
+  cleanupModerationState(ts);
+  lastCleanupAt = ts;
 }
 
 /**
@@ -208,6 +252,7 @@ function peerRoomKey(peerId, roomKey) {
 export function checkSpam(peerId, roomKey, now) {
   const key = peerRoomKey(peerId, roomKey);
   const ts = now ?? Date.now();
+  maybeCleanupModerationState(ts);
 
   let window = spamTracker.get(key);
   if (!window) {
@@ -282,20 +327,42 @@ export function checkAdultDomains(text) {
   return { flagged: false, domain: "" };
 }
 
-// ---------------------------------------------------------------------------
-// Violation tracking & escalation
-// ---------------------------------------------------------------------------
+/**
+ * Check message text for content violations without changing moderation state.
+ * @param {string} text
+ * @returns {{ flagged: boolean, reason: string }}
+ */
+export function checkContent(text) {
+  const abuse = checkAbuse(text);
+  if (abuse.flagged) return abuse;
+
+  const nsfw = checkNSFW(text);
+  if (nsfw.flagged) return nsfw;
+
+  const adultDomain = checkAdultDomains(text);
+  if (adultDomain.flagged) {
+    return { flagged: true, reason: `adult domain link (${adultDomain.domain})` };
+  }
+
+  return { flagged: false, reason: "" };
+}
+
 
 /**
  * Record a violation for a peer in a room. Returns the escalation action.
  * @param {string} peerId
  * @param {string} roomKey
+ * @param {number} [now]
  * @returns {'warn' | 'final-warn' | 'kick'}
  */
-export function recordViolation(peerId, roomKey) {
+export function recordViolation(peerId, roomKey, now) {
   const key = peerRoomKey(peerId, roomKey);
+  const ts = now ?? Date.now();
+  maybeCleanupModerationState(ts);
+
   const count = (violationTracker.get(key) || 0) + 1;
   violationTracker.set(key, count);
+  violationTouchedAt.set(key, ts);
 
   if (count >= KICK_THRESHOLD) return "kick";
   if (count >= KICK_THRESHOLD - 1) return "final-warn";
@@ -318,12 +385,10 @@ export function getViolations(peerId, roomKey) {
  * @param {string} roomKey
  */
 export function resetViolations(peerId, roomKey) {
-  violationTracker.delete(peerRoomKey(peerId, roomKey));
+  const key = peerRoomKey(peerId, roomKey);
+  violationTracker.delete(key);
+  violationTouchedAt.delete(key);
 }
-
-// ---------------------------------------------------------------------------
-// Kick list & cooldown
-// ---------------------------------------------------------------------------
 
 /**
  * Check if a peer is currently kicked from a room (within cooldown).
@@ -334,6 +399,7 @@ export function resetViolations(peerId, roomKey) {
  */
 export function isKicked(peerId, roomKey, now) {
   const key = peerRoomKey(peerId, roomKey);
+  maybeCleanupModerationState(now);
   const kickedAt = kickList.get(key);
   if (kickedAt == null) return false;
 
@@ -355,6 +421,7 @@ export function isKicked(peerId, roomKey, now) {
  */
 export function getKickStatus(peerId, roomKey, now) {
   const key = peerRoomKey(peerId, roomKey);
+  maybeCleanupModerationState(now);
   const kickedAt = kickList.get(key);
   if (kickedAt == null) return null;
 
@@ -375,7 +442,9 @@ export function getKickStatus(peerId, roomKey, now) {
  * @param {number} [now]
  */
 export function addKick(peerId, roomKey, now) {
-  kickList.set(peerRoomKey(peerId, roomKey), now ?? Date.now());
+  const ts = now ?? Date.now();
+  maybeCleanupModerationState(ts);
+  kickList.set(peerRoomKey(peerId, roomKey), ts);
 }
 
 // ---------------------------------------------------------------------------
@@ -388,56 +457,45 @@ export function addKick(peerId, roomKey, now) {
  * @param {string} roomKey – room the message is in
  * @param {string} text    – plaintext message content
  * @param {number} [now]   – optional timestamp override (for testing)
+ * @param {{ checkSpam?: boolean, trackViolations?: boolean, allowKick?: boolean }} [options]
  * @returns {{ allowed: boolean, reason: string, action: 'none' | 'warn' | 'final-warn' | 'kick', blockedUntil?: number, remainingMs?: number }}
  */
-export function checkMessage(peerId, roomKey, text, now) {
+export function checkMessage(peerId, roomKey, text, now, options = {}) {
+  const shouldCheckSpam = options.checkSpam !== false;
+  const shouldTrackViolations = options.trackViolations !== false;
+  const shouldAllowKick = options.allowKick !== false;
+  const ts = now ?? Date.now();
+  maybeCleanupModerationState(ts);
+
+  const violationAction = () => {
+    if (!shouldTrackViolations) return "warn";
+    const action = recordViolation(peerId, roomKey, ts);
+    return action === "kick" && !shouldAllowKick ? "final-warn" : action;
+  };
+
+  const blockedResult = (reason, action) => {
+    if (action === "kick" && shouldAllowKick) {
+      addKick(peerId, roomKey, ts);
+      return { allowed: false, reason, action, ...getKickStatus(peerId, roomKey, ts) };
+    }
+    return { allowed: false, reason, action };
+  };
+
   // 1. Is the peer currently kicked?
-  const kickStatus = getKickStatus(peerId, roomKey, now);
+  const kickStatus = shouldAllowKick ? getKickStatus(peerId, roomKey, ts) : null;
   if (kickStatus) {
     return { allowed: false, reason: "temporarily blocked from this room", action: "kick", ...kickStatus };
   }
 
   // 2. Spam check
-  if (checkSpam(peerId, roomKey, now)) {
-    const action = recordViolation(peerId, roomKey);
-    if (action === "kick") {
-      addKick(peerId, roomKey, now);
-      return { allowed: false, reason: "spam (too many messages)", action, ...getKickStatus(peerId, roomKey, now) };
-    }
-    return { allowed: false, reason: "spam (too many messages)", action };
+  if (shouldCheckSpam && checkSpam(peerId, roomKey, ts)) {
+    return blockedResult("spam (too many messages)", violationAction());
   }
 
   // 3. Abuse check
-  const abuse = checkAbuse(text);
-  if (abuse.flagged) {
-    const action = recordViolation(peerId, roomKey);
-    if (action === "kick") {
-      addKick(peerId, roomKey, now);
-      return { allowed: false, reason: abuse.reason, action, ...getKickStatus(peerId, roomKey, now) };
-    }
-    return { allowed: false, reason: abuse.reason, action };
-  }
-
-  // 4. NSFW check
-  const nsfw = checkNSFW(text);
-  if (nsfw.flagged) {
-    const action = recordViolation(peerId, roomKey);
-    if (action === "kick") {
-      addKick(peerId, roomKey, now);
-      return { allowed: false, reason: nsfw.reason, action, ...getKickStatus(peerId, roomKey, now) };
-    }
-    return { allowed: false, reason: nsfw.reason, action };
-  }
-
-  // 5. Adult domain check
-  const adultDomain = checkAdultDomains(text);
-  if (adultDomain.flagged) {
-    const action = recordViolation(peerId, roomKey);
-    if (action === "kick") {
-      addKick(peerId, roomKey, now);
-      return { allowed: false, reason: `adult domain link (${adultDomain.domain})`, action, ...getKickStatus(peerId, roomKey, now) };
-    }
-    return { allowed: false, reason: `adult domain link (${adultDomain.domain})`, action };
+  const content = checkContent(text);
+  if (content.flagged) {
+    return blockedResult(content.reason, violationAction());
   }
 
   return { allowed: true, reason: "", action: "none" };
@@ -453,6 +511,8 @@ export function checkMessage(peerId, roomKey, text, now) {
 export function resetAll() {
   spamTracker.clear();
   violationTracker.clear();
+  violationTouchedAt.clear();
   kickList.clear();
+  lastCleanupAt = 0;
   _adultDomains = null;
 }
