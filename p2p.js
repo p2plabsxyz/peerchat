@@ -8,6 +8,7 @@ import {
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import {
   checkContent as moderationCheckContent,
+  initModeration,
   checkMessage as moderationCheck,
   isKicked as moderationIsKicked,
 } from "./moderation.js";
@@ -572,6 +573,8 @@ export function initChat(sdk, options = {}) {
   if (options.storagePath) dataPath = options.storagePath;
   localId = sdk.publicKey ? b4a.toString(sdk.publicKey, "hex").slice(0, 8).toLowerCase() : "local";
 
+  initModeration().catch((e) => console.warn("[chat] Moderation blocklist load failed:", e.message));
+
   loadData();
 
   setInterval(() => {
@@ -792,7 +795,7 @@ export function initChat(sdk, options = {}) {
               updated = true;
             }
 
-            // Only fill bio/link/avatar/creator if currently missing — prevents spoofing
+            // Only fill bio/link/avatar/creator if currently missing - prevents spoofing
             if (msg.bio && !room.bio) { room.bio = clamp(msg.bio, MAX_BIO_LEN); updated = true; }
             if (msg.link && !room.link) { room.link = clamp(msg.link, MAX_LINK_LEN) || ""; updated = true; }
             if (msg.avatar && !room.avatar) {
@@ -810,6 +813,7 @@ export function initChat(sdk, options = {}) {
           }
 
           if (msg.type === "request-room-meta") {
+            if (msg.roomKey && moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (msg.roomKey && savedData.rooms[msg.roomKey]) {
               sendRoomMeta(conn, msg.roomKey);
             }
@@ -818,6 +822,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "leave") {
             if (msg.roomKey && msg.peerId) {
+              if (moderationIsKicked(remoteId, msg.roomKey)) continue;
               const leaveName = clamp(msg.username, 50) || msg.peerId;
               const room = savedData.rooms[msg.roomKey];
               if (room?.members?.[msg.peerId]) {
@@ -871,6 +876,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "sync-system") {
             if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const _sysRoom = savedData.rooms[msg.roomKey];
             if (_sysRoom && !_sysRoom.isHost && _sysRoom.joinedAt && msg.ts && msg.ts < _sysRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
@@ -888,6 +894,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "sync") {
             if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const _syncRoom = savedData.rooms[msg.roomKey];
             if (_syncRoom && !_syncRoom.isHost && _syncRoom.joinedAt && msg.ts && msg.ts < _syncRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
@@ -926,6 +933,7 @@ export function initChat(sdk, options = {}) {
           }
 
           if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
+          if (moderationIsKicked(remoteId, msg.roomKey)) continue;
           if (!trackId(msg.id)) continue;
 
           // --- Moderation gate for incoming peer messages ---

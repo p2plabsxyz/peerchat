@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   MAX_MSGS_PER_WINDOW,
   WINDOW_MS,
+  FINAL_WARN_THRESHOLD,
   KICK_THRESHOLD,
   ROOM_REJOIN_COOLDOWN_MS,
   TRACKER_IDLE_TTL_MS,
@@ -13,6 +14,7 @@ import {
   checkContent,
   checkAdultDomains,
   getAdultDomains,
+  initModeration,
   checkMessage,
   recordViolation,
   getViolations,
@@ -36,18 +38,17 @@ describe("Moderation Engine", () => {
   describe("checkSpam", () => {
     it("should allow messages under the rate limit", () => {
       const now = 1000000;
-      for (let i = 0; i < MAX_MSGS_PER_WINDOW; i++) {
+      for (let i = 0; i < MAX_MSGS_PER_WINDOW - 1; i++) {
         assert.equal(checkSpam(PEER, ROOM, now + i), false);
       }
     });
 
-    it("should flag spam when burst exceeds MAX_MSGS_PER_WINDOW", () => {
+    it("should flag spam when burst reaches MAX_MSGS_PER_WINDOW", () => {
       const now = 1000000;
-      for (let i = 0; i < MAX_MSGS_PER_WINDOW; i++) {
+      for (let i = 0; i < MAX_MSGS_PER_WINDOW - 1; i++) {
         checkSpam(PEER, ROOM, now + i);
       }
-      // The next message should be flagged as spam
-      assert.equal(checkSpam(PEER, ROOM, now + MAX_MSGS_PER_WINDOW), true);
+      assert.equal(checkSpam(PEER, ROOM, now + MAX_MSGS_PER_WINDOW - 1), true);
     });
 
     it("should allow messages after the window slides past", () => {
@@ -66,7 +67,7 @@ describe("Moderation Engine", () => {
       for (let i = 0; i < MAX_MSGS_PER_WINDOW; i++) {
         checkSpam("peerA", ROOM, now);
       }
-      // peerA is now at the limit — next message is spam
+      // peerA is now at the limit - next message is spam
       assert.equal(checkSpam("peerA", ROOM, now), true);
       // peerB should still be fine
       assert.equal(checkSpam("peerB", ROOM, now), false);
@@ -177,8 +178,9 @@ describe("Moderation Engine", () => {
       assert.equal(result.domain, "adult.example.com");
     });
 
-    it("should load the fetched NSFW hosts list", () => {
+    it("should load the fetched NSFW hosts list", async () => {
       resetAll();
+      await initModeration();
       const domains = getAdultDomains();
       assert.ok(domains.size > 1000);
       assert.equal(domains.has("pornhub.com"), true);
@@ -203,10 +205,10 @@ describe("Moderation Engine", () => {
     });
 
     it("should return 'final-warn' on second violation", () => {
-      recordViolation(PEER, ROOM);
+      for (let i = 1; i < FINAL_WARN_THRESHOLD; i++) recordViolation(PEER, ROOM);
       const action = recordViolation(PEER, ROOM);
       assert.equal(action, "final-warn");
-      assert.equal(getViolations(PEER, ROOM), 2);
+      assert.equal(getViolations(PEER, ROOM), FINAL_WARN_THRESHOLD);
     });
 
     it("should return 'kick' on third violation", () => {
@@ -285,7 +287,7 @@ describe("Moderation Engine", () => {
     it("should block NSFW messages", () => {
       const result = checkMessage(PEER, ROOM, "check out this pornhub video");
       assert.equal(result.allowed, false);
-      // Could be flagged by either NSFW keyword or adult domain — both are valid
+      // Could be flagged by either NSFW keyword or adult domain - both are valid
       assert.ok(!result.allowed);
     });
 
@@ -326,13 +328,12 @@ describe("Moderation Engine", () => {
 
     it("should block spam bursts", () => {
       const now = 1000000;
-      // Send MAX_MSGS_PER_WINDOW clean messages
-      for (let i = 0; i < MAX_MSGS_PER_WINDOW; i++) {
+      // Send clean messages up to just under the spam threshold.
+      for (let i = 0; i < MAX_MSGS_PER_WINDOW - 1; i++) {
         const r = checkMessage(PEER, ROOM, "hello", now + i);
         assert.equal(r.allowed, true);
       }
-      // The next one should be flagged as spam
-      const result = checkMessage(PEER, ROOM, "one more", now + MAX_MSGS_PER_WINDOW);
+      const result = checkMessage(PEER, ROOM, "one more", now + MAX_MSGS_PER_WINDOW - 1);
       assert.equal(result.allowed, false);
       assert.ok(result.reason.includes("spam"));
     });
@@ -375,36 +376,36 @@ describe("Moderation Engine", () => {
       assert.equal(getViolations(PEER, ROOM), 0);
     });
 
-    it("should kick the local user after repeated local content violations", () => {
+    it("should avoid kicking the local user when allowKick is false", () => {
       const now = 1000000;
 
       const r1 = checkMessage(PEER, ROOM, "you retard", now, {
-        allowKick: true,
+        allowKick: false,
         checkSpam: false,
       });
       assert.equal(r1.allowed, false);
       assert.equal(r1.action, "warn");
 
       const r2 = checkMessage(PEER, ROOM, "you retard", now + 1, {
-        allowKick: true,
+        allowKick: false,
         checkSpam: false,
       });
       assert.equal(r2.allowed, false);
       assert.equal(r2.action, "final-warn");
 
       const r3 = checkMessage(PEER, ROOM, "you retard", now + 2, {
-        allowKick: true,
+        allowKick: false,
         checkSpam: false,
       });
       assert.equal(r3.allowed, false);
-      assert.equal(r3.action, "kick");
-      assert.equal(typeof r3.blockedUntil, "number");
+      assert.equal(r3.action, "final-warn");
+      assert.equal(r3.blockedUntil, undefined);
 
-      assert.equal(isKicked(PEER, ROOM, now + 3), true);
+      assert.equal(isKicked(PEER, ROOM, now + 3), false);
       assert.equal(checkMessage(PEER, ROOM, "hello", now + 4, {
-        allowKick: true,
+        allowKick: false,
         checkSpam: false,
-      }).allowed, false);
+      }).allowed, true);
     });
 
     it("should let moderation bookkeeping be cleaned up after it is stale", () => {

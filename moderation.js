@@ -121,6 +121,7 @@ const HOSTS_DOMAIN_RE = /^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{2,63
 /** @type {Set<string>} */
 let _adultDomains = new Set();
 let _domainsReady = false;
+let _domainsLoadPromise = null;
 
 function addHostsDomains(target, hostsText) {
   for (const rawLine of hostsText.split(/\r?\n/)) {
@@ -141,18 +142,41 @@ function addHostsDomains(target, hostsText) {
 
 /**
  * Call once at app startup (e.g. in initChat) to load the adult-domain blocklist
- * asynchronously. Safe to call multiple times — only loads once.
+ * asynchronously. Safe to call multiple times - only loads once.
  * @returns {Promise<void>}
  */
 export async function initModeration() {
   if (_domainsReady) return;
-  try {
-    const res = await fetch(HOSTS_LIST_URL.href);
-    if (res.ok) addHostsDomains(_adultDomains, await res.text());
-  } catch {
-    // Unavailable — domain check will pass everything through.
-  }
-  _domainsReady = true;
+  if (_domainsLoadPromise) return _domainsLoadPromise;
+  _domainsLoadPromise = (async () => {
+    try {
+      if (typeof fetch === "function") {
+        const res = await fetch(HOSTS_LIST_URL.href);
+        if (res.ok) {
+          addHostsDomains(_adultDomains, await res.text());
+          return;
+        }
+      }
+    } catch {
+      // Fall through to async Node-style file loading when available.
+    }
+
+    const getBuiltinModule = globalThis.process?.getBuiltinModule;
+    if (typeof getBuiltinModule === "function") {
+      try {
+        const fs = getBuiltinModule("fs");
+        const { fileURLToPath } = getBuiltinModule("url");
+        const hostsText = await fs.promises.readFile(fileURLToPath(HOSTS_LIST_URL), "utf8");
+        addHostsDomains(_adultDomains, hostsText);
+      } catch {
+        // Unavailable - domain check will pass everything through.
+      }
+    }
+  })().finally(() => {
+    _domainsReady = true;
+    _domainsLoadPromise = null;
+  });
+  return _domainsLoadPromise;
 }
 
 /** @returns {Set<string>} */
@@ -240,7 +264,7 @@ export function checkSpam(peerId, roomKey, now) {
     spamTracker.set(key, window);
   }
 
-  // Slide the window — remove timestamps older than WINDOW_MS
+  // Slide the window - remove timestamps older than WINDOW_MS
   const cutoff = ts - WINDOW_MS;
   while (window.length > 0 && window[0] <= cutoff) {
     window.shift();
@@ -412,6 +436,8 @@ export function getKickStatus(peerId, roomKey, now) {
   const remainingMs = Math.max(0, blockedUntil - ts);
   if (remainingMs <= 0) {
     kickList.delete(key);
+    violationTracker.delete(key);
+    violationTouchedAt.delete(key);
     return null;
   }
   return { kickedAt, blockedUntil, remainingMs };
@@ -431,10 +457,10 @@ export function addKick(peerId, roomKey, now) {
 
 /**
  * Run all moderation checks against a message.
- * @param {string} peerId  – sender's peer ID
- * @param {string} roomKey – room the message is in
- * @param {string} text    – plaintext message content
- * @param {number} [now]   – optional timestamp override (for testing)
+ * @param {string} peerId  - sender's peer ID
+ * @param {string} roomKey - room the message is in
+ * @param {string} text    - plaintext message content
+ * @param {number} [now]   - optional timestamp override (for testing)
  * @param {{ checkSpam?: boolean, trackViolations?: boolean, allowKick?: boolean }} [options]
  * @returns {{ allowed: boolean, reason: string, action: 'none' | 'warn' | 'final-warn' | 'kick', blockedUntil?: number, remainingMs?: number }}
  */
@@ -490,4 +516,5 @@ export function resetAll() {
   lastCleanupAt = 0;
   _adultDomains = new Set();
   _domainsReady = false;
+  _domainsLoadPromise = null;
 }

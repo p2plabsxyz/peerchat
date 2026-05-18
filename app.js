@@ -1882,7 +1882,15 @@ $("message-form")?.addEventListener("submit", async (e) => {
       input.value = savedMsg;
       resizeMessageField();
       saveDraft(S.activeRoom, savedMsg);
-      showModerationToast(err.message, err);
+      let toastMsg;
+      if (err.action === "warn") {
+        toastMsg = "Message blocked - please rephrase.";
+      } else if (err.action === "final-warn") {
+        toastMsg = "Final warning - next violation will lock you out of this room for 5 minutes.";
+      } else {
+        toastMsg = err.message;
+      }
+      showModerationToast(toastMsg, err);
     }
   }
 });
