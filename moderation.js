@@ -117,36 +117,9 @@ const HOSTS_LIST_URL = new URL("./lib/adult-domains.hosts", import.meta.url);
 const LOCALHOST_IP_RE = /^(?:0\.0\.0\.0|127\.0\.0\.1|::1)$/i;
 const HOSTS_DOMAIN_RE = /^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{2,63}$/i;
 
-/** @type {Set<string>|null} */
-let _adultDomains = null;
-
-function readAdultHostsFile() {
-  if (typeof XMLHttpRequest !== "undefined") {
-    try {
-      const xhr = new XMLHttpRequest();
-      xhr.open("GET", HOSTS_LIST_URL.href, false);
-      xhr.send(null);
-      if ((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) {
-        return xhr.responseText || "";
-      }
-    } catch {
-      // Fall through to Node-style file loading when available.
-    }
-  }
-
-  const getBuiltinModule = globalThis.process?.getBuiltinModule;
-  if (typeof getBuiltinModule === "function") {
-    try {
-      const fs = getBuiltinModule("fs");
-      const { fileURLToPath } = getBuiltinModule("url");
-      return fs.readFileSync(fileURLToPath(HOSTS_LIST_URL), "utf8");
-    } catch {
-      // The caller will use an empty domain set if the hosts file is unavailable.
-    }
-  }
-
-  return "";
-}
+/** @type {Set<string>} */
+let _adultDomains = new Set();
+let _domainsReady = false;
 
 function addHostsDomains(target, hostsText) {
   for (const rawLine of hostsText.split(/\r?\n/)) {
@@ -161,31 +134,35 @@ function addHostsDomains(target, hostsText) {
     if (!HOSTS_DOMAIN_RE.test(domain)) continue;
 
     target.add(domain);
-    if (domain.startsWith("www.")) {
-      target.add(domain.slice(4));
-    }
+    if (domain.startsWith("www.")) target.add(domain.slice(4));
   }
 }
 
 /**
- * Load the adult domain blocklist.
- * @returns {Set<string>}
+ * Call once at app startup (e.g. in initChat) to load the adult-domain blocklist
+ * asynchronously. Safe to call multiple times — only loads once.
+ * @returns {Promise<void>}
  */
+export async function initModeration() {
+  if (_domainsReady) return;
+  try {
+    const res = await fetch(HOSTS_LIST_URL.href);
+    if (res.ok) addHostsDomains(_adultDomains, await res.text());
+  } catch {
+    // Unavailable — domain check will pass everything through.
+  }
+  _domainsReady = true;
+}
+
+/** @returns {Set<string>} */
 export function getAdultDomains() {
-  if (_adultDomains) return _adultDomains;
-
-  _adultDomains = new Set();
-  addHostsDomains(_adultDomains, readAdultHostsFile());
-
   return _adultDomains;
 }
 
-/**
- * Inject a custom domain set (useful for testing).
- * @param {Set<string>} domains
- */
+/** @param {Set<string>} domains */
 export function setAdultDomains(domains) {
   _adultDomains = domains;
+  _domainsReady = true;
 }
 
 function getDomainSuffixes(domain) {
@@ -514,5 +491,6 @@ export function resetAll() {
   violationTouchedAt.clear();
   kickList.clear();
   lastCleanupAt = 0;
-  _adultDomains = null;
+  _adultDomains = new Set();
+  _domainsReady = false;
 }
