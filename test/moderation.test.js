@@ -33,10 +33,6 @@ describe("Moderation Engine", () => {
     resetAll();
   });
 
-  // =========================================================================
-  // Spam detection
-  // =========================================================================
-
   describe("checkSpam", () => {
     it("should allow messages under the rate limit", () => {
       const now = 1000000;
@@ -87,10 +83,6 @@ describe("Moderation Engine", () => {
     });
   });
 
-  // =========================================================================
-  // Abuse detection
-  // =========================================================================
-
   describe("checkAbuse", () => {
     it("should flag messages with slurs", () => {
       const result = checkAbuse("you are a retard");
@@ -119,10 +111,6 @@ describe("Moderation Engine", () => {
       assert.equal(checkAbuse(null).flagged, false);
     });
   });
-
-  // =========================================================================
-  // NSFW detection
-  // =========================================================================
 
   describe("checkNSFW", () => {
     it("should flag messages with explicit keywords", () => {
@@ -154,10 +142,6 @@ describe("Moderation Engine", () => {
       assert.equal(checkNSFW("sexual content").flagged, true);
     });
   });
-
-  // =========================================================================
-  // Adult domain detection
-  // =========================================================================
 
   describe("checkAdultDomains", () => {
     beforeEach(() => {
@@ -211,10 +195,6 @@ describe("Moderation Engine", () => {
     });
   });
 
-  // =========================================================================
-  // Violation escalation
-  // =========================================================================
-
   describe("recordViolation / escalation", () => {
     it("should return 'warn' on first violation", () => {
       const action = recordViolation(PEER, ROOM);
@@ -252,10 +232,6 @@ describe("Moderation Engine", () => {
     });
   });
 
-  // =========================================================================
-  // Kick list + cooldown
-  // =========================================================================
-
   describe("isKicked / addKick / cooldown", () => {
     it("should not be kicked by default", () => {
       assert.equal(isKicked(PEER, ROOM), false);
@@ -287,10 +263,6 @@ describe("Moderation Engine", () => {
       assert.equal(isKicked("peerB", ROOM, now + 1000), false);
     });
   });
-
-  // =========================================================================
-  // checkMessage — full orchestrator
-  // =========================================================================
 
   describe("checkMessage (orchestrator)", () => {
     beforeEach(() => {
@@ -324,7 +296,7 @@ describe("Moderation Engine", () => {
       assert.ok(result.reason.length > 0, "should have a reason");
     });
 
-    it("should escalate through warn → final-warn → kick", () => {
+    it("should escalate through warn -> final-warn -> kick", () => {
       // 1st violation: warn
       const r1 = checkMessage(PEER, ROOM, "you retard");
       assert.equal(r1.action, "warn");
@@ -365,7 +337,7 @@ describe("Moderation Engine", () => {
       assert.ok(result.reason.includes("spam"));
     });
 
-    it("NSFW-triggered kick flow: 3 NSFW violations → kick + rejoin blocked", () => {
+    it("NSFW-triggered kick flow: 3 NSFW violations -> kick + rejoin blocked", () => {
       const now = 1000000;
 
       // Space violations apart to avoid spam detection
@@ -391,12 +363,10 @@ describe("Moderation Engine", () => {
       assert.equal(r4.allowed, false);
       assert.equal(r4.remainingMs, ROOM_REJOIN_COOLDOWN_MS - 1100);
 
-      // After cooldown, peer should be allowed back
+      // After cooldown, peer should be allowed back with violations reset
       const afterCooldown = afterKick + ROOM_REJOIN_COOLDOWN_MS;
       assert.equal(isKicked(PEER, ROOM, afterCooldown), false);
-
-      // Clean message should go through after cooldown (violations still counted though)
-      // Note: violations persist, so the next violation will be another kick
+      assert.equal(getViolations(PEER, ROOM), 0);
     });
 
     it("should support content-only moderation without tracking violations", () => {

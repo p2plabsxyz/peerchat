@@ -2,17 +2,18 @@ export const MAX_MSGS_PER_WINDOW = 10;
 export const WINDOW_MS = 10_000;
 export const WARNING_THRESHOLD = 1;
 export const KICK_THRESHOLD = 3;
+export const FINAL_WARN_THRESHOLD = KICK_THRESHOLD - 1;
 export const ROOM_REJOIN_COOLDOWN_MS = 5 * 60_000;
 export const TRACKER_IDLE_TTL_MS = 30 * 60_000;
 
 /**
- * peerId:roomKey → array of message timestamps (sliding window)
+ * peerId:roomKey -> array of message timestamps (sliding window)
  * @type {Map<string, number[]>}
  */
 const spamTracker = new Map();
 
 /**
- * peerId:roomKey → cumulative violation count
+ * peerId:roomKey -> cumulative violation count
  * @type {Map<string, number>}
  */
 const violationTracker = new Map();
@@ -24,7 +25,7 @@ const violationTracker = new Map();
 const violationTouchedAt = new Map();
 
 /**
- * peerId:roomKey → timestamp when the peer was kicked
+ * peerId:roomKey -> timestamp when the peer was kicked
  * @type {Map<string, number>}
  */
 const kickList = new Map();
@@ -208,6 +209,8 @@ export function cleanupModerationState(now) {
   for (const [key, kickedAt] of kickList.entries()) {
     if (ts - kickedAt >= ROOM_REJOIN_COOLDOWN_MS) {
       kickList.delete(key);
+      violationTracker.delete(key);
+      violationTouchedAt.delete(key);
     }
   }
 }
@@ -246,7 +249,7 @@ export function checkSpam(peerId, roomKey, now) {
   // Record this message
   window.push(ts);
 
-  return window.length > MAX_MSGS_PER_WINDOW;
+  return window.length >= MAX_MSGS_PER_WINDOW;
 }
 
 /**
@@ -342,7 +345,8 @@ export function recordViolation(peerId, roomKey, now) {
   violationTouchedAt.set(key, ts);
 
   if (count >= KICK_THRESHOLD) return "kick";
-  if (count >= KICK_THRESHOLD - 1) return "final-warn";
+  if (count >= FINAL_WARN_THRESHOLD) return "final-warn";
+  if (count >= WARNING_THRESHOLD) return "warn";
   return "warn";
 }
 
@@ -382,8 +386,9 @@ export function isKicked(peerId, roomKey, now) {
 
   const ts = now ?? Date.now();
   if (ts - kickedAt >= ROOM_REJOIN_COOLDOWN_MS) {
-    // Cooldown expired — remove from kick list
     kickList.delete(key);
+    violationTracker.delete(key);
+    violationTouchedAt.delete(key);
     return false;
   }
   return true;
@@ -423,10 +428,6 @@ export function addKick(peerId, roomKey, now) {
   maybeCleanupModerationState(ts);
   kickList.set(peerRoomKey(peerId, roomKey), ts);
 }
-
-// ---------------------------------------------------------------------------
-// Orchestrator — single entry point for message checks
-// ---------------------------------------------------------------------------
 
 /**
  * Run all moderation checks against a message.
@@ -477,10 +478,6 @@ export function checkMessage(peerId, roomKey, text, now, options = {}) {
 
   return { allowed: true, reason: "", action: "none" };
 }
-
-// ---------------------------------------------------------------------------
-// Reset all state (for testing)
-// ---------------------------------------------------------------------------
 
 /**
  * Clear all moderation state. Intended for tests only.

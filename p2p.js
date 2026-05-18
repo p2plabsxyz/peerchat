@@ -303,7 +303,9 @@ function isModerationNoticeEntry(entry) {
 
 function feedEntryToMsg(entry, roomKey) {
   if (entry.type === "system") {
-    return { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
+    const out = { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
+    if (entry.moderationNotice) out.moderationNotice = true;
+    return out;
   }
   if (entry.type === "reaction") {
     return { id: entry.id, type: "reaction", msgId: entry.msgId, emoji: entry.emoji, sender: entry.sender, senderName: entry.sn || entry.sender, timestamp: entry.ts };
@@ -775,6 +777,7 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "room-meta") {
             const room = savedData.rooms[msg.roomKey];
             if (!room) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (room.isDM) { emitRoomUpdate(msg.roomKey); continue; }
 
             const incomingName = clamp(msg.name, MAX_NAME_LEN);
@@ -835,6 +838,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "members-list") {
             if (!msg.roomKey || !savedData.rooms[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room.members) room.members = {};
             const incoming = msg.members || {};
@@ -853,6 +857,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "sync-reaction") {
             if (!msg.id || !msg.roomKey || !msg.msgId || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const _srRoom = savedData.rooms[msg.roomKey];
             if (_srRoom && !_srRoom.isHost && _srRoom.joinedAt && msg.ts && msg.ts < _srRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
@@ -910,6 +915,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "reaction") {
             if (!msg.id || !msg.roomKey || !msg.msgId || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (!trackId(msg.id)) continue;
             appendToFeed(msg.roomKey, {
               type: "reaction", id: msg.id, msgId: clamp(msg.msgId, 64),
@@ -1172,7 +1178,7 @@ export async function handleChatRequest(req, sdk) {
 
         // --- Moderation gate for outgoing messages ---
         const modResult = moderationCheck(localId, roomKey, message, undefined, {
-          allowKick: true,
+          allowKick: false,
           checkSpam: false,
         });
 
