@@ -1886,7 +1886,7 @@ $("message-form")?.addEventListener("submit", async (e) => {
       if (err.action === "warn") {
         toastMsg = "Message blocked - please rephrase.";
       } else if (err.action === "final-warn") {
-        toastMsg = "Final warning - next violation will lock you out of this room for 5 minutes.";
+        toastMsg = "Message blocked again - please rephrase before sending.";
       } else {
         toastMsg = err.message;
       }

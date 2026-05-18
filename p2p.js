@@ -715,6 +715,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "dm-invite") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (msg.toId && normPeerId(msg.toId) !== normPeerId(localId)) continue;
             if (savedData.rooms[msg.roomKey]) {
               try {
@@ -936,7 +937,6 @@ export function initChat(sdk, options = {}) {
           if (moderationIsKicked(remoteId, msg.roomKey)) continue;
           if (!trackId(msg.id)) continue;
 
-          // --- Moderation gate for incoming peer messages ---
           let moderatedPlaintext = "";
           try {
             const decrypted = decryptIncomingChat(msg, "peer message");
@@ -952,8 +952,6 @@ export function initChat(sdk, options = {}) {
             console.warn("[chat] Moderation check error:", modErr.message);
             // On error, allow the message through rather than silently dropping
           }
-          // --- End moderation gate ---
-
           cacheDecryptedMessage(msg.roomKey, msg.id, moderatedPlaintext);
           appendToFeed(msg.roomKey, {
             id: msg.id, sender: remoteId, sn: clamp(msg.sn, 50) || remoteId,
@@ -1184,7 +1182,6 @@ export async function handleChatRequest(req, sdk) {
         const message = clamp(body.message, MAX_MSG_LEN);
         if (!message) return respond(400, { error: "Empty message" });
 
-        // --- Moderation gate for outgoing messages ---
         const modResult = moderationCheck(localId, roomKey, message, undefined, {
           allowKick: false,
           checkSpam: false,
@@ -1199,8 +1196,6 @@ export async function handleChatRequest(req, sdk) {
             remainingMs: modResult.remainingMs,
           });
         }
-        // --- End moderation gate ---
-
         const id = randomBytes(16).toString("hex");
         if (!trackId(id)) return respond(200, { message: "Duplicate" });
 
