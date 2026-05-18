@@ -261,6 +261,7 @@ html, body {
 #chat-active {
   flex: 1; display: flex; flex-direction: column; min-height: 0;
   background: var(--chat-bg);
+  position: relative;
 }
 
 #chat-header {
@@ -983,4 +984,50 @@ a:hover { text-decoration: none; }
   max-width: 90vw; max-height: 85vh;
   border-radius: 8px; object-fit: contain;
   box-shadow: 0 8px 40px color-mix(in srgb, var(--browser-theme-text-color) 45%, var(--surface-mix));
+}
+
+/* ---- Moderation Toast ---- */
+.moderation-toast {
+  position: absolute;
+  top: 4.25rem;
+  right: 1rem;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100% - 2rem));
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--badge-bg) 18%, var(--popup-bg));
+  border: 1px solid var(--badge-bg);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  font-size: 0.82rem;
+  color: var(--text);
+  animation: modToastSlideIn 0.3s ease-out;
+}
+.moderation-toast-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+.moderation-toast-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.moderation-toast-close {
+  all: unset;
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--muted);
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+.moderation-toast-close:hover {
+  color: var(--text);
+}
+@keyframes modToastSlideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

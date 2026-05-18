@@ -15,7 +15,19 @@ async function apiRequest(action, opts = {}) {
     init.method = "POST";
   }
   const res = await fetch(`${API}${qs}`, init);
-  if (!res.ok) throw new Error(`${action}: ${res.statusText}`);
+  if (!res.ok) {
+    let errMsg = `${action}: ${res.statusText}`;
+    let errBody = null;
+    try {
+      const body = await res.json();
+      errBody = body;
+      if (body.error) errMsg = body.error;
+    } catch {}
+    const err = new Error(errMsg);
+    err.status = res.status;
+    if (errBody && typeof errBody === "object") Object.assign(err, errBody);
+    throw err;
+  }
   return res.json();
 }
 

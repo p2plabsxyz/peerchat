@@ -1340,6 +1340,56 @@ function appendSystemMsg(roomKey, text) {
   if (atBottom) container.scrollTop = container.scrollHeight;
 }
 
+function formatBlockDuration(ms) {
+  const totalSeconds = Math.max(0, Math.ceil(Number(ms || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours}h`);
+  if (minutes || hours) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
+function buildModerationToastMessage(message, details = {}) {
+  const blockedUntil = Number(details.blockedUntil || 0);
+  const remainingMs = blockedUntil ? Math.max(0, blockedUntil - Date.now()) : Number(details.remainingMs || 0);
+  if (!remainingMs && !blockedUntil) return message;
+
+  const unblockedAt = blockedUntil
+    ? new Date(blockedUntil).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : "";
+  const timing = [`Remaining time: ${formatBlockDuration(remainingMs)}`];
+  if (unblockedAt) timing.push(`Unblocked at ${unblockedAt}`);
+  return `${message}. ${timing.join(". ")}`;
+}
+
+let moderationToastCleanup = null;
+
+function showModerationToast(message, details = {}) {
+  // Remove any existing toast
+  if (moderationToastCleanup) moderationToastCleanup();
+  const toast = document.createElement("div");
+  toast.className = "moderation-toast";
+  toast.innerHTML = `<span class="moderation-toast-icon">⚠️</span><span class="moderation-toast-text"></span><button type="button" class="moderation-toast-close" aria-label="Dismiss">&times;</button>`;
+  const text = toast.querySelector(".moderation-toast-text");
+  const render = () => { text.textContent = buildModerationToastMessage(message, details); };
+  render();
+  const interval = details.blockedUntil ? setInterval(render, 1000) : null;
+  const removeToast = () => {
+    if (interval) clearInterval(interval);
+    if (moderationToastCleanup === removeToast) moderationToastCleanup = null;
+    toast.remove();
+  };
+  moderationToastCleanup = removeToast;
+  toast.querySelector(".moderation-toast-close").addEventListener("click", removeToast);
+  const panel = $("chat-active") || document.body;
+  panel.appendChild(toast);
+  // Auto-dismiss after 8 seconds
+  setTimeout(() => { if (toast.parentNode) removeToast(); }, 8000);
+}
+
 function appendMessage(roomKey, msg) {
   if (!chatMessageRenders(msg)) return false;
   if (!S.messages[roomKey]) S.messages[roomKey] = [];
@@ -1815,6 +1865,7 @@ $("message-form")?.addEventListener("submit", async (e) => {
   const input = $("message-input");
   const msg = input.value.trim();
   if (!msg || !S.activeRoom) return;
+  const savedMsg = msg;
   input.value = "";
   resizeMessageField();
   saveDraft(S.activeRoom, "");
@@ -1824,7 +1875,24 @@ $("message-form")?.addEventListener("submit", async (e) => {
     const resp = await chat.sendMessage(S.activeRoom, body);
     if (resp.sent) appendMessage(S.activeRoom, resp.sent);
     playSound("send");
-  } catch (err) { console.error("Send failed:", err); }
+  } catch (err) {
+    console.error("Send failed:", err);
+    // Check for moderation block (403)
+    if (err?.status === 403 && err?.moderation === true) {
+      input.value = savedMsg;
+      resizeMessageField();
+      saveDraft(S.activeRoom, savedMsg);
+      let toastMsg;
+      if (err.action === "warn") {
+        toastMsg = "Message blocked - please rephrase.";
+      } else if (err.action === "final-warn") {
+        toastMsg = "Message blocked again - please rephrase before sending.";
+      } else {
+        toastMsg = err.message;
+      }
+      showModerationToast(toastMsg, err);
+    }
+  }
 });
 
 function buildMentionPopup() {
