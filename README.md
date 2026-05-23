@@ -39,6 +39,38 @@ Small teams or group of friends who already trust each other and want something 
 
 **Moderation path** — Outgoing messages are checked locally before encryption. Live incoming messages are decrypted, checked, and either appended or replaced with a local system notice. History sync uses a content-only check so old filtered messages are not reintroduced when a new peer joins, while the syncing peer is not punished for replaying past history. Kick/rejoin checks use the connection-level peer identity instead of a self-reported message field.
 
+### Moderation details
+
+All moderation runs **locally on each peer**—there is no central authority. Even if a remote peer strips moderation from their build, your node still filters their messages independently.
+
+**Content filters** (applied to every message):
+
+| Filter | What it catches | Source |
+|--------|----------------|--------|
+| Abuse patterns | Slurs, hate speech, direct threats, common profanity | Regex list in `moderation.js` |
+| NSFW patterns | Explicit sexual terms, porn site names | Regex list in `moderation.js` |
+| Adult domain blocklist | ~76K known adult domains extracted from URLs in messages | `lib/adult-domains.hosts`, loaded asynchronously at startup via `initModeration()` |
+
+**Spam detection** (remote peers only; local user is exempt):
+
+- A sliding window of `MAX_MSGS_PER_WINDOW` (default **10**) messages within `WINDOW_MS` (default **10 seconds**).
+- The 10th message in the window triggers a spam violation.
+- Local outgoing messages skip the spam check since they are separately rate-limited at the HTTP handler level (60 requests / 60 seconds).
+
+**Escalation ladder** (tunable constants in `moderation.js`):
+
+| Violation count | Action | Effect |
+|-----------------|--------|--------|
+| >= `WARNING_THRESHOLD` (1) | `warn` | Message blocked; toast: "Message blocked - please rephrase." |
+| >= `FINAL_WARN_THRESHOLD` (2) | `final-warn` | Message blocked; toast: "Message blocked again - please rephrase before sending." |
+| >= `KICK_THRESHOLD` (3) | `kick` | **Remote peers:** blocked from all room-scoped message types for `ROOM_REJOIN_COOLDOWN_MS` (5 min). **Local user:** capped to `final-warn` (never self-kicked). |
+
+**Kick cooldown and violation reset:**
+
+- A kicked remote peer is blocked from chat messages, reactions, sync-reactions, room-meta updates, members-list pushes, join announcements, and leave notices for the full cooldown period.
+- When the cooldown expires the peer's **violation count resets to zero**, so their next offense starts fresh at `warn`, not an instant re-kick.
+- The violation counter also resets independently after `TRACKER_IDLE_TTL_MS` (30 minutes) of inactivity, even without a kick.
+
 ## Security
 
 These apps solve different problems; the table is to set expectations, not to pick a “winner.”

@@ -986,7 +986,6 @@ a:hover { text-decoration: none; }
   box-shadow: 0 8px 40px color-mix(in srgb, var(--browser-theme-text-color) 45%, var(--surface-mix));
 }
 
-/* ---- Moderation Toast ---- */
 .moderation-toast {
   position: absolute;
   top: 4.25rem;
