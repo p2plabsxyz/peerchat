@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  moderation:
+    name: Moderation tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        # Node 22+ required: moderation.js hosts loader uses process.getBuiltinModule (22.3+).
+        # Electron 41 (peersky-browser) bundles Node 22.
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check
+        run: |
+          node --check moderation.js
+          node --check chat-api.js
+          node --check app.js
+          node --check rooms.js
+          # p2p.js imports the npm pkg b4a; --check would fail without install.
+
+      - name: Hosts blocklist sanity
+        run: |
+          test -s lib/adult-domains.hosts
+          lines=$(wc -l < lib/adult-domains.hosts)
+          echo "adult-domains.hosts: $lines lines"
+          test "$lines" -gt 50000
+
+      - name: Moderation test suite
+        run: node --test --test-reporter=spec

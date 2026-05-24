@@ -6,6 +6,12 @@ import {
   randomBytes,
 } from "crypto";
 import { existsSync, readFileSync, writeFileSync } from "fs";
+import {
+  checkContent as moderationCheckContent,
+  initModeration,
+  checkMessage as moderationCheck,
+  isKicked as moderationIsKicked,
+} from "./moderation.js";
 import b4a from "b4a";
 
 export const CHAT_STORAGE = "peersky-chat-rooms.json";
@@ -31,6 +37,7 @@ const joinedRooms = new Set();
 const discoveryKeys = new Set();
 const seenIds = new Set();
 const rateCounters = new Map();
+const decryptedMessageCache = new Map();
 
 let peers = [];
 let localId = "";
@@ -272,9 +279,34 @@ async function appendToFeed(roomKey, entry) {
   await feed.append(entry);
 }
 
+function messageCacheKey(roomKey, msgId) {
+  return `${roomKey}:${msgId}`;
+}
+
+function cacheDecryptedMessage(roomKey, msgId, plaintext) {
+  if (!msgId || typeof plaintext !== "string") return;
+  decryptedMessageCache.set(messageCacheKey(roomKey, msgId), plaintext);
+}
+
+function consumeCachedDecryptedMessage(roomKey, msgId) {
+  if (!msgId) return null;
+  const key = messageCacheKey(roomKey, msgId);
+  if (!decryptedMessageCache.has(key)) return null;
+  const plaintext = decryptedMessageCache.get(key);
+  decryptedMessageCache.delete(key);
+  return plaintext;
+}
+
+function isModerationNoticeEntry(entry) {
+  return entry?.moderationNotice === true ||
+    (entry?.type === "system" && typeof entry.id === "string" && entry.id.startsWith("mod-"));
+}
+
 function feedEntryToMsg(entry, roomKey) {
   if (entry.type === "system") {
-    return { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
+    const out = { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
+    if (entry.moderationNotice) out.moderationNotice = true;
+    return out;
   }
   if (entry.type === "reaction") {
     return { id: entry.id, type: "reaction", msgId: entry.msgId, emoji: entry.emoji, sender: entry.sender, senderName: entry.sn || entry.sender, timestamp: entry.ts };
@@ -284,7 +316,7 @@ function feedEntryToMsg(entry, roomKey) {
       id: entry.id,
       sender: entry.sender,
       senderName: entry.sn || entry.sender,
-      message: decryptMsg(entry.ct, entry.iv, entry.tag, roomKey),
+      message: consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey),
       timestamp: entry.ts,
       replyTo: entry.replyTo || null,
     };
@@ -310,6 +342,7 @@ async function syncRoomHistoryTo(conn, rk) {
     try {
       if (conn.destroyed) return;
       const e = await feed.get(i);
+      if (isModerationNoticeEntry(e)) continue;
       const syncType = e.type === "system" ? "sync-system" : e.type === "reaction" ? "sync-reaction" : "sync";
       const ok = conn.write(JSON.stringify({ type: syncType, roomKey: rk, ...e }) + "\n");
       if (!ok) {
@@ -330,6 +363,41 @@ async function syncHistoryTo(conn) {
   if (!conn.destroyed) {
     try { conn.write(JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
   }
+}
+
+function decryptIncomingChat(msg, label) {
+  if (!msg.ct || !msg.iv || !msg.tag) {
+    console.warn(`[chat] Dropping ${label}: missing encrypted payload`);
+    return { ok: false, plaintext: "" };
+  }
+
+  try {
+    return { ok: true, plaintext: decryptMsg(msg.ct, msg.iv, msg.tag, msg.roomKey) };
+  } catch (err) {
+    console.warn(`[chat] Dropping ${label}: decrypt failed (${err.message})`);
+    return { ok: false, plaintext: "" };
+  }
+}
+
+function moderationSystemText(peerName, modResult) {
+  if (modResult.action === "kick") {
+    return `\uD83D\uDEAB ${peerName} was auto-kicked (${modResult.reason})`;
+  }
+  if (modResult.action === "final-warn") {
+    return `\uD83D\uDEA8 Final warning for ${peerName} (${modResult.reason})`;
+  }
+  return `\u26A0\uFE0F ${peerName}: message filtered (${modResult.reason})`;
+}
+
+function appendModerationNotice(roomKey, sourceId, peerName, modResult, ts) {
+  const sysId = `mod-${sourceId || Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return appendToFeed(roomKey, {
+    id: sysId,
+    type: "system",
+    moderationNotice: true,
+    text: moderationSystemText(peerName, modResult),
+    ts: ts || Date.now(),
+  }).catch(() => {});
 }
 
 function shareProfile(conn) {
@@ -505,6 +573,8 @@ export function initChat(sdk, options = {}) {
   if (options.storagePath) dataPath = options.storagePath;
   localId = sdk.publicKey ? b4a.toString(sdk.publicKey, "hex").slice(0, 8).toLowerCase() : "local";
 
+  initModeration().catch((e) => console.warn("[chat] Moderation blocklist load failed:", e.message));
+
   loadData();
 
   setInterval(() => {
@@ -609,23 +679,26 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "join") {
             if (!msg.roomKey || !msg.peerId) continue;
-            const joinName = clamp(msg.username, 50) || msg.peerId;
+            const joinPeerId = remoteId || msg.peerId;
+            // Block join using the connection-level peer identity, not the self-reported body.
+            if (moderationIsKicked(joinPeerId, msg.roomKey)) continue;
+            const joinName = clamp(msg.username, 50) || joinPeerId;
             const room = savedData.rooms[msg.roomKey];
-            const alreadyKnownMember = !!(room?.members?.[msg.peerId]?.joinedAt);
+            const alreadyKnownMember = !!(room?.members?.[joinPeerId]?.joinedAt);
             if (room) {
               if (!room.members) room.members = {};
-              room.members[msg.peerId] = {
-                ...(room.members[msg.peerId] || {}),
+              room.members[joinPeerId] = {
+                ...(room.members[joinPeerId] || {}),
                 username: joinName,
                 bio: clamp(msg.bio, MAX_BIO_LEN),
                 avatar: sanitizeAvatar(msg.avatar),
-                joinedAt: room.members[msg.peerId]?.joinedAt || Date.now(),
+                joinedAt: room.members[joinPeerId]?.joinedAt || Date.now(),
               };
               debouncePersist();
-              broadcastGlobal("member-update", { peerId: msg.peerId, username: joinName, bio: clamp(msg.bio, MAX_BIO_LEN), avatar: sanitizeAvatar(msg.avatar), isOnline: true, rooms: [msg.roomKey] });
+              broadcastGlobal("member-update", { peerId: joinPeerId, username: joinName, bio: clamp(msg.bio, MAX_BIO_LEN), avatar: sanitizeAvatar(msg.avatar), isOnline: true, rooms: [msg.roomKey] });
             }
 
-            const sysId = msg.id || `${msg.roomKey}-${msg.peerId}-join-${msg.ts || Date.now()}`;
+            const sysId = msg.id || `${msg.roomKey}-${joinPeerId}-join-${msg.ts || Date.now()}`;
             if (roomFeeds[msg.roomKey] && !alreadyKnownMember && trackId(sysId)) {
               appendToFeed(msg.roomKey, { id: sysId, type: "system", text: `${joinName} joined`, ts: msg.ts || Date.now() }).catch(() => {});
             }
@@ -642,6 +715,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "dm-invite") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (msg.toId && normPeerId(msg.toId) !== normPeerId(localId)) continue;
             if (savedData.rooms[msg.roomKey]) {
               try {
@@ -707,6 +781,7 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "room-meta") {
             const room = savedData.rooms[msg.roomKey];
             if (!room) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (room.isDM) { emitRoomUpdate(msg.roomKey); continue; }
 
             const incomingName = clamp(msg.name, MAX_NAME_LEN);
@@ -721,7 +796,7 @@ export function initChat(sdk, options = {}) {
               updated = true;
             }
 
-            // Only fill bio/link/avatar/creator if currently missing — prevents spoofing
+            // Only fill bio/link/avatar/creator if currently missing - prevents spoofing
             if (msg.bio && !room.bio) { room.bio = clamp(msg.bio, MAX_BIO_LEN); updated = true; }
             if (msg.link && !room.link) { room.link = clamp(msg.link, MAX_LINK_LEN) || ""; updated = true; }
             if (msg.avatar && !room.avatar) {
@@ -739,6 +814,7 @@ export function initChat(sdk, options = {}) {
           }
 
           if (msg.type === "request-room-meta") {
+            if (msg.roomKey && moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (msg.roomKey && savedData.rooms[msg.roomKey]) {
               sendRoomMeta(conn, msg.roomKey);
             }
@@ -747,6 +823,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "leave") {
             if (msg.roomKey && msg.peerId) {
+              if (moderationIsKicked(remoteId, msg.roomKey)) continue;
               const leaveName = clamp(msg.username, 50) || msg.peerId;
               const room = savedData.rooms[msg.roomKey];
               if (room?.members?.[msg.peerId]) {
@@ -767,6 +844,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "members-list") {
             if (!msg.roomKey || !savedData.rooms[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room.members) room.members = {};
             const incoming = msg.members || {};
@@ -785,6 +863,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "sync-reaction") {
             if (!msg.id || !msg.roomKey || !msg.msgId || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const _srRoom = savedData.rooms[msg.roomKey];
             if (_srRoom && !_srRoom.isHost && _srRoom.joinedAt && msg.ts && msg.ts < _srRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
@@ -798,18 +877,40 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "sync-system") {
             if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const _sysRoom = savedData.rooms[msg.roomKey];
             if (_sysRoom && !_sysRoom.isHost && _sysRoom.joinedAt && msg.ts && msg.ts < _sysRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
+            const sysModeration = moderationCheckContent(msg.text);
+            if (sysModeration.flagged) {
+              appendModerationNotice(msg.roomKey, msg.id, "Synced history", {
+                action: "warn",
+                reason: sysModeration.reason,
+              }, msg.ts);
+              continue;
+            }
             appendToFeed(msg.roomKey, { id: msg.id, type: "system", text: msg.text, ts: msg.ts || Date.now() }).catch(() => {});
             continue;
           }
 
           if (msg.type === "sync") {
             if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             const _syncRoom = savedData.rooms[msg.roomKey];
             if (_syncRoom && !_syncRoom.isHost && _syncRoom.joinedAt && msg.ts && msg.ts < _syncRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
+            const decrypted = decryptIncomingChat(msg, "synced message");
+            if (!decrypted.ok) continue;
+            const syncModeration = moderationCheckContent(decrypted.plaintext);
+            if (syncModeration.flagged) {
+              const syncPeerName = clamp(msg.sn, 50) || clamp(msg.sender, MAX_SENDER_LEN) || remoteId;
+              appendModerationNotice(msg.roomKey, msg.id, syncPeerName, {
+                action: "warn",
+                reason: syncModeration.reason,
+              }, msg.ts);
+              continue;
+            }
+            cacheDecryptedMessage(msg.roomKey, msg.id, decrypted.plaintext);
             appendToFeed(msg.roomKey, {
               id: msg.id, sender: clamp(msg.sender, MAX_SENDER_LEN), sn: clamp(msg.sn, 50),
               ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
@@ -822,6 +923,7 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "reaction") {
             if (!msg.id || !msg.roomKey || !msg.msgId || !roomFeeds[msg.roomKey]) continue;
+            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (!trackId(msg.id)) continue;
             appendToFeed(msg.roomKey, {
               type: "reaction", id: msg.id, msgId: clamp(msg.msgId, 64),
@@ -832,8 +934,25 @@ export function initChat(sdk, options = {}) {
           }
 
           if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
+          if (moderationIsKicked(remoteId, msg.roomKey)) continue;
           if (!trackId(msg.id)) continue;
 
+          let moderatedPlaintext = "";
+          try {
+            const decrypted = decryptIncomingChat(msg, "peer message");
+            if (!decrypted.ok) continue;
+            moderatedPlaintext = decrypted.plaintext;
+            const modResult = moderationCheck(remoteId, msg.roomKey, decrypted.plaintext);
+            if (!modResult.allowed) {
+              const peerName = clamp(msg.sn, 50) || savedData.peerProfiles[remoteId]?.username || remoteId;
+              appendModerationNotice(msg.roomKey, msg.id, peerName, modResult, msg.ts);
+              continue;
+            }
+          } catch (modErr) {
+            console.warn("[chat] Moderation check error:", modErr.message);
+            // On error, allow the message through rather than silently dropping
+          }
+          cacheDecryptedMessage(msg.roomKey, msg.id, moderatedPlaintext);
           appendToFeed(msg.roomKey, {
             id: msg.id, sender: remoteId, sn: clamp(msg.sn, 50) || remoteId,
             ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
@@ -1063,6 +1182,20 @@ export async function handleChatRequest(req, sdk) {
         const message = clamp(body.message, MAX_MSG_LEN);
         if (!message) return respond(400, { error: "Empty message" });
 
+        const modResult = moderationCheck(localId, roomKey, message, undefined, {
+          allowKick: false,
+          checkSpam: false,
+        });
+
+        if (!modResult.allowed) {
+          return respond(403, {
+            error: `Message blocked: ${modResult.reason}`,
+            moderation: true,
+            action: modResult.action,
+            blockedUntil: modResult.blockedUntil,
+            remainingMs: modResult.remainingMs,
+          });
+        }
         const id = randomBytes(16).toString("hex");
         if (!trackId(id)) return respond(200, { message: "Duplicate" });
 
@@ -1090,6 +1223,7 @@ export async function handleChatRequest(req, sdk) {
           ...(fileSize != null && fileName && { fileSize }),
         };
 
+        cacheDecryptedMessage(roomKey, id, message);
         await appendToFeed(roomKey, entry);
         relayToPeers(JSON.stringify({ ...entry, roomKey }) + "\n");
         return respond(200, {

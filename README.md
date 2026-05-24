@@ -19,9 +19,10 @@ Small teams or group of friends who already trust each other and want something 
 - Rooms with name, bio, optional link, and optional picture
 - Messages stored in a **Hypercore** per room (append-only log), synced across peers
 - Live delivery over **Hyperswarm** (Noise-encrypted transport) plus **SSE** (`receive-all`) so the web UI updates without polling every room
-- Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments** via a dedicated Hyperdrive (`peerchat` shows up in Settings → Archive like other apps). **No file upload limits** in PeerChat.
+- Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments** via a dedicated Hyperdrive (`peerchat` shows up in Settings -> Archive like other apps). **No file upload limits** in PeerChat.
 - **Direct Messages (DMs):** click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived deterministically from both peer IDs so only those two people share it
 - Room list, unread counts, and local settings persist on disk
+- **Built-in moderation:** obvious abuse, spam bursts, NSFW terms, and known adult-domain links are filtered before they reach the room feed. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
 - **Emoji picker** in the message composer: type keywords to filter characters; data comes from [emojilib](https://github.com/muan/emojilib), vendored as `lib/emojilib-emoji-en-US.json`.
 
 ## How it works
@@ -34,7 +35,41 @@ Small teams or group of friends who already trust each other and want something 
 
 **Storage** — Room metadata, your profile, and encrypted room keys (when available) live in a JSON file under Electron user data (`CHAT_STORAGE` in `p2p.js`, wired from `hyper-handler.js`). Optional **safeStorage** encrypts that blob when the OS supports it.
 
-**Joining again** — Use **Join room** with the 64-character key. For room metadata or keys stored in your archive, open **Settings → Archive** in PeerSky and look under Hyperdrives for **peerchat-rooms**.
+**Joining again** — Use **Join room** with the 64-character key. For room metadata or keys stored in your archive, open **Settings -> Archive** in PeerSky and look under Hyperdrives for **peerchat-rooms**.
+
+**Moderation path** — Outgoing messages are checked locally before encryption. Live incoming messages are decrypted, checked, and either appended or replaced with a local system notice. History sync uses a content-only check so old filtered messages are not reintroduced when a new peer joins, while the syncing peer is not punished for replaying past history. Kick/rejoin checks use the connection-level peer identity instead of a self-reported message field.
+
+### Moderation details
+
+All moderation runs **locally on each peer**—there is no central authority. Even if a remote peer strips moderation from their build, your node still filters their messages independently.
+
+**Content filters** (applied to every message):
+
+| Filter | What it catches | Source |
+|--------|----------------|--------|
+| Abuse patterns | Slurs, hate speech, direct threats, common profanity | Regex list in `moderation.js` |
+| NSFW patterns | Explicit sexual terms, porn site names | Regex list in `moderation.js` |
+| Adult domain blocklist | ~76K known adult domains extracted from URLs in messages | `lib/adult-domains.hosts`, loaded asynchronously at startup via `initModeration()` |
+
+**Spam detection** (remote peers only; local user is exempt):
+
+- A sliding window of `MAX_MSGS_PER_WINDOW` (default **10**) messages within `WINDOW_MS` (default **10 seconds**).
+- The 10th message in the window triggers a spam violation.
+- Local outgoing messages skip the spam check since they are separately rate-limited at the HTTP handler level (60 requests / 60 seconds).
+
+**Escalation ladder** (tunable constants in `moderation.js`):
+
+| Violation count | Action | Effect |
+|-----------------|--------|--------|
+| >= `WARNING_THRESHOLD` (1) | `warn` | Message blocked; toast: "Message blocked - please rephrase." |
+| >= `FINAL_WARN_THRESHOLD` (2) | `final-warn` | Message blocked; toast: "Message blocked again - please rephrase before sending." |
+| >= `KICK_THRESHOLD` (3) | `kick` | **Remote peers:** blocked from all room-scoped message types for `ROOM_REJOIN_COOLDOWN_MS` (5 min). **Local user:** capped to `final-warn` (never self-kicked). |
+
+**Kick cooldown and violation reset:**
+
+- A kicked remote peer is blocked from chat messages, reactions, sync-reactions, room-meta updates, members-list pushes, join announcements, and leave notices for the full cooldown period.
+- When the cooldown expires the peer's **violation count resets to zero**, so their next offense starts fresh at `warn`, not an instant re-kick.
+- The violation counter also resets independently after `TRACKER_IDLE_TTL_MS` (30 minutes) of inactivity, even without a kick.
 
 ## Security
 
@@ -55,7 +90,8 @@ These apps solve different problems; the table is to set expectations, not to pi
 
 - **Room key is the capability.** Anyone with it can join the swarm and decrypt traffic for that room. Treat it like a strong shared secret.
 - **No “real” host** in the network sense: peers are symmetric. “Host” in the UI only marks who created the room on that device.
-- Rate limits and a max **message text** length cut spam in the feed; file uploads have **no size limit** in the app. The UI escapes text before rendering to limit XSS.
+- Rate limits, a max **message text** length, and moderation filters cut spam and obvious unsafe content in the feed; file uploads have **no size limit** in the app. The UI escapes text before rendering to limit XSS.
+- Moderation is local and heuristic, not a trust or safety service. It helps with accidental exposure and noisy peers, but it does not replace trusted room keys, identity verification, or user judgment.
 - **Not** Matrix/Signal-class identity, device verification, or perfect forward secrecy.
 
 ## Development
@@ -74,7 +110,13 @@ const profile = await chat.getProfile();
 const { rooms, peerProfiles, onlinePeers } = await chat.getRooms();
 
 // Send a message
-await chat.sendMessage(roomKey, { message: "Hello!" });
+try {
+  await chat.sendMessage(roomKey, { message: "Hello!" });
+} catch (err) {
+  if (err.status === 403 && err.moderation === true) {
+    // Message was blocked locally; check err.error, err.action, and err.remainingMs for details.
+  }
+}
 
 // React to a message
 await chat.react(roomKey, { msgId, emoji: "👍" });
