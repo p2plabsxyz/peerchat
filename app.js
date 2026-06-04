@@ -16,6 +16,7 @@ const S = {
 };
 
 const REACT_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
+const AUTO_INLINE_PREVIEW_MAX_BYTES = 100 * 1024 * 1024;
 
 let globalES = null;
 let reconnectTimer = null;
@@ -148,6 +149,10 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function shouldAutoInline(fileSize) {
+  return fileSize == null || fileSize <= AUTO_INLINE_PREVIEW_MAX_BYTES;
+}
+
 function isHyperFileUrl(url) {
   if (!(/^hyper:\/\//i.test(url))) return false;
   if (isImageFile(url) || isVideoFile(url)) return false;
@@ -199,6 +204,26 @@ function fileAttachHtml(url, fileNameOpt, fileSizeOpt) {
   return `<div class="msg-file-attach" data-file-url="${escU}">
     <div class="msg-file-attach-open" role="link" tabindex="0" aria-label="Open file in new tab">
       <div class="msg-file-attach-icon"><img class="msg-file-attach-icon-img" src="./assets/svg/p2p.svg" alt="" width="36" height="36" /></div>
+      <div class="msg-file-attach-info">
+        <span class="msg-file-attach-name">${escN}</span>
+        ${sizeLbl ? `<span class="msg-file-attach-size">${esc(sizeLbl)}</span>` : ""}
+      </div>
+    </div>
+    <button type="button" class="msg-file-attach-dl-btn" aria-label="Download file" data-file-url="${escU}" data-file-name="${escN}">
+      <img class="msg-file-attach-dl-icon" src="./assets/svg/download.svg" alt="" width="20" height="20" />
+    </button>
+  </div>`;
+}
+
+function largeMediaHtml(url, fileNameOpt, fileSizeOpt, mediaType) {
+  const name = fileNameOpt || displayNameFromHyperPath(url);
+  const sizeLbl = formatFileSize(fileSizeOpt);
+  const escU = esc(url);
+  const escN = esc(name);
+  const iconSvg = './assets/svg/p2p.svg';
+  return `<div class="msg-file-attach large-media-placeholder" data-large-url="${escU}" data-large-type="${mediaType}">
+    <div class="msg-file-attach-open" role="button" tabindex="0" aria-label="Load media">
+      <div class="msg-file-attach-icon"><img class="msg-file-attach-icon-img" src="${iconSvg}" alt="" width="36" height="36" /></div>
       <div class="msg-file-attach-info">
         <span class="msg-file-attach-name">${escN}</span>
         ${sizeLbl ? `<span class="msg-file-attach-size">${esc(sizeLbl)}</span>` : ""}
@@ -405,9 +430,17 @@ function linkify(text, msg) {
     if (url.includes('@') && !url.includes('://')) {
       parts.push(`<a href="mailto:${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
     } else if (isImageFile(url)) {
-      parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
+      if (shouldAutoInline(msg?.fileSize)) {
+        parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
+      } else {
+        parts.push(largeMediaHtml(url, msg?.fileName, msg?.fileSize, 'image'));
+      }
     } else if (isVideoFile(url)) {
-      parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
+      if (shouldAutoInline(msg?.fileSize)) {
+        parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
+      } else {
+        parts.push(largeMediaHtml(url, msg?.fileName, msg?.fileSize, 'video'));
+      }
     } else if (isHyperFileUrl(url)) {
       parts.push(fileAttachHtml(url, null, null));
     } else {
@@ -1233,7 +1266,7 @@ function makeMsgEl(msg) {
   el.appendChild(time);
 
   el.addEventListener("dblclick", (e) => {
-    if (e.target.closest("a, .msg-file-attach-open, .msg-file-attach-dl-btn, .msg-reply-quote, img, video, button, .msg-react-trigger, .reaction-bubble")) return;
+    if (e.target.closest("a, .msg-file-attach-open, .msg-file-attach-dl-btn, .msg-reply-quote, img, video, button, .msg-react-trigger, .reaction-bubble, .large-media-placeholder")) return;
     setReply(msg);
   });
 
@@ -2416,7 +2449,16 @@ document.addEventListener("click", (ev) => {
     ev.stopPropagation();
     const wrap = openZone.closest(".msg-file-attach");
     const url = wrap?.getAttribute("data-file-url");
-    if (url) window.open(url);
+    if (!url) return;
+    if (wrap?.classList.contains("large-media-placeholder")) {
+      const mediaType = wrap.getAttribute("data-large-type") || 'image';
+      const mediaHtml = mediaType === 'video'
+        ? `<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`
+        : `<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`;
+      wrap.outerHTML = mediaHtml;
+    } else {
+      window.open(url);
+    }
     return;
   }
   const a = ev.target.closest("a[href]");
@@ -2473,8 +2515,18 @@ if (msgArea) {
     const openZone = e.target.closest(".msg-file-attach-open");
     if (openZone && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
-      const url = openZone.closest(".msg-file-attach")?.getAttribute("data-file-url");
-      if (url) window.open(url);
+      const wrap = openZone.closest(".msg-file-attach");
+      const url = wrap?.getAttribute("data-file-url");
+      if (!url) return;
+      if (wrap?.classList.contains("large-media-placeholder")) {
+        const mediaType = wrap.getAttribute("data-large-type") || 'image';
+        const mediaHtml = mediaType === 'video'
+          ? `<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`
+          : `<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`;
+        wrap.outerHTML = mediaHtml;
+      } else {
+        window.open(url);
+      }
     }
   });
   msgArea.addEventListener("dragover", (e) => { e.preventDefault(); $("dropzone").style.display = "flex"; });

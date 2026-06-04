@@ -90,7 +90,7 @@ These apps solve different problems; the table is to set expectations, not to pi
 
 - **Room key is the capability.** Anyone with it can join the swarm and decrypt traffic for that room. Treat it like a strong shared secret.
 - **No “real” host** in the network sense: peers are symmetric. “Host” in the UI only marks who created the room on that device.
-- Rate limits, a max **message text** length, and moderation filters cut spam and obvious unsafe content in the feed; file uploads have **no size limit** in the app. The UI escapes text before rendering to limit XSS.
+- Rate limits, a max **message text** length, and moderation filters cut spam and obvious unsafe content in the feed; file uploads have **no size limit** in the app. Inline image/video previews are automatically shown for files up to 100 MB; larger files render as a click-to-load placeholder card. The UI escapes text before rendering to limit XSS.
 - Moderation is local and heuristic, not a trust or safety service. It helps with accidental exposure and noisy peers, but it does not replace trusted room keys, identity verification, or user judgment.
 - **Not** Matrix/Signal-class identity, device verification, or perfect forward secrecy.
 
