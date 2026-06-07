@@ -221,7 +221,7 @@ function largeMediaHtml(url, fileNameOpt, fileSizeOpt, mediaType) {
   const escU = esc(url);
   const escN = esc(name);
   const iconSvg = './assets/svg/p2p.svg';
-  return `<div class="msg-file-attach large-media-placeholder" data-large-url="${escU}" data-large-type="${mediaType}">
+  return `<div class="msg-file-attach large-media-placeholder" data-file-url="${escU}" data-large-type="${mediaType}">
     <div class="msg-file-attach-open" role="button" tabindex="0" aria-label="Load media">
       <div class="msg-file-attach-icon"><img class="msg-file-attach-icon-img" src="${iconSvg}" alt="" width="36" height="36" /></div>
       <div class="msg-file-attach-info">
