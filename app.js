@@ -150,7 +150,30 @@ function formatFileSize(bytes) {
 }
 
 function shouldAutoInline(fileSize) {
-  return fileSize == null || fileSize <= AUTO_INLINE_PREVIEW_MAX_BYTES;
+  return fileSize != null && fileSize <= AUTO_INLINE_PREVIEW_MAX_BYTES;
+}
+
+function expandLargeMedia(wrap) {
+  const url = wrap.getAttribute("data-file-url");
+  if (!url) return;
+  const openZone = wrap.querySelector(".msg-file-attach-open");
+  if (openZone) openZone.innerHTML = '<span class="muted small">Loading…</span>';
+  const mediaType = wrap.getAttribute("data-large-type") || 'image';
+  const isVideo = mediaType === 'video';
+  const el = document.createElement(isVideo ? 'video' : 'img');
+  el.className = 'msg-file-img';
+  if (isVideo) {
+    el.src = url;
+    el.controls = true;
+    el.preload = 'metadata';
+    el.muted = true;
+  } else {
+    el.src = url;
+    el.alt = 'image';
+    el.loading = 'lazy';
+  }
+  wrap.replaceWith(el);
+  el.focus();
 }
 
 function isHyperFileUrl(url) {
@@ -2451,11 +2474,7 @@ document.addEventListener("click", (ev) => {
     const url = wrap?.getAttribute("data-file-url");
     if (!url) return;
     if (wrap?.classList.contains("large-media-placeholder")) {
-      const mediaType = wrap.getAttribute("data-large-type") || 'image';
-      const mediaHtml = mediaType === 'video'
-        ? `<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`
-        : `<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`;
-      wrap.outerHTML = mediaHtml;
+      expandLargeMedia(wrap);
     } else {
       window.open(url);
     }
@@ -2519,11 +2538,7 @@ if (msgArea) {
       const url = wrap?.getAttribute("data-file-url");
       if (!url) return;
       if (wrap?.classList.contains("large-media-placeholder")) {
-        const mediaType = wrap.getAttribute("data-large-type") || 'image';
-        const mediaHtml = mediaType === 'video'
-          ? `<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`
-          : `<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`;
-        wrap.outerHTML = mediaHtml;
+        expandLargeMedia(wrap);
       } else {
         window.open(url);
       }
