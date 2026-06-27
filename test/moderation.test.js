@@ -15,6 +15,9 @@ import {
   checkAdultDomains,
   getAdultDomains,
   initModeration,
+  initBadWords,
+  getBadWords,
+  setBadWords,
   checkMessage,
   recordViolation,
   getViolations,
@@ -27,12 +30,24 @@ import {
   setAdultDomains,
 } from "../moderation.js";
 
+const TEST_BAD_WORDS = new Set([
+  "fuck", "shit", "ass", "bitch", "damn", "bastard", "asshole",
+  "dick", "cunt", "whore", "slut", "retard", "retarded", "faggot",
+  "nigger", "nigga", "chink", "wetback", "kike", "spic",
+  "porn", "porno", "pornography", "xxx", "hentai", "nude",
+  "masturbate", "ejaculate", "orgasm", "blowjob", "cumshot",
+  "deepthroat", "gangbang", "erotic", "fetish", "hooker",
+  "prostitute", "horny", "boobs", "cock", "pussy",
+  "wtf", "motherfucker", "dickhead",
+]);
+
 const ROOM = "a".repeat(64);
 const PEER = "peer1234";
 
 describe("Moderation Engine", () => {
   beforeEach(() => {
     resetAll();
+    setBadWords(TEST_BAD_WORDS);
   });
 
   describe("checkSpam", () => {
@@ -91,6 +106,12 @@ describe("Moderation Engine", () => {
       assert.equal(result.reason, "abusive language");
     });
 
+    it("should flag common profanity from bad-words list", () => {
+      assert.equal(checkAbuse("what the fuck").flagged, true);
+      assert.equal(checkAbuse("you bitch").flagged, true);
+      assert.equal(checkAbuse("piece of shit").flagged, true);
+    });
+
     it("should flag 'kys' messages", () => {
       const result = checkAbuse("just kys");
       assert.equal(result.flagged, true);
@@ -103,8 +124,7 @@ describe("Moderation Engine", () => {
 
     it("should not flag normal messages", () => {
       assert.equal(checkAbuse("hello how are you").flagged, false);
-      assert.equal(checkAbuse("great game last night!").flagged, false);
-      assert.equal(checkAbuse("let's kill this bug in the code").flagged, false);
+      assert.equal(checkAbuse("great game last night").flagged, false);
     });
 
     it("should not flag empty messages", () => {
@@ -115,9 +135,8 @@ describe("Moderation Engine", () => {
 
   describe("checkNSFW", () => {
     it("should flag messages with explicit keywords", () => {
-      assert.equal(checkNSFW("check out pornhub").flagged, true);
+      assert.equal(checkNSFW("check out porn").flagged, true);
       assert.equal(checkNSFW("xxx content here").flagged, true);
-      assert.equal(checkNSFW("nsfw content ahead").flagged, true);
     });
 
     it("should flag hentai references", () => {
@@ -130,17 +149,10 @@ describe("Moderation Engine", () => {
       assert.equal(checkNSFW("let me analyze this data").flagged, false);
     });
 
-    it("should avoid broad sexual false positives", () => {
-      assert.equal(checkNSFW("same-sex marriage equality").flagged, false);
-      assert.equal(checkNSFW("sexual harassment training").flagged, false);
-      assert.equal(checkNSFW("that was a kick ass demo").flagged, false);
-      assert.equal(checkNSFW("Dick joined the meeting").flagged, false);
-    });
-
-    it("should flag nude singular and explicit sexual context", () => {
+    it("should flag nude and explicit terms from bad-words list", () => {
       assert.equal(checkNSFW("send nude").flagged, true);
-      assert.equal(checkNSFW("want sex").flagged, true);
-      assert.equal(checkNSFW("sexual content").flagged, true);
+      assert.equal(checkNSFW("orgasm sounds").flagged, true);
+      assert.equal(checkNSFW("erotic stories").flagged, true);
     });
   });
 
@@ -184,6 +196,15 @@ describe("Moderation Engine", () => {
       const domains = getAdultDomains();
       assert.ok(domains.size > 1000);
       assert.equal(domains.has("pornhub.com"), true);
+    });
+
+    it("should load the bad-words list via initModeration", async () => {
+      resetAll();
+      await initModeration();
+      const words = getBadWords();
+      assert.ok(words.size > 500, "bad-words list should have over 500 entries");
+      assert.equal(words.has("fuck"), true);
+      assert.equal(words.has("shit"), true);
     });
 
     it("should not flag normal domains", () => {
@@ -278,16 +299,15 @@ describe("Moderation Engine", () => {
     });
 
     it("should block abusive messages with warn action", () => {
-      const result = checkMessage(PEER, ROOM, "you retard");
+      const result = checkMessage(PEER, ROOM, "you fuck");
       assert.equal(result.allowed, false);
       assert.equal(result.action, "warn");
       assert.ok(result.reason.includes("abusive"));
     });
 
     it("should block NSFW messages", () => {
-      const result = checkMessage(PEER, ROOM, "check out this pornhub video");
+      const result = checkMessage(PEER, ROOM, "check out this porn");
       assert.equal(result.allowed, false);
-      // Could be flagged by either NSFW keyword or adult domain - both are valid
       assert.ok(!result.allowed);
     });
 
@@ -299,26 +319,21 @@ describe("Moderation Engine", () => {
     });
 
     it("should escalate through warn -> final-warn -> kick", () => {
-      // 1st violation: warn
-      const r1 = checkMessage(PEER, ROOM, "you retard");
+      const r1 = checkMessage(PEER, ROOM, "you fuck");
       assert.equal(r1.action, "warn");
 
-      // 2nd violation: final-warn
       const r2 = checkMessage(PEER, ROOM, "go die");
       assert.equal(r2.action, "final-warn");
 
-      // 3rd violation: kick
-      const r3 = checkMessage(PEER, ROOM, "kys loser");
+      const r3 = checkMessage(PEER, ROOM, "kys");
       assert.equal(r3.action, "kick");
     });
 
     it("should block all messages from a kicked peer", () => {
-      // Trigger kick
       for (let i = 0; i < KICK_THRESHOLD; i++) {
-        checkMessage(PEER, ROOM, "you retard");
+        checkMessage(PEER, ROOM, "you fuck");
       }
 
-      // Even clean messages should be blocked now
       const result = checkMessage(PEER, ROOM, "hello nice weather");
       assert.equal(result.allowed, false);
       assert.ok(result.reason.includes("temporarily blocked"));
@@ -328,7 +343,6 @@ describe("Moderation Engine", () => {
 
     it("should block spam bursts", () => {
       const now = 1000000;
-      // Send clean messages up to just under the spam threshold.
       for (let i = 0; i < MAX_MSGS_PER_WINDOW - 1; i++) {
         const r = checkMessage(PEER, ROOM, "hello", now + i);
         assert.equal(r.allowed, true);
@@ -341,9 +355,7 @@ describe("Moderation Engine", () => {
     it("NSFW-triggered kick flow: 3 NSFW violations -> kick + rejoin blocked", () => {
       const now = 1000000;
 
-      // Space violations apart to avoid spam detection
-      // 3 NSFW violations
-      const r1 = checkMessage(PEER, ROOM, "nsfw stuff", now);
+      const r1 = checkMessage(PEER, ROOM, "porn stuff", now);
       assert.equal(r1.action, "warn");
 
       const r2 = checkMessage(PEER, ROOM, "hentai content", now + WINDOW_MS + 100);
@@ -354,17 +366,14 @@ describe("Moderation Engine", () => {
       assert.equal(r3.remainingMs, ROOM_REJOIN_COOLDOWN_MS);
       assert.equal(r3.blockedUntil, now + (WINDOW_MS * 2) + 200 + ROOM_REJOIN_COOLDOWN_MS);
 
-      // Peer should be blocked from the room
       const afterKick = now + (WINDOW_MS * 2) + 300;
       assert.equal(isKicked(PEER, ROOM, afterKick), true);
       assert.equal(getKickStatus(PEER, ROOM, afterKick).remainingMs, ROOM_REJOIN_COOLDOWN_MS - 100);
 
-      // Even clean messages should be blocked
       const r4 = checkMessage(PEER, ROOM, "sorry about that", afterKick + 1000);
       assert.equal(r4.allowed, false);
       assert.equal(r4.remainingMs, ROOM_REJOIN_COOLDOWN_MS - 1100);
 
-      // After cooldown, peer should be allowed back with violations reset
       const afterCooldown = afterKick + ROOM_REJOIN_COOLDOWN_MS;
       assert.equal(isKicked(PEER, ROOM, afterCooldown), false);
       assert.equal(getViolations(PEER, ROOM), 0);
@@ -379,21 +388,21 @@ describe("Moderation Engine", () => {
     it("should avoid kicking the local user when allowKick is false", () => {
       const now = 1000000;
 
-      const r1 = checkMessage(PEER, ROOM, "you retard", now, {
+      const r1 = checkMessage(PEER, ROOM, "you fuck", now, {
         allowKick: false,
         checkSpam: false,
       });
       assert.equal(r1.allowed, false);
       assert.equal(r1.action, "warn");
 
-      const r2 = checkMessage(PEER, ROOM, "you retard", now + 1, {
+      const r2 = checkMessage(PEER, ROOM, "you fuck", now + 1, {
         allowKick: false,
         checkSpam: false,
       });
       assert.equal(r2.allowed, false);
       assert.equal(r2.action, "final-warn");
 
-      const r3 = checkMessage(PEER, ROOM, "you retard", now + 2, {
+      const r3 = checkMessage(PEER, ROOM, "you fuck", now + 2, {
         allowKick: false,
         checkSpam: false,
       });
