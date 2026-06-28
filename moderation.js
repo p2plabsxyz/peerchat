@@ -20,89 +20,78 @@ const kickList = new Map();
 
 let lastCleanupAt = 0;
 
-const ABUSE_PATTERNS = [
-  // Slurs and hate speech
-  /\bn[i1!][g9]{1,2}[e3]r\b/i,
-  /\bn[i1!][g9]{1,2}[a@]\b/i,
-  /\bf[a@][g9]{1,2}[o0]t\b/i,
-  /\bf[a@][g9]\b/i,
-  /\btr[a@]nn(?:y|ie)\b/i,
-  /\br[e3]t[a@]rd(?:ed)?\b/i,
-  /\bk[i1!]ke\b/i,
-  /\bsp[i1!]c\b/i,
-  /\bch[i1!]nk\b/i,
-  /\bw[e3]tb[a@]ck\b/i,
-  /\bcunt\b/i,
-  // Direct harassment
+const THREAT_PATTERNS = [
   /\bkys\b/i,
   /\bkill\s*your\s*self\b/i,
   /\bgo\s*die\b/i,
   /\bshoot\s*up\b/i,
   /\brape\s*(you|u|her|him|them)\b/i,
   /\bi('?ll|m\s*going\s*to)\s*(rape|murder|stalk)\b/i,
-  // Common profanity
-  /\bf+u+c+k+\b/i,
-  /\bfuck\s*(you|u|off|ing|er|ed)\b/i,
-  /\bsh[i1!]+t+\b/i,
-  /\bb[i1!]tch\b/i,
-  /\bass\s*hole\b/i,
-  /\bdamn\s*(you|it)\b/i,
   /\bstfu\b/i,
-  /\bwtf\b/i,
-  /\bmotherf/i,
-  /\bdick\s*head\b/i,
-  /\bdouche\s*bag\b/i,
-  /\bwh[o0]re\b/i,
-  /\bslut\b/i,
-  /\bbastard\b/i,
 ];
 
-const NSFW_PATTERNS = [
-  /\bp[o0]rn(?:o|ography|hub)?\b/i,
-  /\bhentai\b/i,
-  /\bxxx\b/i,
-  /\bxvideos?\b/i,
-  /\bxnxx\b/i,
-  /\bxhamster\b/i,
-  /\bredtube\b/i,
-  /\byouporn\b/i,
-  /\bbrazzers\b/i,
-  /\bonlyfans\.com\b/i,
-  /\bchaturbate\b/i,
-  /\blivejasmin\b/i,
-  /\bstripchat\b/i,
-  /\bmasturbat(?:e|ion|ing)\b/i,
-  /\bejaculat(?:e|ion|ing)\b/i,
-  /\borgasm\b/i,
-  /\banal\s*sex\b/i,
-  /\bblowjob\b/i,
-  /\bcumshot\b/i,
-  /\bdeepthroat\b/i,
-  /\bgangbang\b/i,
-  /\bhardcore\s*sex\b/i,
-  /\bnude(?:s|z)?\b/i,
-  /\bnsfw\b/i,
-  /\bdick\s*pic\b/i,
-  // Body / sexual terms
-  /\bboob(?:s|ies)?\b/i,
-  /\btit(?:s|ties)\b/i,
-  /\b(?:dick|cock|pussy)\s*(?:pic|pics|photo|photos|video|videos)\b/i,
-  /\bsext(?:ing)?\b/i,
-  /\bsexual\s+(?:content|chat|image|images|photo|photos|video|videos|message|messages|acts?)\b/i,
-  /\b(?:have|having|had|want|wants|wanted)\s+sex\b/i,
-  /\berotic\b/i,
-  /\bfetish\b/i,
-  /\bstripper\b/i,
-  /\bhooker\b/i,
-  /\bprostitut/i,
-  /\bhorny\b/i,
-  /\bjerk\s*off\b/i,
-  /\bfap\b/i,
-];
+let _badWords = new Set();
+let _badWordsReady = false;
+let _badWordsLoadPromise = null;
+const BAD_WORDS_URL = new URL("./lib/bad-words.txt", import.meta.url);
+
+function parseBadWordsList(text) {
+  const words = new Set();
+  for (const raw of text.split(/\r?\n/)) {
+    const word = raw.trim().toLowerCase();
+    if (word && /^[a-z0-9'.\-]+$/i.test(word)) {
+      words.add(word);
+    }
+  }
+  return words;
+}
+
+export async function initBadWords() {
+  if (_badWordsReady) return;
+  if (_badWordsLoadPromise) return _badWordsLoadPromise;
+  _badWordsLoadPromise = (async () => {
+    try {
+      if (typeof fetch === "function") {
+        const res = await fetch(BAD_WORDS_URL.href);
+        if (res.ok) {
+          _badWords = parseBadWordsList(await res.text());
+          return;
+        }
+      }
+    } catch {
+    }
+
+    const getBuiltinModule = globalThis.process?.getBuiltinModule;
+    if (typeof getBuiltinModule === "function") {
+      try {
+        const fs = getBuiltinModule("fs");
+        const { fileURLToPath } = getBuiltinModule("url");
+        const text = await fs.promises.readFile(fileURLToPath(BAD_WORDS_URL), "utf8");
+        _badWords = parseBadWordsList(text);
+      } catch (err) {
+        console.warn("[Moderation] Failed to load bad-words list.", err.message);
+      }
+    }
+  })().finally(() => {
+    _badWordsReady = true;
+    _badWordsLoadPromise = null;
+  });
+  return _badWordsLoadPromise;
+}
+
+export function getBadWords() {
+  return _badWords;
+}
+
+export function setBadWords(words) {
+  _badWords = words;
+  _badWordsReady = true;
+}
 
 
 const URL_RE = /(?:https?:\/\/|hyper:\/\/)?(?:www\.)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,})(?:[\/\?#][^\s]*)?/gi;
 const HOSTS_LIST_URL = new URL("./lib/adult-domains.hosts", import.meta.url);
+const WORD_SPLIT_RE = /[a-z0-9']+/gi;
 const LOCALHOST_IP_RE = /^(?:0\.0\.0\.0|127\.0\.0\.1|::1)$/i;
 const HOSTS_DOMAIN_RE = /^(?=.{1,253}$)(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{2,63}$/i;
 
@@ -130,37 +119,43 @@ function addHostsDomains(target, hostsText) {
 
 // Load the adult-domain blocklist once at startup.
 export async function initModeration() {
-  if (_domainsReady) return;
-  if (_domainsLoadPromise) return _domainsLoadPromise;
-  _domainsLoadPromise = (async () => {
-    try {
-      if (typeof fetch === "function") {
-        const res = await fetch(HOSTS_LIST_URL.href);
-        if (res.ok) {
-          addHostsDomains(_adultDomains, await res.text());
-          return;
-        }
-      }
-    } catch {
-      // Fall through to async Node-style file loading when available.
-    }
+  const tasks = [];
 
-    const getBuiltinModule = globalThis.process?.getBuiltinModule;
-    if (typeof getBuiltinModule === "function") {
-      try {
-        const fs = getBuiltinModule("fs");
-        const { fileURLToPath } = getBuiltinModule("url");
-        const hostsText = await fs.promises.readFile(fileURLToPath(HOSTS_LIST_URL), "utf8");
-        addHostsDomains(_adultDomains, hostsText);
-      } catch (err) {
-        console.warn("[Moderation] Failed to load adult domain blocklist. Domain filtering is disabled.", err.message);
-      }
+  if (!_domainsReady) {
+    if (!_domainsLoadPromise) {
+      _domainsLoadPromise = (async () => {
+        try {
+          if (typeof fetch === "function") {
+            const res = await fetch(HOSTS_LIST_URL.href);
+            if (res.ok) {
+              addHostsDomains(_adultDomains, await res.text());
+              return;
+            }
+          }
+        } catch {
+        }
+
+        const getBuiltinModule = globalThis.process?.getBuiltinModule;
+        if (typeof getBuiltinModule === "function") {
+          try {
+            const fs = getBuiltinModule("fs");
+            const { fileURLToPath } = getBuiltinModule("url");
+            const hostsText = await fs.promises.readFile(fileURLToPath(HOSTS_LIST_URL), "utf8");
+            addHostsDomains(_adultDomains, hostsText);
+          } catch (err) {
+            console.warn("[Moderation] Failed to load adult domain blocklist. Domain filtering is disabled.", err.message);
+          }
+        }
+      })().finally(() => {
+        _domainsReady = true;
+        _domainsLoadPromise = null;
+      });
     }
-  })().finally(() => {
-    _domainsReady = true;
-    _domainsLoadPromise = null;
-  });
-  return _domainsLoadPromise;
+    tasks.push(_domainsLoadPromise);
+  }
+
+  tasks.push(initBadWords());
+  await Promise.all(tasks);
 }
 
 export function getAdultDomains() {
@@ -247,9 +242,19 @@ export function checkSpam(peerId, roomKey, now) {
 
 export function checkAbuse(text) {
   if (!text) return { flagged: false, reason: "" };
-  for (const pattern of ABUSE_PATTERNS) {
+
+  for (const pattern of THREAT_PATTERNS) {
     if (pattern.test(text)) {
       return { flagged: true, reason: "abusive language" };
+    }
+  }
+
+  const words = text.match(WORD_SPLIT_RE);
+  if (words) {
+    for (const w of words) {
+      if (_badWords.has(w.toLowerCase())) {
+        return { flagged: true, reason: "abusive language" };
+      }
     }
   }
   return { flagged: false, reason: "" };
@@ -257,9 +262,13 @@ export function checkAbuse(text) {
 
 export function checkNSFW(text) {
   if (!text) return { flagged: false, reason: "" };
-  for (const pattern of NSFW_PATTERNS) {
-    if (pattern.test(text)) {
-      return { flagged: true, reason: "NSFW content" };
+
+  const words = text.match(WORD_SPLIT_RE);
+  if (words) {
+    for (const w of words) {
+      if (_badWords.has(w.toLowerCase())) {
+        return { flagged: true, reason: "NSFW content" };
+      }
     }
   }
   return { flagged: false, reason: "" };
@@ -419,4 +428,7 @@ export function resetAll() {
   _adultDomains = new Set();
   _domainsReady = false;
   _domainsLoadPromise = null;
+  _badWords = new Set();
+  _badWordsReady = false;
+  _badWordsLoadPromise = null;
 }
