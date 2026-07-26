@@ -824,6 +824,7 @@ export function initChat(sdk, options = {}) {
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
             if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
 
+            // Moderation settings: only accept from host or if we don't have any yet
             if (msg.moderation && (room.isHost || !room.moderation)) {
               room.moderation = msg.moderation;
               updated = true;
