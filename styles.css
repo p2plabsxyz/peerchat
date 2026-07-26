@@ -1030,6 +1030,8 @@ a:hover { text-decoration: none; }
   from { opacity: 0; transform: translateY(-8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Moderation section in create-room modal */
 .mod-select {
   width: 100%;
   padding: 0.55rem 0.9rem;
