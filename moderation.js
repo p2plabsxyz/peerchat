@@ -296,6 +296,7 @@ export function checkAdultDomains(text) {
 }
 
 // Run content filters without changing moderation state.
+// roomMod is optional: { abuseFilter, nsfwFilter, spamRateLimit }
 export function checkContent(text, roomMod) {
   if (roomMod?.abuseFilter !== false) {
     const abuse = checkAbuse(text);
