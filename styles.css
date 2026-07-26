@@ -1030,3 +1030,62 @@ a:hover { text-decoration: none; }
   from { opacity: 0; transform: translateY(-8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* Moderation section in create-room modal */
+.mod-select {
+  width: 100%;
+  padding: 0.55rem 0.9rem;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.9rem;
+}
+.mod-select:focus-visible {
+  outline: 1px solid var(--browser-theme-secondary-highlight);
+  outline-offset: 1px;
+}
+.mod-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0;
+}
+.mod-info-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.mod-info-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-mix));
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+/* Room info modal: moderation readout */
+.ri-moderation {
+  width: 100%;
+  text-align: left;
+  margin-top: 4px;
+}
+.ri-moderation .label {
+  display: block;
+  margin-bottom: 6px;
+}
+.ri-mod-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mod-setting-item {
+  font-size: 0.82rem;
+  color: var(--text);
+  padding: 2px 0;
+}
+.mod-setting-item strong {
+  color: var(--accent);
+  font-weight: 600;
+}
