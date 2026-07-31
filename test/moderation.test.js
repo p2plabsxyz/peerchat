@@ -430,4 +430,78 @@ describe("Moderation Engine", () => {
       assert.equal(checkSpam(PEER, ROOM, now + TRACKER_IDLE_TTL_MS + ROOM_REJOIN_COOLDOWN_MS + 2), false);
     });
   });
+
+  describe("configurable room moderation (roomModeration option)", () => {
+    beforeEach(() => {
+      setAdultDomains(new Set(["pornhub.com", "xvideos.com"]));
+    });
+
+    it("should allow threat-pattern text when abuseFilter is disabled", () => {
+      const result = checkMessage(PEER, ROOM, "kys", undefined, {
+        checkSpam: false,
+        roomModeration: { abuseFilter: false },
+      });
+      assert.equal(result.allowed, true);
+    });
+
+    it("should allow bad-word text when both content filters are disabled", () => {
+      const result = checkMessage(PEER, ROOM, "check out this porn", undefined, {
+        checkSpam: false,
+        roomModeration: { abuseFilter: false, nsfwFilter: false },
+      });
+      assert.equal(result.allowed, true);
+    });
+
+    it("should still block adult domains when both content filters are disabled", () => {
+      const result = checkMessage(PEER, ROOM, "go to https://xvideos.com/latest", undefined, {
+        checkSpam: false,
+        roomModeration: { abuseFilter: false, nsfwFilter: false },
+      });
+      assert.equal(result.allowed, false);
+    });
+
+    it("should trigger spam at 5 messages when spamRateLimit is 5", () => {
+      const now = 1000000;
+      for (let i = 0; i < 4; i++) {
+        const r = checkMessage(PEER, ROOM, "hello", now + i, {
+          roomModeration: { spamRateLimit: 5 },
+        });
+        assert.equal(r.allowed, true);
+      }
+      const result = checkMessage(PEER, ROOM, "one more", now + 4, {
+        roomModeration: { spamRateLimit: 5 },
+      });
+      assert.equal(result.allowed, false);
+      assert.ok(result.reason.includes("spam"));
+    });
+
+    it("should fall back to the default spam limit when spamRateLimit is invalid", () => {
+      const now = 1000000;
+      for (let i = 0; i < MAX_MSGS_PER_WINDOW - 1; i++) {
+        const r = checkMessage(PEER, ROOM, "hello", now + i, {
+          roomModeration: { spamRateLimit: -1 },
+        });
+        assert.equal(r.allowed, true);
+      }
+      const result = checkMessage(PEER, ROOM, "one more", now + MAX_MSGS_PER_WINDOW - 1, {
+        roomModeration: { spamRateLimit: -1 },
+      });
+      assert.equal(result.allowed, false);
+      assert.ok(result.reason.includes("spam"));
+    });
+
+    it("should allow abuse text via checkContent when abuseFilter is off", () => {
+      assert.equal(checkContent("kys").flagged, true);
+      assert.equal(checkContent("kys", { abuseFilter: false }).flagged, false);
+    });
+
+    it("should allow NSFW text via checkContent when both filters are off", () => {
+      assert.equal(checkContent("check out this porn").flagged, true);
+      assert.equal(checkContent("check out this porn", { abuseFilter: false, nsfwFilter: false }).flagged, false);
+    });
+
+    it("should still flag adult domains via checkContent when filters are off", () => {
+      assert.equal(checkContent("go to https://pornhub.com", { abuseFilter: false, nsfwFilter: false }).flagged, true);
+    });
+  });
 });

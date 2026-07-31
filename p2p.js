@@ -826,7 +826,7 @@ export function initChat(sdk, options = {}) {
 
             // Moderation settings: only accept from host or if we don't have any yet
             if (msg.moderation && (room.isHost || !room.moderation)) {
-              room.moderation = msg.moderation;
+              room.moderation = sanitizeRoomModeration(msg.moderation);
               updated = true;
             }
 

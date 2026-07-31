@@ -1674,7 +1674,7 @@ function connectGlobalSSE() {
       room.unreadCount = prevUnread;
       room.unreadMentions = prevMentions;
       if (prevLastMessage) room.lastMessage = prevLastMessage;
-      if (!room.moderation && prevModeration) room.moderation = prevModeration;
+      if (prevModeration) room.moderation = prevModeration;
 
       renderRoomList();
 
@@ -1887,9 +1887,9 @@ $("create-room-form")?.addEventListener("submit", async (e) => {
     const body = { name, bio: $("new-room-bio").value.trim(), link: $("new-room-link").value.trim() };
     if (pendingRoomAvatar) body.avatar = pendingRoomAvatar;
     body.moderation = {
-      abuseFilter: $("mod-abuse-filter")?.checked !== false,
-      nsfwFilter: $("mod-nsfw-filter")?.checked !== false,
-      spamRateLimit: parseInt($("mod-spam-limit")?.value || "10", 10),
+      abuseFilter: $("mod-abuse-filter")?.checked ?? true,
+      nsfwFilter: $("mod-nsfw-filter")?.checked ?? true,
+      spamRateLimit: parseInt($("mod-spam-limit")?.value || "10", 10) || 10,
     };
     const { roomKey } = await chat.createRoom(body);
     await chat.joinRoom(roomKey);
@@ -2090,9 +2090,12 @@ function renderModerationInfo(container, moderation) {
     return;
   }
   const items = [];
-  items.push(`<span class="mod-setting-item">Abuse filter: <strong>${moderation.abuseFilter !== false ? "on" : "off"}</strong></span>`);
-  items.push(`<span class="mod-setting-item">NSFW filter: <strong>${moderation.nsfwFilter !== false ? "on" : "off"}</strong></span>`);
-  items.push(`<span class="mod-setting-item">Spam limit: <strong>${moderation.spamRateLimit || 10}</strong> msgs/10s</span>`);
+  const abuse = moderation.abuseFilter !== false ? "on" : "off";
+  const nsfw = moderation.nsfwFilter !== false ? "on" : "off";
+  const spamLimit = esc(String(moderation.spamRateLimit || 10));
+  items.push(`<span class="mod-setting-item">Abuse filter: <strong>${abuse}</strong></span>`);
+  items.push(`<span class="mod-setting-item">NSFW filter: <strong>${nsfw}</strong></span>`);
+  items.push(`<span class="mod-setting-item">Spam limit: <strong>${spamLimit}</strong> msgs/10s</span>`);
   items.push(`<span class="mod-setting-item">Adult domain blocklist: <strong>always on</strong></span>`);
   container.innerHTML = items.join("");
 }
