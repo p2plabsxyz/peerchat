@@ -84,7 +84,15 @@ These apps solve different problems; the table is to set expectations, not to pi
 | **Good when** | You want mainstream, audited E2E messaging | You want federation or a public server | You want **local-first, small groups**, same app as Hyper browsing |
 | **File uploads** | Platform limits | Varies by server | **No limit** |
 
-**P2P angle:** PeerChat avoids a message database run by a third party, but **discovery and relays** still touch the public stack (DHT, etc.). Noise protects the bytes on the wire; the **room key** protects message content on disk. That’s simpler than Signal’s ratchet—it’s also **weaker** if the key is stolen or shared carelessly.
+**P2P angle:** PeerChat avoids a message database run by a third party. In PeerSky,
+room topics are joined on both the public swarm and an isolated LAN swarm. The
+LAN swarm uses `hyperdht-mdns` with zero public bootstrap nodes, so nearby peers
+can discover each other and exchange messages without internet access. Desktop
+builds use the default `bonjour-service` adapter; mobile builds can inject a
+system Bonjour or Android NSD adapter through the same two-method interface.
+Noise protects the bytes on the wire; the **room key** protects message content
+on disk. That’s simpler than Signal’s ratchet—it’s also **weaker** if the key is
+stolen or shared carelessly.
 
 ### PeerChat specifics
 

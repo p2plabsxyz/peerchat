@@ -1,4 +1,4 @@
-import { EventEmitter, once } from "node:events";
+import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,38 +7,37 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { create } from "hyper-sdk";
-import HyperswarmLAN from "hyperswarm-lan";
+import HyperDHTmDNS from "hyperdht-mdns";
 import { attachChatTransport } from "../transport.js";
 
-class MemoryDiscovery extends EventEmitter {
+class MemoryAdapter {
   constructor(bus) {
-    super();
     this.bus = bus;
     this.record = null;
-    this.onPeer = null;
+    this.handlers = null;
   }
 
-  start(record, onPeer) {
+  browse(query, handlers) {
+    this.query = query;
+    this.handlers = handlers;
+    return { stop: () => { this.handlers = null; } };
+  }
+
+  advertise(record) {
     this.record = record;
-    this.onPeer = onPeer;
     for (const peer of this.bus) {
       setImmediate(() => {
-        onPeer(asService(peer.record));
-        peer.onPeer(asService(record));
+        this.handlers?.onService(asService(peer.record));
+        peer.handlers?.onService(asService(record));
       });
     }
     this.bus.add(this);
+    return {
+      stop: () => {
+        if (this.record === record) this.bus.delete(this);
+      },
+    };
   }
-
-  update(record) {
-    this.record = record;
-    for (const peer of this.bus) {
-      if (peer !== this) setImmediate(() => peer.onPeer(asService(record)));
-    }
-  }
-
-  stop() { this.bus.delete(this); return Promise.resolve(); }
-  destroy() { this.bus.delete(this); return Promise.resolve(); }
 }
 
 test("sends PeerChat frames beside Corestore replication over LAN", { timeout: 30_000 }, async (t) => {
@@ -60,13 +59,13 @@ test("sends PeerChat frames beside Corestore replication over LAN", { timeout: 3
   const sdkB = await create({ storage: storageB, swarmOpts: { bootstrap: [], port: 49932 } });
   sdks.push(sdkA, sdkB);
 
-  await HyperswarmLAN.attachHyperSDK(sdkA, {
+  await HyperDHTmDNS.attachHyperSDK(sdkA, {
     host: "127.0.0.1", port: 49933, allowLoopback: true,
-    discovery: new MemoryDiscovery(bus),
+    adapter: new MemoryAdapter(bus),
   });
-  await HyperswarmLAN.attachHyperSDK(sdkB, {
+  await HyperDHTmDNS.attachHyperSDK(sdkB, {
     host: "127.0.0.1", port: 49934, allowLoopback: true,
-    discovery: new MemoryDiscovery(bus),
+    adapter: new MemoryAdapter(bus),
   });
 
   const connectionA = once(sdkA.swarm, "connection");
