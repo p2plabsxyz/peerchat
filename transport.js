@@ -3,9 +3,17 @@ import Protomux from "protomux";
 
 const CHAT_PROTOCOL = "peersky-chat/1";
 
-export function attachChatTransport(conn, ondata) {
+export function attachChatTransport(conn, ondata, options = {}) {
   const mux = Protomux.from(conn);
-  const channel = mux.createChannel({ protocol: CHAT_PROTOCOL });
+  const channel = mux.createChannel({
+    protocol: CHAT_PROTOCOL,
+    onopen() {
+      options.onopen?.();
+    },
+    onclose(isRemote) {
+      options.onclose?.(isRemote);
+    },
+  });
   if (!channel) return null;
 
   const message = channel.addMessage({
@@ -14,6 +22,12 @@ export function attachChatTransport(conn, ondata) {
   });
 
   const transport = {
+    get opened() {
+      return channel.opened;
+    },
+    ready() {
+      return channel.fullyOpened();
+    },
     send(payload) {
       if (channel.closed || conn.destroyed) return false;
       return message.send(String(payload));

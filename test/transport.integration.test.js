@@ -40,7 +40,7 @@ class MemoryAdapter {
   }
 }
 
-test("sends PeerChat frames beside Corestore replication over LAN", { timeout: 30_000 }, async (t) => {
+test("reopens PeerChat transport and accepts replayed frames after LAN socket loss", { timeout: 30_000 }, async (t) => {
   const suffix = randomBytes(6).toString("hex");
   const storageA = path.join(tmpdir(), `peerchat-lan-a-${suffix}`);
   const storageB = path.join(tmpdir(), `peerchat-lan-b-${suffix}`);
@@ -74,24 +74,52 @@ test("sends PeerChat frames beside Corestore replication over LAN", { timeout: 3
   sdkA.join(topic);
   sdkB.join(topic);
 
-  const [[socketA], [socketB]] = await Promise.all([connectionA, connectionB]);
+  let [[socketA], [socketB]] = await Promise.all([connectionA, connectionB]);
   socketA.on("error", () => {});
   socketB.on("error", () => {});
 
-  let resolveFrame;
-  const frameReceived = new Promise((resolve) => { resolveFrame = resolve; });
+  let frameReceived = receiveFrame();
   const transportA = attachChatTransport(socketA, () => {});
-  const transportB = attachChatTransport(socketB, resolveFrame);
+  const transportB = attachChatTransport(socketB, frameReceived.resolve);
   assert.ok(transportA);
   assert.ok(transportB);
+  assert.deepEqual(await Promise.all([transportA.ready(), transportB.ready()]), [true, true]);
 
   transportA.send('{"type":"message","roomKey":"test"}\n');
-  const frame = await Promise.race([
-    frameReceived,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("chat frame timeout")), 5000)),
-  ]);
+  const frame = await withTimeout(frameReceived.promise, "initial chat frame timeout");
   assert.equal(frame, '{"type":"message","roomKey":"test"}\n');
+
+  const nextConnectionA = once(sdkA.swarm, "connection");
+  const nextConnectionB = once(sdkB.swarm, "connection");
+  socketA.destroy();
+  assert.equal(transportA.send('{"type":"message","roomKey":"offline"}\n'), false);
+
+  [[socketA], [socketB]] = await Promise.all([nextConnectionA, nextConnectionB]);
+  socketA.on("error", () => {});
+  socketB.on("error", () => {});
+
+  frameReceived = receiveFrame();
+  const reconnectedA = attachChatTransport(socketA, () => {});
+  const reconnectedB = attachChatTransport(socketB, frameReceived.resolve);
+  assert.deepEqual(await Promise.all([reconnectedA.ready(), reconnectedB.ready()]), [true, true]);
+
+  const replayed = '{"type":"sync","roomKey":"test","id":"offline-message"}\n';
+  reconnectedA.send(replayed);
+  assert.equal(await withTimeout(frameReceived.promise, "replayed chat frame timeout"), replayed);
 });
+
+function receiveFrame() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function withTimeout(promise, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), 5000)),
+  ]);
+}
 
 function asService(record) {
   return {

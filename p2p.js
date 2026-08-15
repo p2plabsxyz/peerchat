@@ -47,6 +47,7 @@ const seenIds = new Set();
 const rateCounters = new Map();
 const decryptedMessageCache = new Map();
 const chatTransports = new WeakMap();
+const pendingPeers = new WeakMap();
 
 let peers = [];
 let localId = "";
@@ -643,13 +644,14 @@ export function initChat(sdk, options = {}) {
   }, 10_000);
 
   const handleTopicsChange = (conn, info) => {
-    const peer = peerForConnection(conn);
+    const peer = peerForConnection(conn) || pendingPeers.get(conn);
     if (!peer) return;
 
     const nextRooms = sharedRoomsFromTopics(info?.topics, discoveryKeys);
     const newlyShared = addedRooms(peer.rooms, nextRooms);
     peer.rooms = nextRooms;
 
+    if (pendingPeers.has(conn)) return;
     if (!newlyShared.length) return;
     shareProfile(conn, newlyShared);
     shareRoomMeta(conn, newlyShared);
@@ -692,27 +694,57 @@ export function initChat(sdk, options = {}) {
     conn.on("error", (e) => console.error(`[chat] Peer [${remoteId}]:`, e.message));
 
     let buf = "";
-    peers.push({ conn, id: remoteId, fullId, rooms: peerRooms });
-    const transport = attachChatTransport(conn, handleChatData);
+    let active = false;
+    let pingTimer = null;
+    const peer = { conn, id: remoteId, fullId, rooms: peerRooms };
+    pendingPeers.set(conn, peer);
+
+    const transport = attachChatTransport(conn, handleChatData, {
+      onopen: activatePeer,
+      onclose: deactivatePeer,
+    });
     if (!transport) {
-      peers = peers.filter((peer) => peer.conn !== conn);
+      pendingPeers.delete(conn);
       return;
     }
     chatTransports.set(conn, transport);
-    broadcastPeerCountNow();
-    broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
 
-    shareProfile(conn);
-    shareRoomMeta(conn);
-    shareMembers(conn);
-    announceJoins(conn);
-    shareDMInvites(conn, remoteId);
-    syncHistoryTo(conn).catch(() => {});
+    function activatePeer() {
+      if (active || conn.destroyed) return;
+      active = true;
+      pendingPeers.delete(conn);
+      peers.push(peer);
+      broadcastPeerCountNow();
+      broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
 
-    const pingTimer = setInterval(() => {
-      if (conn.destroyed) { clearInterval(pingTimer); return; }
-      try { writeToConnection(conn, JSON.stringify({ type: "ping" }) + "\n"); } catch {}
-    }, PING_MS);
+      shareProfile(conn);
+      shareRoomMeta(conn);
+      shareMembers(conn);
+      announceJoins(conn);
+      shareDMInvites(conn, remoteId);
+      syncHistoryTo(conn).catch(() => {});
+
+      pingTimer = setInterval(() => {
+        if (conn.destroyed) { clearInterval(pingTimer); return; }
+        try { writeToConnection(conn, JSON.stringify({ type: "ping" }) + "\n"); } catch {}
+      }, PING_MS);
+    }
+
+    function deactivatePeer() {
+      pendingPeers.delete(conn);
+      if (!active) return;
+      active = false;
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = null;
+      peers = peers.filter((candidate) => candidate.conn !== conn);
+      broadcastPeerCountDelayed();
+      const stillConnected = peers.some((candidate) =>
+        candidate.id === remoteId && !candidate.conn.destroyed
+      );
+      if (!stillConnected) {
+        broadcastGlobal("peer-status", { peerId: remoteId, isOnline: false });
+      }
+    }
 
     function handleChatData(raw) {
       buf += raw.toString();
@@ -1075,13 +1107,7 @@ export function initChat(sdk, options = {}) {
     }
 
     conn.on("close", () => {
-      clearInterval(pingTimer);
-      peers = peers.filter((p) => p.conn !== conn);
-      broadcastPeerCountDelayed();
-      const stillConnected = peers.some((p) => p.id === remoteId && !p.conn.destroyed);
-      if (!stillConnected) {
-        broadcastGlobal("peer-status", { peerId: remoteId, isOnline: false });
-      }
+      deactivatePeer();
     });
   });
 
