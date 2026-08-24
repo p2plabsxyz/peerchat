@@ -12,6 +12,14 @@ import {
   checkMessage as moderationCheck,
   isKicked as moderationIsKicked,
 } from "./moderation.js";
+import {
+  addedRooms,
+  peerMatchesIdentity,
+  peerSharesRoom,
+  sharedRoomsFromTopics,
+  topicHex,
+} from "./routing.js";
+import { attachChatTransport } from "./transport.js";
 import b4a from "b4a";
 
 export const CHAT_STORAGE = "peersky-chat-rooms.json";
@@ -29,15 +37,18 @@ const KEEPALIVE_MS = 15_000;
 const PING_MS = 25_000;
 const SEEN_CAP = 10_000;
 const PERSIST_DELAY_MS = 2_000;
+const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject"]);
 
 const roomFeeds = {};
 const roomSseClients = {};
 const globalSseClients = [];
 const joinedRooms = new Set();
-const discoveryKeys = new Set();
+const discoveryKeys = new Map();
 const seenIds = new Set();
 const rateCounters = new Map();
 const decryptedMessageCache = new Map();
+const chatTransports = new WeakMap();
+const pendingPeers = new WeakMap();
 
 let peers = [];
 let localId = "";
@@ -207,7 +218,7 @@ function prunePeers() {
 
 function sendPeerCount() {
   prunePeers();
-  const n = peers.length;
+  const n = new Set(peers.map((peer) => peer.fullId || peer.id)).size;
   for (const streams of Object.values(roomSseClients)) {
     for (const s of streams) {
       try { s.write(`event: peersCount\ndata: ${n}\n\n`); } catch {}
@@ -226,16 +237,47 @@ function broadcastPeerCountDelayed() {
   peerCountTimer = setTimeout(() => { peerCountTimer = null; sendPeerCount(); }, 3000);
 }
 
-function relayToPeers(payload) {
+function relayToMatchingPeers(payload, matches) {
   const dead = [];
-  for (let i = 0; i < peers.length; i++) {
+  const delivered = new Set();
+  for (let i = peers.length - 1; i >= 0; i--) {
     if (peers[i].conn.destroyed) { dead.push(i); continue; }
-    try { peers[i].conn.write(payload); } catch { dead.push(i); }
+    if (!matches(peers[i])) continue;
+    const identity = peers[i].fullId || peers[i].id;
+    if (delivered.has(identity)) continue;
+    try {
+      writeToConnection(peers[i].conn, payload);
+      delivered.add(identity);
+    } catch {
+      dead.push(i);
+    }
   }
   if (dead.length) {
     peers = peers.filter((_, i) => !dead.includes(i));
     broadcastPeerCountDelayed();
   }
+}
+
+function writeToConnection(conn, payload) {
+  const transport = chatTransports.get(conn);
+  if (!transport) throw new Error("Chat transport is not open");
+  return transport.send(payload);
+}
+
+function relayToRoom(roomKey, payload) {
+  relayToMatchingPeers(payload, (peer) => peerSharesRoom(peer, roomKey));
+}
+
+function relayToPeer(peerId, payload) {
+  relayToMatchingPeers(payload, (peer) => peerMatchesIdentity(peer, peerId));
+}
+
+function peerForConnection(conn) {
+  return peers.find((peer) => peer.conn === conn);
+}
+
+function connectionSharesRoom(conn, roomKey) {
+  return peerSharesRoom(peerForConnection(conn), roomKey);
 }
 
 function broadcastGlobal(event, data) {
@@ -335,16 +377,18 @@ function feedEntryToMsg(entry, roomKey) {
 }
 
 async function syncRoomHistoryTo(conn, rk) {
+  if (!connectionSharesRoom(conn, rk)) return;
   const feed = roomFeeds[rk];
   if (!feed || !feed.length) return;
   const len = feed.length;
   for (let i = 0; i < len; i++) {
     try {
       if (conn.destroyed) return;
+      if (!connectionSharesRoom(conn, rk)) return;
       const e = await feed.get(i);
       if (isModerationNoticeEntry(e)) continue;
       const syncType = e.type === "system" ? "sync-system" : e.type === "reaction" ? "sync-reaction" : "sync";
-      const ok = conn.write(JSON.stringify({ type: syncType, roomKey: rk, ...e }) + "\n");
+      const ok = writeToConnection(conn, JSON.stringify({ type: syncType, roomKey: rk, ...e }) + "\n");
       if (!ok) {
         const drained = await Promise.race([
           new Promise((r) => conn.once("drain", () => r(true))),
@@ -357,11 +401,12 @@ async function syncRoomHistoryTo(conn, rk) {
 }
 
 async function syncHistoryTo(conn) {
-  for (const rk of Object.keys(roomFeeds)) {
+  const peer = peerForConnection(conn);
+  for (const rk of peer?.rooms || []) {
     await syncRoomHistoryTo(conn, rk);
   }
   if (!conn.destroyed) {
-    try { conn.write(JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
+    try { writeToConnection(conn, JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
   }
 }
 
@@ -400,20 +445,23 @@ function appendModerationNotice(roomKey, sourceId, peerName, modResult, ts) {
   }).catch(() => {});
 }
 
-function shareProfile(conn) {
+function shareProfile(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   if (!savedData.profile?.username) return;
+  const sharedRooms = roomKeys.filter((rk) => connectionSharesRoom(conn, rk));
+  if (!sharedRooms.length) return;
   try {
-    conn.write(JSON.stringify({
+    writeToConnection(conn, JSON.stringify({
       type: "profile", peerId: localId,
       username: savedData.profile.username,
       bio: savedData.profile.bio || "",
       avatar: savedData.profile.avatar || null,
-      rooms: Object.keys(savedData.rooms),
+      rooms: sharedRooms,
     }) + "\n");
   } catch {}
 }
 
 function sendRoomMeta(conn, rk) {
+  if (!connectionSharesRoom(conn, rk)) return;
   const room = savedData.rooms[rk];
   if (!room || !roomFeeds[rk]) return;
 
@@ -422,7 +470,7 @@ function sendRoomMeta(conn, rk) {
   if (!hasRealName && !room.isHost) return;
 
   try {
-    conn.write(JSON.stringify({
+    writeToConnection(conn, JSON.stringify({
       type: "room-meta",
       roomKey: rk,
       name: room.name || "",
@@ -437,30 +485,32 @@ function sendRoomMeta(conn, rk) {
 }
 
 
-function shareRoomMeta(conn) {
-  for (const rk of Object.keys(savedData.rooms)) {
+function shareRoomMeta(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
+  for (const rk of roomKeys) {
     sendRoomMeta(conn, rk);
   }
 }
 
-function shareMembers(conn) {
-  for (const [rk, room] of Object.entries(savedData.rooms)) {
-    if (!room.members || !roomFeeds[rk]) continue;
+function shareMembers(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
+  for (const rk of roomKeys) {
+    const room = savedData.rooms[rk];
+    if (!room || !room.members || !roomFeeds[rk]) continue;
     try {
-      conn.write(JSON.stringify({ type: "members-list", roomKey: rk, members: room.members }) + "\n");
+      writeToConnection(conn, JSON.stringify({ type: "members-list", roomKey: rk, members: room.members }) + "\n");
     } catch {}
   }
 }
 
-function announceJoins(conn) {
+function announceJoins(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   const uname = savedData.profile?.username || localId;
-  for (const [rk, room] of Object.entries(savedData.rooms)) {
+  for (const rk of roomKeys) {
+    const room = savedData.rooms[rk];
     if (!room || !roomFeeds[rk]) continue;
     const joinTs = room.joinedAt || room.createdAt || Date.now();
     if (!room.joinedAt) { room.joinedAt = joinTs; debouncePersist(); }
     const joinId = `${rk}-${localId}-join-${joinTs}`;
     try {
-      conn.write(JSON.stringify({
+      writeToConnection(conn, JSON.stringify({
         type: "join", roomKey: rk,
         peerId: localId,
         username: uname,
@@ -479,7 +529,7 @@ function shareDMInvites(conn, remoteId) {
     if (!room.isDM || !room.dmWith) continue;
     if (rnorm && normPeerId(room.dmWith) !== rnorm) continue;
     try {
-      conn.write(JSON.stringify({
+      writeToConnection(conn, JSON.stringify({
         type: "dm-invite", roomKey: rk,
         fromId: localId,
         fromUsername: savedData.profile?.username || localId,
@@ -492,6 +542,27 @@ function shareDMInvites(conn, remoteId) {
 }
 
 async function joinRoom(sdk, roomKey) {
+  if (!joinedRooms.has(roomKey)) {
+    // Advertise the room independently of feed initialization. A damaged or
+    // temporarily unavailable local feed must not make the peer invisible.
+    const topic = b4a.from(roomKey, "hex");
+    const discoveryKey = topicHex(topic);
+    discoveryKeys.set(discoveryKey, roomKey);
+    try {
+      sdk.join(topic, { client: true, server: true });
+      joinedRooms.add(roomKey);
+    } catch (error) {
+      discoveryKeys.delete(discoveryKey);
+      throw error;
+    }
+
+    try {
+      await sdk.swarm.flush();
+    } catch (error) {
+      console.warn(`[chat] Discovery flush ${roomKey.slice(0, 8)}: ${error.message}`);
+    }
+  }
+
   let feed = roomFeeds[roomKey];
   if (!feed) {
     feed = sdk.corestore.get({ name: "chat-" + roomKey, valueEncoding: "json" });
@@ -560,12 +631,6 @@ async function joinRoom(sdk, roomKey) {
     });
   }
 
-  if (!joinedRooms.has(roomKey)) {
-    joinedRooms.add(roomKey);
-    discoveryKeys.add(roomKey);
-    sdk.join(b4a.from(roomKey, "hex"), { client: true, server: true });
-    await sdk.swarm.flush();
-  }
 }
 
 export function initChat(sdk, options = {}) {
@@ -581,52 +646,110 @@ export function initChat(sdk, options = {}) {
     if (globalSseClients.length > 0) sendPeerCount();
   }, 10_000);
 
-  const roomKeys = Object.keys(savedData.rooms);
-  if (roomKeys.length) {
-    for (const k of roomKeys) {
-      joinRoom(sdk, k).catch((e) => console.error(`[chat] Auto-join ${k.slice(0, 8)}: ${e.message}`));
-    }
-  }
+  const handleTopicsChange = (conn, info) => {
+    const peer = peerForConnection(conn) || pendingPeers.get(conn);
+    if (!peer) return;
 
-  sdk.swarm.on("connection", (conn, info) => {
+    const nextRooms = sharedRoomsFromTopics(info?.topics, discoveryKeys);
+    const newlyShared = addedRooms(peer.rooms, nextRooms);
+    peer.rooms = nextRooms;
+
+    if (pendingPeers.has(conn)) return;
+    if (!newlyShared.length) return;
+    shareProfile(conn, newlyShared);
+    shareRoomMeta(conn, newlyShared);
+    shareMembers(conn, newlyShared);
+    announceJoins(conn, newlyShared);
+
+    (async () => {
+      for (const roomKey of newlyShared) {
+        await syncRoomHistoryTo(conn, roomKey);
+      }
+      if (!conn.destroyed) {
+        try { writeToConnection(conn, JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
+      }
+    })().catch(() => {});
+  };
+
+  sdk.localSwarm?.on("topics-change", handleTopicsChange);
+
+  sdk.swarm.on("connection", (conn, info = {}) => {
     const remoteId = conn.remotePublicKey
       ? b4a.toString(conn.remotePublicKey, "hex").slice(0, 8).toLowerCase()
       : "peer";
+    const fullId = conn.remotePublicKey
+      ? b4a.toString(conn.remotePublicKey, "hex").toLowerCase()
+      : remoteId;
 
-    const isChat =
-      info.topics?.some((t) => discoveryKeys.has(b4a.toString(t, "hex"))) ||
-      (!info.topics?.length && discoveryKeys.size > 0);
+    const peerRooms = sharedRoomsFromTopics(info.topics, discoveryKeys);
+    const isChat = peerRooms.length > 0;
 
     if (!isChat) {
       conn.on("error", () => {});
       return;
     }
 
+    if (chatTransports.has(conn)) {
+      handleTopicsChange(conn, info);
+      return;
+    }
+
     conn.on("error", (e) => console.error(`[chat] Peer [${remoteId}]:`, e.message));
 
-    const connTopics = (info.topics || []).map((t) => b4a.toString(t, "hex")).filter((t) => discoveryKeys.has(t));
-    const peerRooms = connTopics.length > 0 ? connTopics : [...discoveryKeys];
-
-    const fk = conn.remotePublicKey && b4a.toString(conn.remotePublicKey, "hex").toLowerCase();
-    if (fk) peers = peers.filter((p) => !p.conn.remotePublicKey || b4a.toString(p.conn.remotePublicKey, "hex").toLowerCase() !== fk);
-    peers.push({ conn, id: remoteId, rooms: peerRooms });
-    broadcastPeerCountNow();
-    broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
-
-    shareProfile(conn);
-    shareRoomMeta(conn);
-    shareMembers(conn);
-    announceJoins(conn);
-    shareDMInvites(conn, remoteId);
-    syncHistoryTo(conn).catch(() => {});
-
-    const pingTimer = setInterval(() => {
-      if (conn.destroyed) { clearInterval(pingTimer); return; }
-      try { conn.write(JSON.stringify({ type: "ping" }) + "\n"); } catch {}
-    }, PING_MS);
-
     let buf = "";
-    conn.on("data", (raw) => {
+    let active = false;
+    let pingTimer = null;
+    const peer = { conn, id: remoteId, fullId, rooms: peerRooms };
+    pendingPeers.set(conn, peer);
+
+    const transport = attachChatTransport(conn, handleChatData, {
+      onopen: activatePeer,
+      onclose: deactivatePeer,
+    });
+    if (!transport) {
+      pendingPeers.delete(conn);
+      return;
+    }
+    chatTransports.set(conn, transport);
+
+    function activatePeer() {
+      if (active || conn.destroyed) return;
+      active = true;
+      pendingPeers.delete(conn);
+      peers.push(peer);
+      broadcastPeerCountNow();
+      broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
+
+      shareProfile(conn);
+      shareRoomMeta(conn);
+      shareMembers(conn);
+      announceJoins(conn);
+      shareDMInvites(conn, remoteId);
+      syncHistoryTo(conn).catch(() => {});
+
+      pingTimer = setInterval(() => {
+        if (conn.destroyed) { clearInterval(pingTimer); return; }
+        try { writeToConnection(conn, JSON.stringify({ type: "ping" }) + "\n"); } catch {}
+      }, PING_MS);
+    }
+
+    function deactivatePeer() {
+      pendingPeers.delete(conn);
+      if (!active) return;
+      active = false;
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = null;
+      peers = peers.filter((candidate) => candidate.conn !== conn);
+      broadcastPeerCountDelayed();
+      const stillConnected = peers.some((candidate) =>
+        candidate.id === remoteId && !candidate.conn.destroyed
+      );
+      if (!stillConnected) {
+        broadcastGlobal("peer-status", { peerId: remoteId, isOnline: false });
+      }
+    }
+
+    function handleChatData(raw) {
       buf += raw.toString();
       const lines = buf.split("\n");
       buf = lines.pop();
@@ -636,43 +759,52 @@ export function initChat(sdk, options = {}) {
           if (line.length > MAX_MSG_LEN * 4) continue;
           const msg = JSON.parse(line);
 
+          if (
+            msg.roomKey &&
+            !DM_CONTROL_TYPES.has(msg.type) &&
+            !connectionSharesRoom(conn, msg.roomKey)
+          ) continue;
+
           if (msg.type === "ping") {
-            try { conn.write(JSON.stringify({ type: "pong" }) + "\n"); } catch {}
+            try { writeToConnection(conn, JSON.stringify({ type: "pong" }) + "\n"); } catch {}
             continue;
           }
           if (msg.type === "pong") continue;
 
           if (msg.type === "profile") {
-            if (msg.peerId && msg.username) {
+            if (msg.username) {
               const uname = clamp(msg.username, 50);
               const ubio = clamp(msg.bio, MAX_BIO_LEN);
               const uavatar = sanitizeAvatar(msg.avatar);
-              savedData.peerProfiles[msg.peerId] = { username: uname, bio: ubio, avatar: uavatar, updatedAt: Date.now() };
+              savedData.peerProfiles[remoteId] = { username: uname, bio: ubio, avatar: uavatar, updatedAt: Date.now() };
               for (const room of Object.values(savedData.rooms)) {
-                if (room.isDM && room.dmWith === msg.peerId) {
+                if (room.isDM && normPeerId(room.dmWith) === remoteId) {
                   room.name = uname;
                   room.bio = ubio || "";
                   room.avatar = uavatar;
                 }
               }
 
-              const peerEntry = peers.find((p) => p.id === remoteId);
+              const peerEntry = peerForConnection(conn);
               const peerRoomKeys = Array.isArray(msg.rooms)
-                ? msg.rooms.filter(rk => isValidRoomKey(rk) && savedData.rooms[rk])
-                : (peerEntry?.rooms || [...discoveryKeys]);
-              if (peerEntry) peerEntry.rooms = peerRoomKeys;
+                ? msg.rooms.filter((rk) =>
+                    isValidRoomKey(rk) &&
+                    savedData.rooms[rk] &&
+                    peerSharesRoom(peerEntry, rk)
+                  )
+                : (peerEntry?.rooms || []);
               for (const rk of peerRoomKeys) {
                 const room = savedData.rooms[rk];
                 if (!room) continue;
                 if (!room.members) room.members = {};
-                room.members[msg.peerId] = {
-                  ...(room.members[msg.peerId] || {}),
+                room.members[remoteId] = {
+                  ...(room.members[remoteId] || {}),
                   username: uname, bio: ubio, avatar: uavatar,
-                  joinedAt: room.members[msg.peerId]?.joinedAt || Date.now(),
+                  joinedAt: room.members[remoteId]?.joinedAt || Date.now(),
                 };
               }
               debouncePersist();
-              broadcastGlobal("member-update", { peerId: msg.peerId, username: uname, bio: ubio, avatar: uavatar, isOnline: true, rooms: peerRoomKeys });
+              broadcastGlobal("member-update", { peerId: remoteId, username: uname, bio: ubio, avatar: uavatar, isOnline: true, rooms: peerRoomKeys });
             }
             continue;
           }
@@ -707,7 +839,7 @@ export function initChat(sdk, options = {}) {
             sendRoomMeta(conn, msg.roomKey); 
             syncRoomHistoryTo(conn, msg.roomKey).then(() => {
               if (!conn.destroyed) {
-                try { conn.write(JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
+                try { writeToConnection(conn, JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
               }
             }).catch(() => {});
             continue;
@@ -719,7 +851,7 @@ export function initChat(sdk, options = {}) {
             if (msg.toId && normPeerId(msg.toId) !== normPeerId(localId)) continue;
             if (savedData.rooms[msg.roomKey]) {
               try {
-                conn.write(JSON.stringify({
+                writeToConnection(conn, JSON.stringify({
                   type: "dm-accept", roomKey: msg.roomKey,
                   fromId: localId, fromUsername: savedData.profile?.username || localId,
                   fromAvatar: savedData.profile?.avatar || null,
@@ -728,20 +860,20 @@ export function initChat(sdk, options = {}) {
               } catch {}
               continue;
             }
-            const fromName = clamp(msg.fromUsername, MAX_NAME_LEN) || msg.fromId || "Unknown";
+            const fromName = clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId;
             const fromAvatar = sanitizeAvatar(msg.fromAvatar);
             const fromBio = clamp(msg.fromBio, MAX_BIO_LEN);
             if (!savedData.pendingDMs) savedData.pendingDMs = {};
             if (!savedData.pendingDMs[msg.roomKey]) {
               savedData.pendingDMs[msg.roomKey] = {
-                roomKey: msg.roomKey, fromId: normPeerId(msg.fromId),
+                roomKey: msg.roomKey, fromId: remoteId,
                 fromUsername: fromName, fromAvatar, fromBio,
                 receivedAt: Date.now(),
               };
               persistData();
             }
             broadcastGlobal("dm-invite", {
-              roomKey: msg.roomKey, fromId: normPeerId(msg.fromId), fromUsername: fromName,
+              roomKey: msg.roomKey, fromId: remoteId, fromUsername: fromName,
               fromAvatar, fromBio,
             });
             continue;
@@ -751,10 +883,11 @@ export function initChat(sdk, options = {}) {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room || !room.isDM) continue;
-            const acceptName = clamp(msg.fromUsername, MAX_NAME_LEN) || msg.fromId;
+            if (normPeerId(room.dmWith) !== remoteId) continue;
+            const acceptName = clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId;
             const acceptAvatar = sanitizeAvatar(msg.fromAvatar);
             const acceptBio = clamp(msg.fromBio, MAX_BIO_LEN);
-            const fromPeer = normPeerId(msg.fromId);
+            const fromPeer = remoteId;
             if (fromPeer && normPeerId(room.dmWith) === fromPeer) {
               room.avatar = acceptAvatar;
               room.bio = acceptBio || "";
@@ -763,7 +896,7 @@ export function initChat(sdk, options = {}) {
               debouncePersist();
             }
             broadcastGlobal("dm-accepted", {
-              roomKey: msg.roomKey, fromId: normPeerId(msg.fromId), fromUsername: acceptName,
+              roomKey: msg.roomKey, fromId: remoteId, fromUsername: acceptName,
               fromAvatar: acceptAvatar, fromBio: acceptBio,
             });
             continue;
@@ -771,9 +904,11 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "dm-reject") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
+            const room = savedData.rooms[msg.roomKey];
+            if (!room?.isDM || normPeerId(room.dmWith) !== remoteId) continue;
             broadcastGlobal("dm-rejected", {
-              roomKey: msg.roomKey, fromId: msg.fromId,
-              fromUsername: clamp(msg.fromUsername, MAX_NAME_LEN) || msg.fromId,
+              roomKey: msg.roomKey, fromId: remoteId,
+              fromUsername: clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId,
             });
             continue;
           }
@@ -972,18 +1107,20 @@ export function initChat(sdk, options = {}) {
           }
         } catch {}
       }
-    });
+    }
 
     conn.on("close", () => {
-      clearInterval(pingTimer);
-      peers = peers.filter((p) => p.conn !== conn);
-      broadcastPeerCountDelayed();
-      const stillConnected = peers.some((p) => p.id === remoteId && !p.conn.destroyed);
-      if (!stillConnected) {
-        broadcastGlobal("peer-status", { peerId: remoteId, isOnline: false });
-      }
+      deactivatePeer();
     });
   });
+
+  // Install the connection listeners before joining. A discovered LAN peer can
+  // connect immediately, especially when both instances run on the same host.
+  for (const roomKey of Object.keys(savedData.rooms)) {
+    joinRoom(sdk, roomKey).catch((error) => {
+      console.error(`[chat] Auto-join ${roomKey.slice(0, 8)}: ${error.message}`);
+    });
+  }
 }
 
 function respond(status, data) {
@@ -1056,7 +1193,7 @@ export async function handleChatRequest(req, sdk) {
           fromBio: savedData.profile?.bio || "",
           toId: toIdNorm,
         }) + "\n";
-        relayToPeers(inviteMsg);
+        relayToPeer(toIdNorm, inviteMsg);
         return respond(200, { roomKey: dmRoomKey });
       }
 
@@ -1089,7 +1226,7 @@ export async function handleChatRequest(req, sdk) {
           fromAvatar: savedData.profile?.avatar || null,
           fromBio: savedData.profile?.bio || "",
         }) + "\n";
-        relayToPeers(acceptMsg);
+        relayToPeer(peerNorm, acceptMsg);
         return respond(200, { roomKey: dmRoomKey });
       }
 
@@ -1098,13 +1235,16 @@ export async function handleChatRequest(req, sdk) {
         const dmRoomKey = body.roomKey;
         if (!dmRoomKey || !isValidRoomKey(dmRoomKey)) return respond(400, { error: "Invalid room key" });
         if (!savedData.pendingDMs) savedData.pendingDMs = {};
+        const pending = savedData.pendingDMs[dmRoomKey];
+        if (!pending) return respond(404, { error: "No pending DM invite" });
+        const peerNorm = normPeerId(pending.fromId);
         delete savedData.pendingDMs[dmRoomKey];
         persistData();
         const rejectMsg = JSON.stringify({
           type: "dm-reject", roomKey: dmRoomKey,
           fromId: localId, fromUsername: savedData.profile?.username || localId,
         }) + "\n";
-        relayToPeers(rejectMsg);
+        relayToPeer(peerNorm, rejectMsg);
         return respond(200, { ok: true });
       }
 
@@ -1143,7 +1283,7 @@ export async function handleChatRequest(req, sdk) {
           id: joinId,
           ts: joinTs,
         }) + "\n";
-        relayToPeers(joinMsg);
+        relayToRoom(roomKey, joinMsg);
 
         if (isNew) {
           for (let i = 0; i < 20; i++) {
@@ -1169,7 +1309,7 @@ export async function handleChatRequest(req, sdk) {
           sender: localId, sn: savedData.profile?.username || localId, ts: Date.now(),
         };
         await appendToFeed(roomKey, entry);
-        relayToPeers(JSON.stringify({ ...entry, roomKey }) + "\n");
+        relayToRoom(roomKey, JSON.stringify({ ...entry, roomKey }) + "\n");
         return respond(200, { ok: true });
       }
 
@@ -1225,7 +1365,7 @@ export async function handleChatRequest(req, sdk) {
 
         cacheDecryptedMessage(roomKey, id, message);
         await appendToFeed(roomKey, entry);
-        relayToPeers(JSON.stringify({ ...entry, roomKey }) + "\n");
+        relayToRoom(roomKey, JSON.stringify({ ...entry, roomKey }) + "\n");
         return respond(200, {
           message: "Sent",
           sent: {
@@ -1272,15 +1412,8 @@ export async function handleChatRequest(req, sdk) {
         }
         persistData();
 
-        const profileMsg = JSON.stringify({
-          type: "profile", peerId: localId,
-          username: savedData.profile.username,
-          bio: savedData.profile.bio || "",
-          avatar: savedData.profile.avatar || null,
-          rooms: Object.keys(savedData.rooms),
-        }) + "\n";
         for (const p of peers) {
-          if (!p.conn.destroyed) { try { p.conn.write(profileMsg); } catch {} }
+          if (!p.conn.destroyed) shareProfile(p.conn, p.rooms);
         }
         broadcastGlobal("profile-update", {
           peerId: localId,
@@ -1315,14 +1448,19 @@ export async function handleChatRequest(req, sdk) {
           username: savedData.profile?.username || localId, roomKey,
           id: leaveId, ts: leaveTs,
         }) + "\n";
-        for (const p of peers) {
-          if (!p.conn.destroyed) { try { p.conn.write(leaveMsg); } catch {} }
+        relayToRoom(roomKey, leaveMsg);
+        try {
+          await sdk.leave(b4a.from(roomKey, "hex"));
+        } catch (e) {
+          console.warn(`[chat] Leave ${roomKey.slice(0, 8)}: ${e.message}`);
         }
         for (const s of roomSseClients[roomKey] || []) { try { s.end(); } catch {} }
         delete roomSseClients[roomKey];
         delete roomFeeds[roomKey];
         joinedRooms.delete(roomKey);
-        discoveryKeys.delete(roomKey);
+        for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
+          if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
+        }
         delete savedData.rooms[roomKey];
         if (activeRoom === roomKey) activeRoom = null;
         persistData();
@@ -1359,9 +1497,7 @@ export async function handleChatRequest(req, sdk) {
         const requestMsg = JSON.stringify({
           type: "request-room-meta", roomKey
         }) + "\n";
-        for (const p of peers) {
-          if (!p.conn.destroyed) { try { p.conn.write(requestMsg); } catch {} }
-        }
+        relayToRoom(roomKey, requestMsg);
         return respond(200, { ok: true });
       }
     }
@@ -1466,7 +1602,8 @@ export async function handleChatRequest(req, sdk) {
         stream.write(`event: identity\ndata: ${JSON.stringify({ id: localId })}\n\n`);
 
         prunePeers();
-        stream.write(`event: peersCount\ndata: ${JSON.stringify({ count: peers.length })}\n\n`);
+        const peerCount = new Set(peers.map((peer) => peer.fullId || peer.id)).size;
+        stream.write(`event: peersCount\ndata: ${JSON.stringify({ count: peerCount })}\n\n`);
 
         const onlineIds = [...new Set(peers.map((p) => p.id))];
         stream.write(`event: online-peers\ndata: ${JSON.stringify({ peers: onlineIds })}\n\n`);
