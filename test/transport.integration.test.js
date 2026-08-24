@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { create } from "hyper-sdk";
-import HyperDHTmDNS from "hyperdht-mdns";
+import HyperDHTmDNS from "@p2plabs/hyperdht-mdns";
 import { attachChatTransport } from "../transport.js";
 
 class MemoryAdapter {

@@ -11,7 +11,7 @@ function bytesToHex(bytes) {
   return hex;
 }
 
-export function roomKeyFromTopic(topic) {
+export function topicHex(topic) {
   if (typeof topic === "string") return normalizeRoomKey(topic);
   if (!topic) return "";
 
@@ -33,16 +33,16 @@ export function roomKeyFromTopic(topic) {
   return "";
 }
 
-export function sharedRoomsFromTopics(topics, localRooms) {
-  const local = new Set(
-    [...(localRooms || [])].map(normalizeRoomKey).filter(Boolean)
-  );
+export function sharedRoomsFromTopics(topics, discoveryKeys) {
+  if (!discoveryKeys || typeof discoveryKeys.get !== "function") return [];
+
   const shared = [];
   const seen = new Set();
 
   for (const topic of topics || []) {
-    const roomKey = roomKeyFromTopic(topic);
-    if (!roomKey || !local.has(roomKey) || seen.has(roomKey)) continue;
+    const discoveryKey = topicHex(topic);
+    const roomKey = normalizeRoomKey(discoveryKeys.get(discoveryKey));
+    if (!roomKey || seen.has(roomKey)) continue;
     seen.add(roomKey);
     shared.push(roomKey);
   }

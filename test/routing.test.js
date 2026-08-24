@@ -5,30 +5,37 @@ import {
   addedRooms,
   peerMatchesIdentity,
   peerSharesRoom,
-  roomKeyFromTopic,
   sharedRoomsFromTopics,
+  topicHex,
 } from "../routing.js";
 
 const ROOM_A = "aa".repeat(32);
 const ROOM_B = "bb".repeat(32);
 const ROOM_C = "cc".repeat(32);
+const TOPIC_A = "11".repeat(32);
+const TOPIC_B = "22".repeat(32);
+const TOPIC_UNKNOWN = "33".repeat(32);
 
 describe("PeerChat routing", () => {
-  it("normalizes Buffer and string topics to room keys", () => {
-    assert.equal(roomKeyFromTopic(Buffer.from(ROOM_A, "hex")), ROOM_A);
-    assert.equal(roomKeyFromTopic(ROOM_B.toUpperCase()), ROOM_B);
-    assert.equal(roomKeyFromTopic("not-a-topic"), "");
+  it("normalizes Buffer and string topics for discovery lookup", () => {
+    assert.equal(topicHex(Buffer.from(TOPIC_A, "hex")), TOPIC_A);
+    assert.equal(topicHex(TOPIC_B.toUpperCase()), TOPIC_B);
+    assert.equal(topicHex("not-a-topic"), "");
   });
 
-  it("keeps only topics that are joined locally", () => {
+  it("looks up rooms without assuming the topic contains the room key", () => {
     const topics = [
-      Buffer.from(ROOM_A, "hex"),
-      Buffer.from(ROOM_C, "hex"),
-      Buffer.from(ROOM_A, "hex"),
+      Buffer.from(TOPIC_A, "hex"),
+      Buffer.from(TOPIC_UNKNOWN, "hex"),
+      Buffer.from(TOPIC_A, "hex"),
     ];
+    const discoveryKeys = new Map([
+      [TOPIC_A, ROOM_A],
+      [TOPIC_B, ROOM_B],
+    ]);
 
     assert.deepEqual(
-      sharedRoomsFromTopics(topics, new Set([ROOM_A, ROOM_B])),
+      sharedRoomsFromTopics(topics, discoveryKeys),
       [ROOM_A]
     );
   });

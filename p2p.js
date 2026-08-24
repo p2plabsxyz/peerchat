@@ -17,6 +17,7 @@ import {
   peerMatchesIdentity,
   peerSharesRoom,
   sharedRoomsFromTopics,
+  topicHex,
 } from "./routing.js";
 import { attachChatTransport } from "./transport.js";
 import b4a from "b4a";
@@ -42,7 +43,7 @@ const roomFeeds = {};
 const roomSseClients = {};
 const globalSseClients = [];
 const joinedRooms = new Set();
-const discoveryKeys = new Set();
+const discoveryKeys = new Map();
 const seenIds = new Set();
 const rateCounters = new Map();
 const decryptedMessageCache = new Map();
@@ -544,12 +545,14 @@ async function joinRoom(sdk, roomKey) {
   if (!joinedRooms.has(roomKey)) {
     // Advertise the room independently of feed initialization. A damaged or
     // temporarily unavailable local feed must not make the peer invisible.
-    discoveryKeys.add(roomKey);
+    const topic = b4a.from(roomKey, "hex");
+    const discoveryKey = topicHex(topic);
+    discoveryKeys.set(discoveryKey, roomKey);
     try {
-      sdk.join(b4a.from(roomKey, "hex"), { client: true, server: true });
+      sdk.join(topic, { client: true, server: true });
       joinedRooms.add(roomKey);
     } catch (error) {
-      discoveryKeys.delete(roomKey);
+      discoveryKeys.delete(discoveryKey);
       throw error;
     }
 
@@ -1455,7 +1458,9 @@ export async function handleChatRequest(req, sdk) {
         delete roomSseClients[roomKey];
         delete roomFeeds[roomKey];
         joinedRooms.delete(roomKey);
-        discoveryKeys.delete(roomKey);
+        for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
+          if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
+        }
         delete savedData.rooms[roomKey];
         if (activeRoom === roomKey) activeRoom = null;
         persistData();
