@@ -188,6 +188,14 @@ function loadData() {
       }
     }
 
+    // Rooms created before configurable moderation carry no settings. Without a
+    // backfill they report null, which the UI shows as "Default settings" and
+    // which every filter reads as "not disabled", so the room looks unconfigured
+    // and unconfigurable at the same time.
+    for (const room of Object.values(savedData.rooms)) {
+      if (!room.moderation) room.moderation = { ...DEFAULT_ROOM_MODERATION };
+    }
+
     if ((raw.v || 0) < DATA_VERSION) persistData();
     normalizePersistedDmIds();
   } catch (err) {
@@ -595,9 +603,10 @@ export function initChat(sdk, options = {}) {
 
   loadData();
 
+  // Unref'd so a peer-count heartbeat never keeps a process alive on its own.
   setInterval(() => {
     if (globalSseClients.length > 0) sendPeerCount();
-  }, 10_000);
+  }, 10_000).unref?.();
 
   const roomKeys = Object.keys(savedData.rooms);
   if (roomKeys.length) {
@@ -824,10 +833,15 @@ export function initChat(sdk, options = {}) {
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
             if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
 
-            // Moderation settings: only accept from host or if we don't have any yet
-            if (msg.moderation && (room.isHost || !room.moderation)) {
-              room.moderation = sanitizeRoomModeration(msg.moderation);
-              updated = true;
+            // The host owns the room's moderation settings, so mirror whatever
+            // they send and never let a remote peer rewrite our own when we are
+            // the host. `room.isHost` is about us, not the sender.
+            if (msg.moderation && !room.isHost) {
+              const next = sanitizeRoomModeration(msg.moderation);
+              if (JSON.stringify(next) !== JSON.stringify(room.moderation)) {
+                room.moderation = next;
+                updated = true;
+              }
             }
 
             if (updated) {
@@ -1150,6 +1164,10 @@ export async function handleChatRequest(req, sdk) {
             isPinned: false, isMuted: false,
             unreadCount: 0, unreadMentions: 0,
             lastMessage: null, members: {},
+            // Filters stay on until the host's room-meta arrives with the real
+            // settings. Starting permissive would leak content the host chose
+            // to filter during the window before meta lands.
+            moderation: { ...DEFAULT_ROOM_MODERATION },
           };
           persistData();
         }
