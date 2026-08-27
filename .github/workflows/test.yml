@@ -75,17 +75,7 @@ jobs:
       # only one install step on purpose: with no package.json to anchor them,
       # a second `npm install --no-save` drops the packages from the first.
       - name: Install host-provided packages
-        run: npm install --no-save --no-audit --no-fund b4a compact-encoding protomux hyperdht@6.31.0 hyperswarm@4.17.0
+        run: npm install --no-save --no-audit --no-fund b4a compact-encoding protomux hyperdht@6.31.0 hyperswarm@4.17.0 hyper-sdk @p2plabs/hyperdht-mdns
 
-      # transport.integration.test.js is excluded: it imports
-      # @p2plabs/hyperdht-mdns, which is not published yet. Add it here once
-      # that lands.
       - name: Test suite
-        run: >
-          node --experimental-detect-module --test --test-reporter=spec
-          test/crypto.test.js
-          test/moderation.test.js
-          test/room-moderation.test.js
-          test/routing.test.js
-          test/transport.test.js
-          test/two-peer.test.js
+        run: node --experimental-detect-module --test --test-reporter=spec "test/*.test.js"
