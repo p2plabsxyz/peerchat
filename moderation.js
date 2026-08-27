@@ -310,9 +310,13 @@ export function checkAdultDomains(text) {
 // roomMod is optional: { abuseFilter, nsfwFilter, spamRateLimit }
 export function checkContent(text, roomMod) {
   // The two toggles gate different things. Abuse covers threats and targeted
-  // harassment; NSFW covers the shared word list. Both used to scan that list,
-  // so turning off either one on its own changed nothing and the room looked
-  // like it was ignoring its own settings.
+  // harassment; nsfwFilter covers the shared word list. Both used to scan that
+  // list, so turning off either one on its own changed nothing and the room
+  // looked like it was ignoring its own settings.
+  //
+  // The field is still called nsfwFilter because it is persisted per room and
+  // synced between peers; the UI calls it "Profanity & slurs", which describes
+  // lib/bad-words.txt more honestly (only about a quarter of it is sexual).
   if (roomMod?.abuseFilter !== false) {
     const threat = checkThreats(text);
     if (threat.flagged) return threat;

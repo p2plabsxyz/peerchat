@@ -146,12 +146,29 @@ function trackId(id) {
   return true;
 }
 
-function deriveKey(roomKey) {
-  return createHash("sha256").update("peersky-chat:" + roomKey).digest();
+// The swarm topic is announced to DHT nodes in the clear, so it must not be
+// the room key or anything the message key can be derived from. Topic and
+// message key are separate KDF outputs over the same secret.
+const TOPIC_CONTEXT = "peersky-chat:topic:";
+const MESSAGE_KEY_CONTEXT = "peersky-chat:key:";
+// Pre-separation derivation, when the room key was itself the topic. Kept for
+// decryption only so history written by older builds stays readable.
+const LEGACY_MESSAGE_KEY_CONTEXT = "peersky-chat:";
+
+export function deriveTopic(roomKey) {
+  return createHash("sha256").update(TOPIC_CONTEXT + roomKey).digest();
 }
 
-function encryptMsg(text, roomKey) {
-  const k = deriveKey(roomKey);
+export function deriveMessageKey(roomKey) {
+  return createHash("sha256").update(MESSAGE_KEY_CONTEXT + roomKey).digest();
+}
+
+function deriveLegacyMessageKey(roomKey) {
+  return createHash("sha256").update(LEGACY_MESSAGE_KEY_CONTEXT + roomKey).digest();
+}
+
+export function encryptMsg(text, roomKey) {
+  const k = deriveMessageKey(roomKey);
   const iv = randomBytes(12);
   const c = createCipheriv("aes-256-gcm", k, iv);
   let ct = c.update(text, "utf8", "hex");
@@ -159,13 +176,26 @@ function encryptMsg(text, roomKey) {
   return { ct, iv: iv.toString("hex"), tag: c.getAuthTag().toString("hex") };
 }
 
-function decryptMsg(ct, iv, tag, roomKey) {
-  const k = deriveKey(roomKey);
-  const d = createDecipheriv("aes-256-gcm", k, Buffer.from(iv, "hex"));
+function openMsg(ct, iv, tag, key) {
+  const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "hex"));
   d.setAuthTag(Buffer.from(tag, "hex"));
   let pt = d.update(ct, "hex", "utf8");
   pt += d.final("utf8");
   return pt;
+}
+
+export function decryptMsg(ct, iv, tag, roomKey) {
+  try {
+    return openMsg(ct, iv, tag, deriveMessageKey(roomKey));
+  } catch (err) {
+    try {
+      // GCM authentication means this only opens genuine pre-separation
+      // ciphertext, never a forgery.
+      return openMsg(ct, iv, tag, deriveLegacyMessageKey(roomKey));
+    } catch {
+      throw err;
+    }
+  }
 }
 
 function enc4disk(v) {
@@ -571,7 +601,7 @@ async function joinRoom(sdk, roomKey) {
   if (!joinedRooms.has(roomKey)) {
     // Advertise the room independently of feed initialization. A damaged or
     // temporarily unavailable local feed must not make the peer invisible.
-    const topic = b4a.from(roomKey, "hex");
+    const topic = deriveTopic(roomKey);
     const discoveryKey = topicHex(topic);
     discoveryKeys.set(discoveryKey, roomKey);
     try {
@@ -1502,7 +1532,7 @@ export async function handleChatRequest(req, sdk) {
         }) + "\n";
         relayToRoom(roomKey, leaveMsg);
         try {
-          await sdk.leave(b4a.from(roomKey, "hex"));
+          await sdk.leave(deriveTopic(roomKey));
         } catch (e) {
           console.warn(`[chat] Leave ${roomKey.slice(0, 8)}: ${e.message}`);
         }

@@ -46,5 +46,36 @@ jobs:
           echo "adult-domains.hosts: $lines lines"
           test "$lines" -gt 50000
 
-      - name: Moderation test suite
-        run: node --experimental-detect-module --test --test-reporter=spec test/moderation.test.js
+      # No deps needed, so these run in the same job as the syntax checks.
+      - name: Dependency-free test suites
+        run: node --experimental-detect-module --test --test-reporter=spec test/moderation.test.js test/routing.test.js
+
+  suites:
+    name: Full test suite (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # PeerChat declares no dependencies of its own; at runtime it uses the
+      # ones the host browser installs. Install them here so the suites that
+      # import p2p.js and transport.js can run.
+      #
+      # Pinned to what peersky-browser ships, which is what actually runs in
+      # production. Unpinned, npm resolves hyperdht 6.33.2, where two-peer
+      # discovery on a testnet takes 45s+ and the suite times out. There is
+      # only one install step on purpose: with no package.json to anchor them,
+      # a second `npm install --no-save` drops the packages from the first.
+      - name: Install host-provided packages
+        run: npm install --no-save --no-audit --no-fund b4a compact-encoding protomux hyperdht@6.31.0 hyperswarm@4.17.0 hyper-sdk @p2plabs/hyperdht-mdns
+
+      - name: Test suite
+        run: node --experimental-detect-module --test --test-reporter=spec "test/*.test.js"

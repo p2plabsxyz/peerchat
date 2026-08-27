@@ -22,14 +22,25 @@ Small teams or group of friends who already trust each other and want something 
 - Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments** via a dedicated Hyperdrive (`peerchat` shows up in Settings -> Archive like other apps). **No file upload limits** in PeerChat.
 - **Direct Messages (DMs):** click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived deterministically from both peer IDs so only those two people share it
 - Room list, unread counts, and local settings persist on disk
-- **Built-in moderation:** obvious abuse, spam bursts, NSFW terms, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse/NSFW filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
+- **Built-in moderation:** obvious abuse, spam bursts, profanity and slurs, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse and profanity filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
 - **Emoji picker** in the message composer: type keywords to filter characters; data comes from [emojilib](https://github.com/muan/emojilib), vendored as `lib/emojilib-emoji-en-US.json`.
 
 ## How it works
 
-**Room key** — A random 32-byte value shown as hex. It doubles as the Hypercore name/discussion topic and as the secret used to encrypt message payloads before they hit the feed. Sharing the key means sharing read access to that room’s history (with peers who actually have the blocks).
+**Room key** — A random 32-byte value shown as hex. It is the room's shared secret and never goes on the wire in the clear. Sharing the key means sharing read access to that room’s history (with peers who actually have the blocks).
 
-**Data path** — Outgoing messages are encrypted with **AES-256-GCM** using a key derived from the room key (`SHA-256` over a fixed prefix + room key). The feed stores ciphertext + IV + tag; peers decrypt after sync. The wire between peers is already encrypted by the swarm.
+**Topic and message key** — Two separate values are derived from the room key, both `SHA-256` over a distinct context string:
+
+| Derived value | Context | Where it goes |
+| --- | --- | --- |
+| Swarm topic | `peersky-chat:topic:` | Announced to DHT nodes during discovery |
+| Message key | `peersky-chat:key:` | Never leaves the process |
+
+They are kept apart because the swarm topic is published. `dht.announce()` and `dht.lookup()` send the topic to whichever DHT nodes are nearest it in keyspace, so anything recoverable from the topic is effectively public. Deriving both from the room key with different contexts means an observer holding the topic learns nothing about the message key.
+
+Earlier builds joined the swarm on the raw room key and derived the message key as `SHA-256("peersky-chat:" + roomKey)`. That published the room secret to DHT nodes and let them reconstruct the message key. If you ran a build from before this change, rooms created then should be recreated with fresh keys. Message history from those builds still decrypts, since the old derivation is retained for reading.
+
+**Data path** — Outgoing messages are encrypted with **AES-256-GCM** using the message key. The feed stores ciphertext + IV + tag; peers decrypt after sync. The wire between peers is already encrypted by the swarm.
 
 **Process split** — The UI (`app.js`, static HTML/CSS) talks to `hyper://chat?action=…` over `fetch` and `EventSource`. The handler in `p2p.js` runs in the main process with the shared Hyper SDK instance: it joins swarms for each saved room, relays JSON lines between peers (newline-delimited), and broadcasts events to all connected SSE clients.
 
@@ -48,7 +59,7 @@ All moderation runs **locally on each peer**—there is no central authority. Ev
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Abuse filter | On | Blocks threats and targeted harassment (`kys`, "kill yourself", rape threats, `stfu`) |
-| NSFW filter | On | Blocks the ~850-term word list: slurs, profanity, and explicit sexual terms |
+| Profanity & slurs | On | Blocks the ~850-term word list in `lib/bad-words.txt`: slurs, profanity, and explicit sexual terms |
 | Spam rate limit | 10 msgs / 10s | Configurable 5, 10, or 15 messages per 10-second window |
 | Adult domain blocklist | Always on | Not toggleable; ~76K known adult domains are always blocked |
 
@@ -57,7 +68,7 @@ All moderation runs **locally on each peer**—there is no central authority. Ev
 | Filter | What it catches | Source |
 |--------|----------------|--------|
 | Threat patterns | Threats and targeted harassment | `THREAT_PATTERNS` regex list in `moderation.js`, gated by the abuse filter |
-| Word list | Slurs, profanity, explicit sexual terms | `lib/bad-words.txt`, loaded via `initModeration()`, gated by the NSFW filter |
+| Word list | Slurs, profanity, explicit sexual terms | `lib/bad-words.txt`, loaded via `initModeration()`, gated by the profanity & slurs filter |
 | Adult domain blocklist | ~76K known adult domains extracted from URLs in messages | `lib/adult-domains.hosts`, loaded asynchronously at startup via `initModeration()` |
 
 **Spam detection** (remote peers only; local user is exempt):
@@ -79,6 +90,7 @@ All moderation runs **locally on each peer**—there is no central authority. Ev
 - A kicked remote peer is blocked from chat messages, reactions, sync-reactions, room-meta updates, members-list pushes, join announcements, and leave notices for the full cooldown period.
 - When the cooldown expires the peer's **violation count resets to zero**, so their next offense starts fresh at `warn`, not an instant re-kick.
 - The violation counter also resets independently after `TRACKER_IDLE_TTL_MS` (30 minutes) of inactivity, even without a kick.
+- A kicked peer is blocked from syncing history to you directly, but a **third peer can still relay their older messages**, which arrive content-checked only. That is deliberate: the relaying peer should not be punished for replaying history they hold.
 
 ## Security
 
@@ -106,12 +118,31 @@ stolen or shared carelessly.
 ### PeerChat specifics
 
 - **Room key is the capability.** Anyone with it can join the swarm and decrypt traffic for that room. Treat it like a strong shared secret.
+- **The room key is never announced.** Discovery uses a topic derived from it, so DHT nodes servicing your lookups cannot work back to the key or the message key. Rooms created by builds from before this split should be recreated with fresh keys.
 - **No “real” host** in the network sense: peers are symmetric. “Host” in the UI only marks who created the room on that device.
 - Rate limits, a max **message text** length, and moderation filters cut spam and obvious unsafe content in the feed; file uploads have **no size limit** in the app. Inline image/video previews are automatically shown for files up to 100 MB; larger files render as a click-to-load placeholder card. The UI escapes text before rendering to limit XSS.
 - Moderation is local and heuristic, not a trust or safety service. It helps with accidental exposure and noisy peers, but it does not replace trusted room keys, identity verification, or user judgment.
 - **Not** Matrix/Signal-class identity, device verification, or perfect forward secrecy.
 
 ## Development
+
+### Tests
+
+PeerChat has no dependencies of its own; it uses the ones the host browser already installs. Run the suite from inside a PeerSky checkout, where `node_modules` resolves:
+
+```bash
+cd src/pages/p2p/peerchat && node --test "test/*.test.js"
+```
+
+To run from a standalone clone, point `node_modules` at a PeerSky checkout first:
+
+```bash
+ln -s /path/to/peersky-browser/node_modules node_modules && node --test "test/*.test.js"
+```
+
+`test/crypto.test.js` covers topic and message key derivation, including that an observer holding only the announced topic cannot decrypt. `test/two-peer.test.js` runs two real peers against an isolated `hyperdht` testnet and checks that they discover each other by room key and exchange an encrypted message. `test/routing.test.js`, `test/transport.test.js`, `test/moderation.test.js` and `test/room-moderation.test.js` cover topic matching, the Protomux channel, the filtering engine and per-room moderation settings.
+
+`test/transport.integration.test.js` needs `@p2plabs/hyperdht-mdns`, which is not published yet, so it fails until that lands.
 
 ### Chat API 
 
