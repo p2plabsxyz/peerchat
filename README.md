@@ -22,7 +22,7 @@ Small teams or group of friends who already trust each other and want something 
 - Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments** via a dedicated Hyperdrive (`peerchat` shows up in Settings -> Archive like other apps). **No file upload limits** in PeerChat.
 - **Direct Messages (DMs):** click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived deterministically from both peer IDs so only those two people share it
 - Room list, unread counts, and local settings persist on disk
-- **Built-in moderation:** obvious abuse, spam bursts, NSFW terms, and known adult-domain links are filtered before they reach the room feed. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
+- **Built-in moderation:** obvious abuse, spam bursts, NSFW terms, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse/NSFW filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
 - **Emoji picker** in the message composer: type keywords to filter characters; data comes from [emojilib](https://github.com/muan/emojilib), vendored as `lib/emojilib-emoji-en-US.json`.
 
 ## How it works
@@ -43,12 +43,21 @@ Small teams or group of friends who already trust each other and want something 
 
 All moderation runs **locally on each peer**—there is no central authority. Even if a remote peer strips moderation from their build, your node still filters their messages independently.
 
+**Per-room moderation settings** — Room creators configure moderation at creation time in the create-room modal. Settings are immutable after creation (there is no admin role), and peers verify/sanitize them when syncing room metadata:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Abuse filter | On | Blocks threats and targeted harassment (`kys`, "kill yourself", rape threats, `stfu`) |
+| NSFW filter | On | Blocks the ~850-term word list: slurs, profanity, and explicit sexual terms |
+| Spam rate limit | 10 msgs / 10s | Configurable 5, 10, or 15 messages per 10-second window |
+| Adult domain blocklist | Always on | Not toggleable; ~76K known adult domains are always blocked |
+
 **Content filters** (applied to every message):
 
 | Filter | What it catches | Source |
 |--------|----------------|--------|
-| Abuse patterns | Slurs, hate speech, direct threats, common profanity | Regex list in `moderation.js` |
-| NSFW patterns | Explicit sexual terms, porn site names | Regex list in `moderation.js` |
+| Threat patterns | Threats and targeted harassment | `THREAT_PATTERNS` regex list in `moderation.js`, gated by the abuse filter |
+| Word list | Slurs, profanity, explicit sexual terms | `lib/bad-words.txt`, loaded via `initModeration()`, gated by the NSFW filter |
 | Adult domain blocklist | ~76K known adult domains extracted from URLs in messages | `lib/adult-domains.hosts`, loaded asynchronously at startup via `initModeration()` |
 
 **Spam detection** (remote peers only; local user is exempt):

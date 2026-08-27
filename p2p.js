@@ -39,6 +39,23 @@ const SEEN_CAP = 10_000;
 const PERSIST_DELAY_MS = 2_000;
 const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject"]);
 
+const DEFAULT_ROOM_MODERATION = {
+  abuseFilter: true,
+  nsfwFilter: true,
+  spamRateLimit: 10,
+};
+
+function sanitizeRoomModeration(input) {
+  if (!input || typeof input !== "object") return { ...DEFAULT_ROOM_MODERATION };
+  const out = { ...DEFAULT_ROOM_MODERATION };
+  if (input.abuseFilter === false) out.abuseFilter = false;
+  if (input.nsfwFilter === false) out.nsfwFilter = false;
+  if (typeof input.spamRateLimit === "number") {
+    out.spamRateLimit = Math.max(1, Math.min(50, Math.floor(input.spamRateLimit)));
+  }
+  return out;
+}
+
 const roomFeeds = {};
 const roomSseClients = {};
 const globalSseClients = [];
@@ -182,6 +199,14 @@ function loadData() {
       }
     }
 
+    // Rooms created before configurable moderation carry no settings. Without a
+    // backfill they report null, which the UI shows as "Default settings" and
+    // which every filter reads as "not disabled", so the room looks unconfigured
+    // and unconfigurable at the same time.
+    for (const room of Object.values(savedData.rooms)) {
+      if (!room.moderation) room.moderation = { ...DEFAULT_ROOM_MODERATION };
+    }
+
     if ((raw.v || 0) < DATA_VERSION) persistData();
     normalizePersistedDmIds();
   } catch (err) {
@@ -307,6 +332,7 @@ function roomUpdatePayload(roomKey) {
     unreadCount: room.unreadCount || 0,
     unreadMentions: room.unreadMentions || 0,
     lastMessage: room.lastMessage || null,
+    moderation: room.moderation || null,
   };
 }
 
@@ -477,9 +503,9 @@ function sendRoomMeta(conn, rk) {
       bio: room.bio || "",
       link: room.link || "",
       avatar: room.avatar || null,
-      // Host fallbacks for creator fields
       createdBy: room.createdBy || (room.isHost ? localId : ""),
       createdByName: room.createdByName || (room.isHost ? (savedData.profile?.username || localId) : ""),
+      moderation: room.moderation || null,
     }) + "\n");
   } catch {}
 }
@@ -642,9 +668,10 @@ export function initChat(sdk, options = {}) {
 
   loadData();
 
+  // Unref'd so a peer-count heartbeat never keeps a process alive on its own.
   setInterval(() => {
     if (globalSseClients.length > 0) sendPeerCount();
-  }, 10_000);
+  }, 10_000).unref?.();
 
   const handleTopicsChange = (conn, info) => {
     const peer = peerForConnection(conn) || pendingPeers.get(conn);
@@ -941,6 +968,17 @@ export function initChat(sdk, options = {}) {
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
             if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
 
+            // The host owns the room's moderation settings, so mirror whatever
+            // they send and never let a remote peer rewrite our own when we are
+            // the host. `room.isHost` is about us, not the sender.
+            if (msg.moderation && !room.isHost) {
+              const next = sanitizeRoomModeration(msg.moderation);
+              if (JSON.stringify(next) !== JSON.stringify(room.moderation)) {
+                room.moderation = next;
+                updated = true;
+              }
+            }
+
             if (updated) {
               debouncePersist();
               emitRoomUpdate(msg.roomKey);
@@ -1016,7 +1054,8 @@ export function initChat(sdk, options = {}) {
             const _sysRoom = savedData.rooms[msg.roomKey];
             if (_sysRoom && !_sysRoom.isHost && _sysRoom.joinedAt && msg.ts && msg.ts < _sysRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
-            const sysModeration = moderationCheckContent(msg.text);
+            const _sysRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const sysModeration = moderationCheckContent(msg.text, _sysRoomMod);
             if (sysModeration.flagged) {
               appendModerationNotice(msg.roomKey, msg.id, "Synced history", {
                 action: "warn",
@@ -1036,7 +1075,8 @@ export function initChat(sdk, options = {}) {
             if (!trackId(msg.id)) continue;
             const decrypted = decryptIncomingChat(msg, "synced message");
             if (!decrypted.ok) continue;
-            const syncModeration = moderationCheckContent(decrypted.plaintext);
+            const _syncRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const syncModeration = moderationCheckContent(decrypted.plaintext, _syncRoomMod);
             if (syncModeration.flagged) {
               const syncPeerName = clamp(msg.sn, 50) || clamp(msg.sender, MAX_SENDER_LEN) || remoteId;
               appendModerationNotice(msg.roomKey, msg.id, syncPeerName, {
@@ -1077,7 +1117,10 @@ export function initChat(sdk, options = {}) {
             const decrypted = decryptIncomingChat(msg, "peer message");
             if (!decrypted.ok) continue;
             moderatedPlaintext = decrypted.plaintext;
-            const modResult = moderationCheck(remoteId, msg.roomKey, decrypted.plaintext);
+            const _peerRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const modResult = moderationCheck(remoteId, msg.roomKey, decrypted.plaintext, undefined, {
+              roomModeration: _peerRoomMod,
+            });
             if (!modResult.allowed) {
               const peerName = clamp(msg.sn, 50) || savedData.peerProfiles[remoteId]?.username || remoteId;
               appendModerationNotice(msg.roomKey, msg.id, peerName, modResult, msg.ts);
@@ -1155,6 +1198,7 @@ export async function handleChatRequest(req, sdk) {
           isPinned: false, isMuted: false,
           unreadCount: 0, unreadMentions: 0,
           lastMessage: null, members: {},
+          moderation: sanitizeRoomModeration(body.moderation),
         };
         persistData();
         return respond(200, { roomKey: key });
@@ -1260,6 +1304,10 @@ export async function handleChatRequest(req, sdk) {
             isPinned: false, isMuted: false,
             unreadCount: 0, unreadMentions: 0,
             lastMessage: null, members: {},
+            // Filters stay on until the host's room-meta arrives with the real
+            // settings. Starting permissive would leak content the host chose
+            // to filter during the window before meta lands.
+            moderation: { ...DEFAULT_ROOM_MODERATION },
           };
           persistData();
         }
@@ -1322,9 +1370,13 @@ export async function handleChatRequest(req, sdk) {
         const message = clamp(body.message, MAX_MSG_LEN);
         if (!message) return respond(400, { error: "Empty message" });
 
+        const _sendRoom = savedData.rooms[roomKey];
+        const _sendRoomMod = _sendRoom?.moderation || null;
+
         const modResult = moderationCheck(localId, roomKey, message, undefined, {
           allowKick: false,
           checkSpam: false,
+          roomModeration: _sendRoomMod,
         });
 
         if (!modResult.allowed) {
@@ -1537,6 +1589,7 @@ export async function handleChatRequest(req, sdk) {
             unreadMentions: r.unreadMentions || 0,
             lastReadTs: r.lastReadTs || 0,
             members: r.members || {},
+            moderation: r.moderation || null,
           });
         }
         prunePeers();

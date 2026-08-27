@@ -1667,12 +1667,14 @@ function connectGlobalSSE() {
       const prevUnread = room.unreadCount;
       const prevMentions = room.unreadMentions;
       const prevLastMessage = room.lastMessage;
+      const prevModeration = room.moderation;
 
       Object.assign(room, data);
 
       room.unreadCount = prevUnread;
       room.unreadMentions = prevMentions;
       if (prevLastMessage) room.lastMessage = prevLastMessage;
+      if (prevModeration) room.moderation = prevModeration;
 
       renderRoomList();
 
@@ -1699,6 +1701,17 @@ function connectGlobalSSE() {
               linkRow.style.display = "";
             } else {
               linkRow.style.display = "none";
+            }
+          }
+
+          const riModSection = $("ri-moderation");
+          const riModSettings = $("ri-mod-settings");
+          if (riModSection && riModSettings) {
+            if (room.isDM) {
+              riModSection.style.display = "none";
+            } else {
+              riModSection.style.display = "";
+              renderModerationInfo(riModSettings, room.moderation);
             }
           }
         }
@@ -1873,6 +1886,11 @@ $("create-room-form")?.addEventListener("submit", async (e) => {
   try {
     const body = { name, bio: $("new-room-bio").value.trim(), link: $("new-room-link").value.trim() };
     if (pendingRoomAvatar) body.avatar = pendingRoomAvatar;
+    body.moderation = {
+      abuseFilter: $("mod-abuse-filter")?.checked ?? true,
+      nsfwFilter: $("mod-nsfw-filter")?.checked ?? true,
+      spamRateLimit: parseInt($("mod-spam-limit")?.value || "10", 10) || 10,
+    };
     const { roomKey } = await chat.createRoom(body);
     await chat.joinRoom(roomKey);
     await loadRooms();
@@ -1883,6 +1901,9 @@ $("create-room-form")?.addEventListener("submit", async (e) => {
     $("new-room-bio").value = "";
     $("new-room-link").value = "";
     pendingRoomAvatar = null;
+    if ($("mod-abuse-filter")) $("mod-abuse-filter").checked = true;
+    if ($("mod-nsfw-filter")) $("mod-nsfw-filter").checked = true;
+    if ($("mod-spam-limit")) $("mod-spam-limit").value = "10";
     saveDrafts().catch(() => {});
   } catch (err) { alert(err.message); }
   finally {
@@ -2062,6 +2083,23 @@ $("message-input")?.addEventListener("blur", () => {
   setTimeout(() => { $("mention-popup")?.classList.remove("open"); mentionIdx = -1; }, 150);
 });
 
+function renderModerationInfo(container, moderation) {
+  container.innerHTML = "";
+  if (!moderation) {
+    container.innerHTML = '<span class="mod-setting-item">Default settings</span>';
+    return;
+  }
+  const items = [];
+  const abuse = moderation.abuseFilter !== false ? "on" : "off";
+  const nsfw = moderation.nsfwFilter !== false ? "on" : "off";
+  const spamLimit = esc(String(moderation.spamRateLimit || 10));
+  items.push(`<span class="mod-setting-item">Abuse filter: <strong>${abuse}</strong></span>`);
+  items.push(`<span class="mod-setting-item">NSFW filter: <strong>${nsfw}</strong></span>`);
+  items.push(`<span class="mod-setting-item">Spam limit: <strong>${spamLimit}</strong> msgs/10s</span>`);
+  items.push(`<span class="mod-setting-item">Adult domain blocklist: <strong>always on</strong></span>`);
+  container.innerHTML = items.join("");
+}
+
 $("chat-header-main")?.addEventListener("click", () => {
   if (!S.activeRoom) return;
   const room = S.rooms[S.activeRoom];
@@ -2165,6 +2203,17 @@ $("chat-header-main")?.addEventListener("click", () => {
       setTimeout(() => { $("ri-copy-key").textContent = "Copy"; }, 1500);
     });
   };
+
+  const riModSection = $("ri-moderation");
+  const riModSettings = $("ri-mod-settings");
+  if (riModSection && riModSettings) {
+    if (room.isDM) {
+      riModSection.style.display = "none";
+    } else {
+      riModSection.style.display = "";
+      renderModerationInfo(riModSettings, room.moderation);
+    }
+  }
 
   openModal("room-info-modal");
 });

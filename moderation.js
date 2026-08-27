@@ -217,10 +217,11 @@ function maybeCleanupModerationState(now) {
 }
 
 // Return true when a peer hits the spam threshold.
-export function checkSpam(peerId, roomKey, now) {
+export function checkSpam(peerId, roomKey, now, spamLimit) {
   const key = peerRoomKey(peerId, roomKey);
   const ts = now ?? Date.now();
   maybeCleanupModerationState(ts);
+  const limit = (typeof spamLimit === "number" && spamLimit > 0) ? spamLimit : MAX_MSGS_PER_WINDOW;
 
   let window = spamTracker.get(key);
   if (!window) {
@@ -237,10 +238,13 @@ export function checkSpam(peerId, roomKey, now) {
   // Record this message
   window.push(ts);
 
-  return window.length >= MAX_MSGS_PER_WINDOW;
+  return window.length >= limit;
 }
 
-export function checkAbuse(text) {
+// Threats and targeted harassment only. Kept separate from the shared word
+// list so the two room toggles can gate different things; checkAbuse still
+// covers both for callers that want the combined check.
+export function checkThreats(text) {
   if (!text) return { flagged: false, reason: "" };
 
   for (const pattern of THREAT_PATTERNS) {
@@ -248,6 +252,14 @@ export function checkAbuse(text) {
       return { flagged: true, reason: "abusive language" };
     }
   }
+  return { flagged: false, reason: "" };
+}
+
+export function checkAbuse(text) {
+  if (!text) return { flagged: false, reason: "" };
+
+  const threat = checkThreats(text);
+  if (threat.flagged) return threat;
 
   const words = text.match(WORD_SPLIT_RE);
   if (words) {
@@ -295,12 +307,21 @@ export function checkAdultDomains(text) {
 }
 
 // Run content filters without changing moderation state.
-export function checkContent(text) {
-  const abuse = checkAbuse(text);
-  if (abuse.flagged) return abuse;
+// roomMod is optional: { abuseFilter, nsfwFilter, spamRateLimit }
+export function checkContent(text, roomMod) {
+  // The two toggles gate different things. Abuse covers threats and targeted
+  // harassment; NSFW covers the shared word list. Both used to scan that list,
+  // so turning off either one on its own changed nothing and the room looked
+  // like it was ignoring its own settings.
+  if (roomMod?.abuseFilter !== false) {
+    const threat = checkThreats(text);
+    if (threat.flagged) return threat;
+  }
 
-  const nsfw = checkNSFW(text);
-  if (nsfw.flagged) return nsfw;
+  if (roomMod?.nsfwFilter !== false) {
+    const nsfw = checkNSFW(text);
+    if (nsfw.flagged) return nsfw;
+  }
 
   const adultDomain = checkAdultDomains(text);
   if (adultDomain.flagged) {
@@ -381,6 +402,7 @@ export function checkMessage(peerId, roomKey, text, now, options = {}) {
   const shouldCheckSpam = options.checkSpam !== false;
   const shouldTrackViolations = options.trackViolations !== false;
   const shouldAllowKick = options.allowKick !== false;
+  const roomMod = options.roomModeration || null;
   const ts = now ?? Date.now();
   maybeCleanupModerationState(ts);
 
@@ -405,12 +427,12 @@ export function checkMessage(peerId, roomKey, text, now, options = {}) {
   }
 
   // Then check spam.
-  if (shouldCheckSpam && checkSpam(peerId, roomKey, ts)) {
+  if (shouldCheckSpam && checkSpam(peerId, roomKey, ts, roomMod?.spamRateLimit)) {
     return blockedResult("spam (too many messages)", violationAction());
   }
 
   // Then check content.
-  const content = checkContent(text);
+  const content = checkContent(text, roomMod);
   if (content.flagged) {
     return blockedResult(content.reason, violationAction());
   }
