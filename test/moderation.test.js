@@ -299,10 +299,18 @@ describe("Moderation Engine", () => {
     });
 
     it("should block abusive messages with warn action", () => {
-      const result = checkMessage(PEER, ROOM, "you fuck");
+      // A threat, not a word from the shared list. Words are reported as NSFW
+      // now that the two filters gate different things.
+      const result = checkMessage(PEER, ROOM, "just kys");
       assert.equal(result.allowed, false);
       assert.equal(result.action, "warn");
       assert.ok(result.reason.includes("abusive"));
+    });
+
+    it("should block word-list messages with warn action", () => {
+      const result = checkMessage(PEER, ROOM, "you fuck");
+      assert.equal(result.allowed, false);
+      assert.equal(result.action, "warn");
     });
 
     it("should block NSFW messages", () => {
@@ -502,6 +510,36 @@ describe("Moderation Engine", () => {
 
     it("should still flag adult domains via checkContent when filters are off", () => {
       assert.equal(checkContent("go to https://pornhub.com", { abuseFilter: false, nsfwFilter: false }).flagged, true);
+    });
+
+    // Both filters used to scan the shared word list, so each toggle on its own
+    // was a no-op for words: turning off abuse still left NSFW blocking them.
+    // The toggles have to gate different things to mean anything.
+    describe("the two toggles gate different things", () => {
+      const WORD = "fuck!";
+      const THREAT = "just kys";
+
+      it("blocks both when the room leaves the defaults alone", () => {
+        assert.equal(checkContent(WORD).flagged, true);
+        assert.equal(checkContent(THREAT).flagged, true);
+      });
+
+      it("lets threats through but keeps words when only abuse is off", () => {
+        const mod = { abuseFilter: false, nsfwFilter: true };
+        assert.equal(checkContent(THREAT, mod).flagged, false);
+        assert.equal(checkContent(WORD, mod).flagged, true);
+      });
+
+      it("lets words through but keeps threats when only NSFW is off", () => {
+        const mod = { abuseFilter: true, nsfwFilter: false };
+        assert.equal(checkContent(WORD, mod).flagged, false);
+        assert.equal(checkContent(THREAT, mod).flagged, true);
+      });
+
+      it("keeps checkAbuse covering both for direct callers", () => {
+        assert.equal(checkAbuse(WORD).flagged, true);
+        assert.equal(checkAbuse(THREAT).flagged, true);
+      });
     });
   });
 });

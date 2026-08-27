@@ -47,8 +47,8 @@ All moderation runs **locally on each peer**—there is no central authority. Ev
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Abuse filter | On | Blocks slurs, hate speech, direct threats, and common profanity |
-| NSFW filter | On | Blocks explicit sexual terms and porn site names |
+| Abuse filter | On | Blocks threats and targeted harassment (`kys`, "kill yourself", rape threats, `stfu`) |
+| NSFW filter | On | Blocks the ~850-term word list: slurs, profanity, and explicit sexual terms |
 | Spam rate limit | 10 msgs / 10s | Configurable 5, 10, or 15 messages per 10-second window |
 | Adult domain blocklist | Always on | Not toggleable; ~76K known adult domains are always blocked |
 
@@ -56,8 +56,8 @@ All moderation runs **locally on each peer**—there is no central authority. Ev
 
 | Filter | What it catches | Source |
 |--------|----------------|--------|
-| Abuse patterns | Slurs, hate speech, direct threats, common profanity | Regex list in `moderation.js` |
-| NSFW patterns | Explicit sexual terms, porn site names | Regex list in `moderation.js` |
+| Threat patterns | Threats and targeted harassment | `THREAT_PATTERNS` regex list in `moderation.js`, gated by the abuse filter |
+| Word list | Slurs, profanity, explicit sexual terms | `lib/bad-words.txt`, loaded via `initModeration()`, gated by the NSFW filter |
 | Adult domain blocklist | ~76K known adult domains extracted from URLs in messages | `lib/adult-domains.hosts`, loaded asynchronously at startup via `initModeration()` |
 
 **Spam detection** (remote peers only; local user is exempt):

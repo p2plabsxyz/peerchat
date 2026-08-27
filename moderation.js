@@ -241,7 +241,10 @@ export function checkSpam(peerId, roomKey, now, spamLimit) {
   return window.length >= limit;
 }
 
-export function checkAbuse(text) {
+// Threats and targeted harassment only. Kept separate from the shared word
+// list so the two room toggles can gate different things; checkAbuse still
+// covers both for callers that want the combined check.
+export function checkThreats(text) {
   if (!text) return { flagged: false, reason: "" };
 
   for (const pattern of THREAT_PATTERNS) {
@@ -249,6 +252,14 @@ export function checkAbuse(text) {
       return { flagged: true, reason: "abusive language" };
     }
   }
+  return { flagged: false, reason: "" };
+}
+
+export function checkAbuse(text) {
+  if (!text) return { flagged: false, reason: "" };
+
+  const threat = checkThreats(text);
+  if (threat.flagged) return threat;
 
   const words = text.match(WORD_SPLIT_RE);
   if (words) {
@@ -298,9 +309,13 @@ export function checkAdultDomains(text) {
 // Run content filters without changing moderation state.
 // roomMod is optional: { abuseFilter, nsfwFilter, spamRateLimit }
 export function checkContent(text, roomMod) {
+  // The two toggles gate different things. Abuse covers threats and targeted
+  // harassment; NSFW covers the shared word list. Both used to scan that list,
+  // so turning off either one on its own changed nothing and the room looked
+  // like it was ignoring its own settings.
   if (roomMod?.abuseFilter !== false) {
-    const abuse = checkAbuse(text);
-    if (abuse.flagged) return abuse;
+    const threat = checkThreats(text);
+    if (threat.flagged) return threat;
   }
 
   if (roomMod?.nsfwFilter !== false) {
