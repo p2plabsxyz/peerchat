@@ -279,6 +279,42 @@ describe("Moderation Engine", () => {
       assert.equal(isKicked(PEER, ROOM, now + ROOM_REJOIN_COOLDOWN_MS), false);
     });
 
+    // Serving the cooldown has to clear the counter too. If it did not, the
+    // peer would come back already at the kick threshold and the next single
+    // violation would re-kick them immediately, so the cooldown would only
+    // ever be served once and then become permanent.
+    it("should reset the violation count once the cooldown is served", () => {
+      const peer = "cooldown-reset-peer";
+      const now = 1000000;
+
+      for (let i = 0; i < KICK_THRESHOLD; i++) {
+        checkMessage(peer, ROOM, "shit", now + i);
+      }
+      assert.equal(isKicked(peer, ROOM, now), true);
+
+      const after = now + ROOM_REJOIN_COOLDOWN_MS + 1000;
+      assert.equal(isKicked(peer, ROOM, after), false);
+      assert.equal(getViolations(peer, ROOM, after), 0);
+
+      // Back at warn, not straight to another kick.
+      const next = checkMessage(peer, ROOM, "shit", after);
+      assert.equal(next.action, "warn");
+      assert.equal(isKicked(peer, ROOM, after), false);
+    });
+
+    it("should let a returning peer send clean messages after the cooldown", () => {
+      const peer = "returning-peer";
+      const now = 1000000;
+
+      for (let i = 0; i < KICK_THRESHOLD; i++) {
+        checkMessage(peer, ROOM, "shit", now + i);
+      }
+      assert.equal(checkMessage(peer, ROOM, "hello", now).allowed, false);
+
+      const after = now + ROOM_REJOIN_COOLDOWN_MS + 1000;
+      assert.equal(checkMessage(peer, ROOM, "hello", after).allowed, true);
+    });
+
     it("should not affect other peers", () => {
       const now = 1000000;
       addKick("peerA", ROOM, now);

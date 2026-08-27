@@ -90,6 +90,7 @@ All moderation runs **locally on each peer**—there is no central authority. Ev
 - A kicked remote peer is blocked from chat messages, reactions, sync-reactions, room-meta updates, members-list pushes, join announcements, and leave notices for the full cooldown period.
 - When the cooldown expires the peer's **violation count resets to zero**, so their next offense starts fresh at `warn`, not an instant re-kick.
 - The violation counter also resets independently after `TRACKER_IDLE_TTL_MS` (30 minutes) of inactivity, even without a kick.
+- A kicked peer is blocked from syncing history to you directly, but a **third peer can still relay their older messages**, which arrive content-checked only. That is deliberate: the relaying peer should not be punished for replaying history they hold.
 
 ## Security
 
