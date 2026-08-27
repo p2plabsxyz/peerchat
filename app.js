@@ -2094,7 +2094,7 @@ function renderModerationInfo(container, moderation) {
   const nsfw = moderation.nsfwFilter !== false ? "on" : "off";
   const spamLimit = esc(String(moderation.spamRateLimit || 10));
   items.push(`<span class="mod-setting-item">Abuse filter: <strong>${abuse}</strong></span>`);
-  items.push(`<span class="mod-setting-item">NSFW filter: <strong>${nsfw}</strong></span>`);
+  items.push(`<span class="mod-setting-item">Profanity &amp; slurs: <strong>${nsfw}</strong></span>`);
   items.push(`<span class="mod-setting-item">Spam limit: <strong>${spamLimit}</strong> msgs/10s</span>`);
   items.push(`<span class="mod-setting-item">Adult domain blocklist: <strong>always on</strong></span>`);
   container.innerHTML = items.join("");
