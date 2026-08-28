@@ -1045,7 +1045,16 @@ function applyDMComposerGate(roomKey) {
   }
 }
 
+// Every openRoom call takes a ticket. The awaits below (setActive, markRead,
+// getHistory) can outlive the click that started them, so on a slow device a
+// stale response would render the previous room's messages into the pane the
+// user is already looking at. Anything that resumes on an old ticket bails.
+let openRoomTicket = 0;
+let roomSyncTimer = null;
+
 async function openRoom(roomKey) {
+  const ticket = ++openRoomTicket;
+  if (roomSyncTimer) { clearInterval(roomSyncTimer); roomSyncTimer = null; }
   const prevRoom = S.activeRoom;
   if (prevRoom && prevRoom !== roomKey) {
     const input = $("message-input");
@@ -1084,11 +1093,13 @@ async function openRoom(roomKey) {
 
   await chat.setActive(roomKey);
   await chat.markRead(roomKey);
+  if (ticket !== openRoomTicket) return;
 
   try {
     const { messages } = await chat.getHistory(roomKey);
     const merged = mergeWithHistory(S.messages[roomKey], messages || []);
     S.messages[roomKey] = extractReactions(roomKey, merged);
+    if (ticket !== openRoomTicket) return;
     renderMessages(roomKey, true, lastReadTs);
 
     const _roomNow = S.rooms[roomKey];
@@ -1100,7 +1111,7 @@ async function openRoom(roomKey) {
 
     let retries = 0;
     const syncCheck = setInterval(async () => {
-      if (S.activeRoom !== roomKey || !S.rooms[roomKey] || retries++ >= 20) { clearInterval(syncCheck); return; }
+      if (ticket !== openRoomTicket || S.activeRoom !== roomKey || !S.rooms[roomKey] || retries++ >= 20) { clearInterval(syncCheck); return; }
       try {
         const _r = S.rooms[roomKey];
         const headerName = $("chat-room-name")?.textContent || "";
@@ -1131,7 +1142,8 @@ async function openRoom(roomKey) {
           renderMessages(roomKey, false);
         }
       } catch {}
-    }, 2000); // Reduced from 3000 to 2000 for faster recovery
+    }, 2000);
+    roomSyncTimer = syncCheck;
   } catch (err) {
     console.error("History load error:", err);
     S.messages[roomKey] = extractReactions(roomKey, mergeWithHistory(S.messages[roomKey], []));
@@ -1142,6 +1154,38 @@ function messageMatchesSearch(m, q) {
   if (!q) return true;
   if (m.type === "system") return (m.text || "").toLowerCase().includes(q);
   return (m.message || "").toLowerCase().includes(q);
+}
+
+const scrollWatches = new WeakMap();
+
+function stickToBottom(container, { smooth = false, budgetMs = 1500 } = {}) {
+  if (!container) return;
+
+  const watch = (scrollWatches.get(container) || 0) + 1;
+  scrollWatches.set(container, watch);
+
+  const jump = () => { container.scrollTop = container.scrollHeight; };
+  if (smooth) container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  else jump();
+
+  const deadline = performance.now() + budgetMs;
+  let lastHeight = container.scrollHeight;
+
+  const step = () => {
+    if (!container.isConnected) return;
+    if (scrollWatches.get(container) !== watch) return; // superseded
+
+    const height = container.scrollHeight;
+    if (height !== lastHeight) {
+      lastHeight = height;
+      if (smooth) container.scrollTo({ top: height, behavior: "smooth" });
+      else jump();
+    }
+
+    if (performance.now() > deadline) { jump(); return; }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
@@ -1193,10 +1237,10 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
     if (divider) {
       requestAnimationFrame(() => { divider.scrollIntoView({ block: "start" }); });
     } else {
-      requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+      stickToBottom(container);
     }
   } else if (wasAtBottom) {
-    requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+    stickToBottom(container);
   } else {
     requestAnimationFrame(() => { container.scrollTop = savedScroll; });
   }
@@ -1393,7 +1437,7 @@ function appendSystemMsg(roomKey, text) {
   el.textContent = text;
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
   container.appendChild(el);
-  if (atBottom) container.scrollTop = container.scrollHeight;
+  if (atBottom) stickToBottom(container);
 }
 
 function formatBlockDuration(ms) {
@@ -1469,7 +1513,8 @@ function appendMessage(roomKey, msg) {
       el.classList.add("msg-animate");
     }
     container.appendChild(el);
-    if (atBottom) container.scrollTop = container.scrollHeight;
+    // A message with an image grows after paint; hold the bottom until it settles.
+    if (atBottom) stickToBottom(container);
   }
   return true;
 }
@@ -2735,7 +2780,7 @@ if (messagesContainer && scrollBtn) {
   });
 
   scrollBtn.addEventListener("click", () => {
-    messagesContainer.scrollTo({ top: messagesContainer.scrollHeight + 1000, behavior: "smooth" });
+    stickToBottom(messagesContainer, { smooth: true });
     scrollBtn.style.display = "none";
   });
 }
