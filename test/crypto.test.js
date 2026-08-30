@@ -8,6 +8,10 @@ import {
   encryptMsg,
   decryptMsg,
 } from "../p2p.js";
+import {
+  decodeMessagePayload,
+  encodeMessagePayload,
+} from "../lib/link-preview.js";
 
 const roomKey = () => randomBytes(32).toString("hex");
 
@@ -112,6 +116,33 @@ describe("message encryption", () => {
     const { ct, iv, tag } = encryptMsg("transfer 100", key);
     const flipped = (parseInt(ct.slice(0, 1), 16) ^ 1).toString(16) + ct.slice(1);
     assert.throws(() => decryptMsg(flipped, iv, tag, key));
+  });
+});
+
+describe("link preview payload encryption", () => {
+  it("round-trips a message with embedded preview metadata", () => {
+    const key = roomKey();
+    const preview = { url: "https://example.com/x", host: "example.com", title: "T", description: "D" };
+    const payload = encodeMessagePayload("see the link", preview);
+    const { ct, iv, tag } = encryptMsg(payload, key);
+    const { text, preview: back } = decodeMessagePayload(decryptMsg(ct, iv, tag, key));
+    assert.equal(text, "see the link");
+    assert.deepEqual(back, preview);
+  });
+
+  it("keeps plain-text messages on the legacy format", () => {
+    const key = roomKey();
+    const payload = encodeMessagePayload("no link", null);
+    const { ct, iv, tag } = encryptMsg(payload, key);
+    assert.equal(decryptMsg(ct, iv, tag, key), "no link");
+  });
+
+  it("legacy ciphertext still decrypts to a preview-less message", () => {
+    const key = roomKey();
+    const { ct, iv, tag } = encryptMsg("old build text", key);
+    const { text, preview } = decodeMessagePayload(decryptMsg(ct, iv, tag, key));
+    assert.equal(text, "old build text");
+    assert.equal(preview, null);
   });
 });
 

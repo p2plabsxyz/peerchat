@@ -24,6 +24,7 @@ Small teams or group of friends who already trust each other and want something 
 - Room list, unread counts, and local settings persist on disk
 - **Built-in moderation:** obvious abuse, spam bursts, profanity and slurs, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse and profanity filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
 - **Emoji picker** in the message composer: type keywords to filter characters; data comes from [emojilib](https://github.com/muan/emojilib), vendored as `lib/emojilib-emoji-en-US.json`.
+- **Link previews:** when an outgoing message contains an http(s) URL, the sender fetches the first link's title and description once and ships them in the encrypted message. Readers see a small card (text only, no image) instead of only a bare link, without ever connecting to the linked host. Previews respect the room's filters (blocked/adult domains and filtered metadata never reach the feed) and can be turned off in Settings.
 
 ## How it works
 

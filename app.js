@@ -795,6 +795,7 @@ async function init() {
     if (!profile.username) { showOnboarding(); return; }
     S.profile = profile;
     S.settings.notifications = profile.notifications ?? true;
+    S.settings.linkPreview = profile.linkPreview ?? true;
     await loadRooms();
     cleanupStaleSelfEntries();
     showApp();
@@ -875,6 +876,7 @@ $("onboard-submit")?.addEventListener("click", async () => {
     S.profile = profile;
     S.settings.sounds = true;
     S.settings.notifications = profile.notifications ?? true;
+    S.settings.linkPreview = profile.linkPreview ?? true;
     await loadRooms();
     if (PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY]) {
       S.rooms[PRE_JOINED_ROOM_KEY].lastMessage = null;
@@ -1267,6 +1269,34 @@ function updateRoomPeerCount(roomKey) {
   $("chat-room-peers").textContent = `${c} peer${c !== 1 ? "s" : ""}`;
 }
 
+function previewCardHost(preview) {
+  if (!preview) return "";
+  if (typeof preview.host === "string" && preview.host) return preview.host;
+  const url = typeof preview.url === "string" ? preview.url : "";
+  if (!/^https?:\/\//i.test(url)) return "";
+  try { return new URL(url).hostname; } catch { return ""; }
+}
+
+function makePreviewCard(preview) {
+  if (!preview || typeof preview !== "object") return null;
+  const host = previewCardHost(preview);
+  const title = typeof preview.title === "string" ? preview.title.trim() : "";
+  const description = typeof preview.description === "string" ? preview.description.trim() : "";
+  if (!host && !title && !description) return null;
+  const url = typeof preview.url === "string" && /^https?:\/\//i.test(preview.url) ? preview.url : "#";
+  const card = document.createElement("a");
+  card.className = "link-preview";
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  card.href = url;
+  const parts = [];
+  if (host) parts.push(`<span class="lp-host">${esc(host)}</span>`);
+  if (title) parts.push(`<span class="lp-title">${esc(title)}</span>`);
+  if (description) parts.push(`<span class="lp-desc">${esc(description)}</span>`);
+  card.innerHTML = parts.join("");
+  return card;
+}
+
 function makeMsgEl(msg) {
   const self = msg.sender === S.profile?.id;
   const el = document.createElement("div");
@@ -1300,6 +1330,9 @@ function makeMsgEl(msg) {
   textNode.className = "msg-bubble-body";
   textNode.innerHTML = linkify(msg.message, msg);
   bubble.appendChild(textNode);
+
+  const previewCard = makePreviewCard(msg.preview);
+  if (previewCard) bubble.appendChild(previewCard);
 
   const reactTrigger = document.createElement("button");
   reactTrigger.type = "button";
@@ -2376,6 +2409,7 @@ $("settings-btn")?.addEventListener("click", () => {
   $("set-bio").value = S.profile?.bio || "";
   $("set-sounds").checked = S.settings.sounds;
   $("set-notifications").checked = S.settings.notifications;
+  $("set-linkpreview").checked = S.settings.linkPreview;
   $("set-avatar-preview").src = avatar(S.profile?.username, 64, S.profile?.avatar);
   pendingAvatar = null;
   openModal("settings-modal");
@@ -2407,12 +2441,14 @@ $("settings-form")?.addEventListener("submit", async (e) => {
   try {
     const sounds = $("set-sounds").checked;
     const notifications = $("set-notifications").checked;
-    const body = { username, bio: $("set-bio").value.trim(), notifications };
+    const linkPreview = $("set-linkpreview").checked;
+    const body = { username, bio: $("set-bio").value.trim(), notifications, linkPreview };
     if (pendingAvatar) body.avatar = pendingAvatar;
     const { profile } = await chat.saveProfile(body);
     S.profile = profile;
     S.settings.sounds = sounds;
     S.settings.notifications = notifications;
+    S.settings.linkPreview = linkPreview;
     if (oldUsername && oldUsername.toLowerCase() !== username.toLowerCase()) {
       for (const room of Object.values(S.rooms)) {
         if (!room.members) continue;
