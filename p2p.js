@@ -407,6 +407,20 @@ function isModerationNoticeEntry(entry) {
     (entry?.type === "system" && typeof entry.id === "string" && entry.id.startsWith("mod-"));
 }
 
+// A preview is untrusted peer data riding the encrypted payload, so the
+// receiver filters it independently (README: "your node still filters their
+// messages independently"). A flagged preview drops only the card; the message
+// itself still lands.
+export function dropFlaggedPreview(payload, roomModeration) {
+  if (!payload?.preview) return payload;
+  const previewText = [payload.preview.title, payload.preview.description].filter(Boolean).join(" ");
+  if (!previewText) return payload;
+  if (moderationCheckContent(previewText, roomModeration).flagged) {
+    return { text: payload.text, preview: null };
+  }
+  return payload;
+}
+
 function feedEntryToMsg(entry, roomKey) {
   if (entry.type === "system") {
     const out = { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
@@ -418,7 +432,10 @@ function feedEntryToMsg(entry, roomKey) {
   }
   if (entry.ct && entry.iv && entry.tag) {
     const raw = consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey);
-    const payload = decodeMessagePayload(raw);
+    const payload = dropFlaggedPreview(
+      decodeMessagePayload(raw),
+      savedData.rooms[roomKey]?.moderation || null,
+    );
     const out = {
       id: entry.id,
       sender: entry.sender,
@@ -1115,8 +1132,8 @@ export function initChat(sdk, options = {}) {
             if (!trackId(msg.id)) continue;
             const decrypted = decryptIncomingChat(msg, "synced message");
             if (!decrypted.ok) continue;
-            const syncedPayload = decodeMessagePayload(decrypted.plaintext);
             const _syncRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const syncedPayload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _syncRoomMod);
             const syncModeration = moderationCheckContent(syncedPayload.text, _syncRoomMod);
             if (syncModeration.flagged) {
               const syncPeerName = clamp(msg.sn, 50) || clamp(msg.sender, MAX_SENDER_LEN) || remoteId;
@@ -1126,7 +1143,7 @@ export function initChat(sdk, options = {}) {
               }, msg.ts);
               continue;
             }
-            cacheDecryptedMessage(msg.roomKey, msg.id, decrypted.plaintext);
+            cacheDecryptedMessage(msg.roomKey, msg.id, syncedPayload.preview ? decrypted.plaintext : syncedPayload.text);
             appendToFeed(msg.roomKey, {
               id: msg.id, sender: clamp(msg.sender, MAX_SENDER_LEN), sn: clamp(msg.sn, 50),
               ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
@@ -1157,9 +1174,9 @@ export function initChat(sdk, options = {}) {
           try {
             const decrypted = decryptIncomingChat(msg, "peer message");
             if (!decrypted.ok) continue;
-            const payload = decodeMessagePayload(decrypted.plaintext);
-            moderatedPlaintext = decrypted.plaintext;
             const _peerRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _peerRoomMod);
+            moderatedPlaintext = payload.preview ? decrypted.plaintext : payload.text;
             const modResult = moderationCheck(remoteId, msg.roomKey, payload.text, undefined, {
               roomModeration: _peerRoomMod,
             });

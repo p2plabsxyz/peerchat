@@ -80,6 +80,15 @@ describe("validateHttpUrl", () => {
     assert.equal(validateHttpUrl("http://169.254.169.254/latest/meta-data"), "");
     assert.equal(validateHttpUrl("http://172.16.0.1/"), "");
     assert.equal(validateHttpUrl("http://[::1]/"), "");
+    assert.equal(validateHttpUrl("http://[::ffff:127.0.0.1]/"), "");
+    assert.equal(validateHttpUrl("http://[fe80::1]/"), "");
+    assert.equal(validateHttpUrl("http://[fd12:3456:789a::1]/"), "");
+    assert.equal(validateHttpUrl("http://fc00:1234::1/"), "");
+  });
+
+  it("allows public IPv6 literals", () => {
+    assert.ok(validateHttpUrl("http://[2606:4700:4700::1111]/"));
+    assert.ok(validateHttpUrl("http://[2001:db8::1]/"));
   });
 
   it("rejects URLs with embedded credentials", () => {
@@ -216,5 +225,40 @@ describe("resolveLinkPreview", () => {
       }),
     });
     assert.equal(preview, null);
+  });
+
+  it("refuses to fetch a hostname that resolves to a private address", async () => {
+    let called = false;
+    const preview = await resolveLinkPreview("https://attacker.com/", {
+      fetchFn: stubFetch(() => {
+        called = true;
+        return htmlResponse(HTML);
+      }),
+      lookupFn: async () => ["169.254.169.254"],
+    });
+    assert.equal(preview, null);
+    assert.equal(called, false, "must not fetch a hostname resolving to a private address");
+  });
+
+  it("drops a redirect whose hostname resolves to a private address", async () => {
+    const hops = [];
+    const preview = await resolveLinkPreview("https://a.com/", {
+      fetchFn: stubFetch((url) => {
+        hops.push(url);
+        if (url === "https://a.com/") return { ...htmlResponse(""), status: 302, headers: { get: () => "https://b.com/x" } };
+        return htmlResponse(HTML);
+      }),
+      lookupFn: async (host) => (host === "b.com" ? ["10.0.0.1"] : ["93.184.216.34"]),
+    });
+    assert.equal(preview, null);
+    assert.deepEqual(hops, ["https://a.com/"]);
+  });
+
+  it("fetches a hostname that resolves to a public address", async () => {
+    const preview = await resolveLinkPreview("https://example.com/", {
+      fetchFn: stubFetch(() => htmlResponse(HTML)),
+      lookupFn: async () => ["93.184.216.34"],
+    });
+    assert.equal(preview.host, "example.com");
   });
 });
