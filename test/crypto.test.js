@@ -5,9 +5,14 @@ import { createCipheriv, createHash, randomBytes } from "crypto";
 import {
   deriveMessageKey,
   deriveTopic,
+  dropFlaggedPreview,
   encryptMsg,
   decryptMsg,
 } from "../p2p.js";
+import {
+  decodeMessagePayload,
+  encodeMessagePayload,
+} from "../lib/link-preview.js";
 
 const roomKey = () => randomBytes(32).toString("hex");
 
@@ -112,6 +117,66 @@ describe("message encryption", () => {
     const { ct, iv, tag } = encryptMsg("transfer 100", key);
     const flipped = (parseInt(ct.slice(0, 1), 16) ^ 1).toString(16) + ct.slice(1);
     assert.throws(() => decryptMsg(flipped, iv, tag, key));
+  });
+});
+
+describe("link preview payload encryption", () => {
+  it("round-trips a message with embedded preview metadata", () => {
+    const key = roomKey();
+    const preview = { url: "https://example.com/x", host: "example.com", title: "T", description: "D" };
+    const payload = encodeMessagePayload("see the link", preview);
+    const { ct, iv, tag } = encryptMsg(payload, key);
+    const { text, preview: back } = decodeMessagePayload(decryptMsg(ct, iv, tag, key));
+    assert.equal(text, "see the link");
+    assert.deepEqual(back, preview);
+  });
+
+  it("keeps plain-text messages on the legacy format", () => {
+    const key = roomKey();
+    const payload = encodeMessagePayload("no link", null);
+    const { ct, iv, tag } = encryptMsg(payload, key);
+    assert.equal(decryptMsg(ct, iv, tag, key), "no link");
+  });
+
+  it("legacy ciphertext still decrypts to a preview-less message", () => {
+    const key = roomKey();
+    const { ct, iv, tag } = encryptMsg("old build text", key);
+    const { text, preview } = decodeMessagePayload(decryptMsg(ct, iv, tag, key));
+    assert.equal(text, "old build text");
+    assert.equal(preview, null);
+  });
+});
+
+describe("receiver-side preview moderation", () => {
+  it("drops a card whose description flags but keeps the message", () => {
+    const out = dropFlaggedPreview(
+      { text: "check this out", preview: { url: "https://example.com/", host: "example.com", title: "Benign", description: "kys now" } },
+      null,
+    );
+    assert.equal(out.text, "check this out");
+    assert.equal(out.preview, null);
+  });
+
+  it("drops a card whose title flags", () => {
+    const out = dropFlaggedPreview(
+      { text: "check this out", preview: { url: "https://example.com/", host: "example.com", title: "kys", description: "B" } },
+      null,
+    );
+    assert.equal(out.text, "check this out");
+    assert.equal(out.preview, null);
+  });
+
+  it("keeps a clean preview", () => {
+    const out = dropFlaggedPreview(
+      { text: "check https://example.org/", preview: { url: "https://example.org/", host: "example.org", title: "My Site", description: "A desc." } },
+      null,
+    );
+    assert.deepEqual(out.preview, { url: "https://example.org/", host: "example.org", title: "My Site", description: "A desc." });
+  });
+
+  it("leaves preview-less payloads untouched", () => {
+    const out = dropFlaggedPreview({ text: "check this out", preview: null }, null);
+    assert.deepEqual(out, { text: "check this out", preview: null });
   });
 });
 

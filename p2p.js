@@ -20,6 +20,13 @@ import {
   topicHex,
 } from "./routing.js";
 import { attachChatTransport } from "./transport.js";
+import {
+  decodeMessagePayload,
+  encodeMessagePayload,
+  extractFirstHttpUrl,
+  resolveLinkPreview,
+  sanitizePreview,
+} from "./lib/link-preview.js";
 import b4a from "b4a";
 
 export const CHAT_STORAGE = "peersky-chat-rooms.json";
@@ -400,6 +407,20 @@ function isModerationNoticeEntry(entry) {
     (entry?.type === "system" && typeof entry.id === "string" && entry.id.startsWith("mod-"));
 }
 
+// A preview is untrusted peer data riding the encrypted payload, so the
+// receiver filters it independently (README: "your node still filters their
+// messages independently"). A flagged preview drops only the card; the message
+// itself still lands.
+export function dropFlaggedPreview(payload, roomModeration) {
+  if (!payload?.preview) return payload;
+  const previewText = [payload.preview.title, payload.preview.description].filter(Boolean).join(" ");
+  if (!previewText) return payload;
+  if (moderationCheckContent(previewText, roomModeration).flagged) {
+    return { text: payload.text, preview: null };
+  }
+  return payload;
+}
+
 function feedEntryToMsg(entry, roomKey) {
   if (entry.type === "system") {
     const out = { id: entry.id, type: "system", text: entry.text, timestamp: entry.ts };
@@ -410,14 +431,20 @@ function feedEntryToMsg(entry, roomKey) {
     return { id: entry.id, type: "reaction", msgId: entry.msgId, emoji: entry.emoji, sender: entry.sender, senderName: entry.sn || entry.sender, timestamp: entry.ts };
   }
   if (entry.ct && entry.iv && entry.tag) {
+    const raw = consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey);
+    const payload = dropFlaggedPreview(
+      decodeMessagePayload(raw),
+      savedData.rooms[roomKey]?.moderation || null,
+    );
     const out = {
       id: entry.id,
       sender: entry.sender,
       senderName: entry.sn || entry.sender,
-      message: consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey),
+      message: payload.text,
       timestamp: entry.ts,
       replyTo: entry.replyTo || null,
     };
+    if (payload.preview) out.preview = payload.preview;
     if (entry.fileName) out.fileName = entry.fileName;
     if (entry.fileSize != null) out.fileSize = entry.fileSize;
     return out;
@@ -1106,7 +1133,8 @@ export function initChat(sdk, options = {}) {
             const decrypted = decryptIncomingChat(msg, "synced message");
             if (!decrypted.ok) continue;
             const _syncRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
-            const syncModeration = moderationCheckContent(decrypted.plaintext, _syncRoomMod);
+            const syncedPayload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _syncRoomMod);
+            const syncModeration = moderationCheckContent(syncedPayload.text, _syncRoomMod);
             if (syncModeration.flagged) {
               const syncPeerName = clamp(msg.sn, 50) || clamp(msg.sender, MAX_SENDER_LEN) || remoteId;
               appendModerationNotice(msg.roomKey, msg.id, syncPeerName, {
@@ -1115,7 +1143,7 @@ export function initChat(sdk, options = {}) {
               }, msg.ts);
               continue;
             }
-            cacheDecryptedMessage(msg.roomKey, msg.id, decrypted.plaintext);
+            cacheDecryptedMessage(msg.roomKey, msg.id, syncedPayload.preview ? decrypted.plaintext : syncedPayload.text);
             appendToFeed(msg.roomKey, {
               id: msg.id, sender: clamp(msg.sender, MAX_SENDER_LEN), sn: clamp(msg.sn, 50),
               ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
@@ -1146,9 +1174,10 @@ export function initChat(sdk, options = {}) {
           try {
             const decrypted = decryptIncomingChat(msg, "peer message");
             if (!decrypted.ok) continue;
-            moderatedPlaintext = decrypted.plaintext;
             const _peerRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
-            const modResult = moderationCheck(remoteId, msg.roomKey, decrypted.plaintext, undefined, {
+            const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _peerRoomMod);
+            moderatedPlaintext = payload.preview ? decrypted.plaintext : payload.text;
+            const modResult = moderationCheck(remoteId, msg.roomKey, payload.text, undefined, {
               roomModeration: _peerRoomMod,
             });
             if (!modResult.allowed) {
@@ -1421,7 +1450,24 @@ export async function handleChatRequest(req, sdk) {
         const id = randomBytes(16).toString("hex");
         if (!trackId(id)) return respond(200, { message: "Duplicate" });
 
-        const { ct, iv, tag } = encryptMsg(message, roomKey);
+        let preview = null;
+        if (savedData.profile?.linkPreview !== false) {
+          const previewUrl = extractFirstHttpUrl(message);
+          if (previewUrl && !moderationCheckContent(previewUrl, _sendRoomMod).flagged) {
+            try {
+              const resolved = await resolveLinkPreview(previewUrl);
+              const previewText = `${resolved?.title || ""} ${resolved?.description || ""}`;
+              if (resolved && !moderationCheckContent(previewText, _sendRoomMod).flagged) {
+                preview = sanitizePreview(resolved);
+              }
+            } catch {
+              // Preview metadata is optional; a fetch failure never blocks the message.
+            }
+          }
+        }
+
+        const payload = encodeMessagePayload(message, preview);
+        const { ct, iv, tag } = encryptMsg(payload, roomKey);
         const ts = Date.now();
         const sn = savedData.profile?.username || localId;
         const replyTo = body.replyTo ? {
@@ -1445,13 +1491,14 @@ export async function handleChatRequest(req, sdk) {
           ...(fileSize != null && fileName && { fileSize }),
         };
 
-        cacheDecryptedMessage(roomKey, id, message);
+        cacheDecryptedMessage(roomKey, id, payload);
         await appendToFeed(roomKey, entry);
         relayToRoom(roomKey, JSON.stringify({ ...entry, roomKey }) + "\n");
         return respond(200, {
           message: "Sent",
           sent: {
             id, sender: localId, senderName: sn, message, timestamp: ts, replyTo: replyTo || null, roomKey,
+            ...(preview && { preview }),
             ...(fileName && { fileName }),
             ...(fileSize != null && { fileSize }),
           },
@@ -1480,6 +1527,7 @@ export async function handleChatRequest(req, sdk) {
           avatar: nextAvatar,
           createdAt: savedData.profile?.createdAt || Date.now(),
           notifications: body.notifications !== undefined ? !!body.notifications : (savedData.profile?.notifications ?? true),
+          linkPreview: body.linkPreview !== undefined ? !!body.linkPreview : (savedData.profile?.linkPreview ?? true),
         };
         savedData.peerProfiles[localId] = {
           username: savedData.profile.username,
@@ -1593,6 +1641,7 @@ export async function handleChatRequest(req, sdk) {
           avatar: savedData.profile?.avatar || null,
           createdAt: savedData.profile?.createdAt || 0,
           notifications: savedData.profile?.notifications ?? true,
+          linkPreview: savedData.profile?.linkPreview ?? true,
         });
       }
 

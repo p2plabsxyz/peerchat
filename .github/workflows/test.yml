@@ -34,6 +34,7 @@ jobs:
       - name: Syntax check
         run: |
           node --check moderation.js
+          node --check lib/link-preview.js
           node --check chat-api.js
           node --check app.js
           node --check rooms.js
@@ -48,7 +49,7 @@ jobs:
 
       # No deps needed, so these run in the same job as the syntax checks.
       - name: Dependency-free test suites
-        run: node --experimental-detect-module --test --test-reporter=spec test/moderation.test.js test/routing.test.js
+        run: node --experimental-detect-module --test --test-reporter=spec test/moderation.test.js test/routing.test.js test/link-preview.test.js
 
   suites:
     name: Full test suite (Node ${{ matrix.node }})
