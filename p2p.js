@@ -528,6 +528,16 @@ function appendModerationNotice(roomKey, sourceId, peerName, modResult, ts) {
   }).catch(() => {});
 }
 
+// info.topics only names the connection-forming topic, so peers exchange their
+// full topic set (public hashes, never room keys) to open every mutual room.
+function currentTopicsFrame() {
+  return JSON.stringify({ type: "topics", topics: [...discoveryKeys.keys()] }) + "\n";
+}
+
+function shareTopics(conn) {
+  try { writeToConnection(conn, currentTopicsFrame()); } catch {}
+}
+
 function shareProfile(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   if (!savedData.profile?.username) return;
   const sharedRooms = roomKeys.filter((rk) => connectionSharesRoom(conn, rk));
@@ -638,6 +648,8 @@ async function joinRoom(sdk, roomKey) {
       discoveryKeys.delete(discoveryKey);
       throw error;
     }
+
+    relayToMatchingPeers(currentTopicsFrame(), () => true);
 
     try {
       await sdk.swarm.flush();
@@ -766,7 +778,9 @@ export function initChat(sdk, options = {}) {
       : remoteId;
 
     const peerRooms = sharedRoomsFromTopics(info.topics, discoveryKeys);
-    const isChat = peerRooms.length > 0;
+    // Server-side conns arrive with empty info.topics on the public swarm;
+    // accept them with no rooms and let the topics handshake fill in.
+    const isChat = peerRooms.length > 0 || (!info.topics?.length && discoveryKeys.size > 0);
 
     if (!isChat) {
       conn.on("error", () => {});
@@ -783,11 +797,22 @@ export function initChat(sdk, options = {}) {
     let buf = "";
     let active = false;
     let pingTimer = null;
-    const peer = { conn, id: remoteId, fullId, rooms: peerRooms };
+    const peer = { conn, id: remoteId, fullId, rooms: peerRooms, lan: !!info.lan, handshake: false };
     pendingPeers.set(conn, peer);
 
+    // Protomux fires onopen synchronously when the remote open frame is
+    // already buffered - before chatTransports.set below has run - and every
+    // writeToConnection in activatePeer would then throw into silent catches
+    // (no topics, profile, meta or join announcements for this peer). Defer
+    // activation one tick so the transport is always registered first.
+    // onopen can fire synchronously, before chatTransports.set below; activate
+    // a tick later and only once the channel is open on both ends.
     const transport = attachChatTransport(conn, handleChatData, {
-      onopen: activatePeer,
+      onopen: () => setImmediate(() => {
+        const t = chatTransports.get(conn);
+        if (!t) return;
+        t.ready().then(() => activatePeer()).catch(() => {});
+      }),
       onclose: deactivatePeer,
     });
     if (!transport) {
@@ -804,6 +829,7 @@ export function initChat(sdk, options = {}) {
       broadcastPeerCountNow();
       broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
 
+      shareTopics(conn);
       shareProfile(conn);
       shareRoomMeta(conn);
       shareMembers(conn);
@@ -814,6 +840,8 @@ export function initChat(sdk, options = {}) {
       pingTimer = setInterval(() => {
         if (conn.destroyed) { clearInterval(pingTimer); return; }
         try { writeToConnection(conn, JSON.stringify({ type: "ping" }) + "\n"); } catch {}
+        // Idempotent re-announce; heals any lost activation-time frame.
+        shareTopics(conn);
       }, PING_MS);
     }
 
@@ -854,6 +882,31 @@ export function initChat(sdk, options = {}) {
             continue;
           }
           if (msg.type === "pong") continue;
+
+          if (msg.type === "topics") {
+            const peerEntry = peerForConnection(conn) || pendingPeers.get(conn);
+            if (peerEntry && Array.isArray(msg.topics)) {
+              peerEntry.handshake = true;
+              const added = [];
+              for (const t of msg.topics.slice(0, 512)) {
+                if (typeof t !== "string" || t.length !== 64) continue;
+                // Unknown topics resolve to nothing; only mutually held rooms open.
+                const rk = discoveryKeys.get(t.toLowerCase());
+                if (rk && !peerSharesRoom(peerEntry, rk)) { peerEntry.rooms.push(rk); added.push(rk); }
+              }
+              for (const rk of added) {
+                sendRoomMeta(conn, rk);
+                announceJoins(conn, [rk]);
+                syncRoomHistoryTo(conn, rk).then(() => {
+                  if (!conn.destroyed) {
+                    try { writeToConnection(conn, JSON.stringify({ type: "sync-done" }) + "\n"); } catch {}
+                  }
+                }).catch(() => {});
+              }
+              if (added.length) broadcastPeerCountNow();
+            }
+            continue;
+          }
 
           if (msg.type === "profile") {
             if (msg.username) {
@@ -1455,7 +1508,7 @@ export async function handleChatRequest(req, sdk) {
           const previewUrl = extractFirstHttpUrl(message);
           if (previewUrl && !moderationCheckContent(previewUrl, _sendRoomMod).flagged) {
             try {
-              const resolved = await resolveLinkPreview(previewUrl);
+              const resolved = await resolveLinkPreview(previewUrl, { timeoutMs: 1500 });
               const previewText = `${resolved?.title || ""} ${resolved?.description || ""}`;
               if (resolved && !moderationCheckContent(previewText, _sendRoomMod).flagged) {
                 preview = sanitizePreview(resolved);
@@ -1642,6 +1695,13 @@ export async function handleChatRequest(req, sdk) {
           createdAt: savedData.profile?.createdAt || 0,
           notifications: savedData.profile?.notifications ?? true,
           linkPreview: savedData.profile?.linkPreview ?? true,
+        });
+      }
+
+      if (action === "net-status") {
+        return respond(200, {
+          peers: peers.map((p) => ({ id: p.id, rooms: p.rooms, lan: !!p.lan, handshake: !!p.handshake })),
+          pending: pendingPeers.size,
         });
       }
 

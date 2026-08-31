@@ -262,3 +262,33 @@ describe("resolveLinkPreview", () => {
     assert.equal(preview.host, "example.com");
   });
 });
+describe("preview resolution respects its time budget", () => {
+  // dns.lookup cannot be aborted, so before the fix a hanging resolver held
+  // the send path far past timeoutMs (measured 8s against a 3s budget). The
+  // offline-LAN case hits this constantly: the router accepts DNS queries and
+  // forwards them to a dead upstream.
+  it("gives up on a hanging DNS lookup within the budget", async () => {
+    const hangingLookup = () => new Promise((resolve) => {
+      const t = setTimeout(() => resolve(["93.184.216.34"]), 8000);
+      t.unref?.();
+    });
+    const instantFetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (h) => (h === "content-type" ? "text/html" : "") },
+      arrayBuffer: async () => new TextEncoder().encode("<title>x</title>").buffer,
+      body: null,
+    });
+
+    const started = Date.now();
+    const result = await resolveLinkPreview("https://example.com/", {
+      fetchFn: instantFetch,
+      lookupFn: hangingLookup,
+      timeoutMs: 1000,
+    });
+    const elapsed = Date.now() - started;
+
+    assert.equal(result, null, "a missed budget must mean no preview, not a late one");
+    assert.ok(elapsed < 2500, `took ${elapsed}ms against a 1000ms budget`);
+  });
+});
