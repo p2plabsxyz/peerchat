@@ -19,7 +19,7 @@ Small teams or group of friends who already trust each other and want something 
 - Rooms with name, bio, optional link, and optional picture
 - Messages stored in a **Hypercore** per room (append-only log), synced across peers
 - Live delivery over **Hyperswarm** (Noise-encrypted transport) plus **SSE** (`receive-all`) so the web UI updates without polling every room
-- Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments** via a dedicated Hyperdrive (`peerchat` shows up in Settings -> Archive like other apps). **No file upload limits** in PeerChat.
+- Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments**, encrypted with a key derived from the room key and stored in a per-room Hyperdrive (`peerchat-…` entries in Settings -> Archive; the link alone yields ciphertext). **No file upload limits** in PeerChat.
 - **Direct Messages (DMs):** click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived deterministically from both peer IDs so only those two people share it
 - Room list, unread counts, and local settings persist on disk
 - **Built-in moderation:** obvious abuse, spam bursts, profanity and slurs, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse and profanity filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
@@ -36,6 +36,7 @@ Small teams or group of friends who already trust each other and want something 
 | --- | --- | --- |
 | Swarm topic | `peersky-chat:topic:` | Announced to DHT nodes during discovery |
 | Message key | `peersky-chat:key:` | Never leaves the process |
+| Attachment key | `peersky-chat:attachment:` | Never leaves the process; seals files in the per-room drive |
 
 They are kept apart because the swarm topic is published. `dht.announce()` and `dht.lookup()` send the topic to whichever DHT nodes are nearest it in keyspace, so anything recoverable from the topic is effectively public. Deriving both from the room key with different contexts means an observer holding the topic learns nothing about the message key.
 

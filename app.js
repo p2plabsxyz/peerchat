@@ -1,6 +1,7 @@
 import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
 
 import { chat } from "./chat-api.js";
+import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
 
 const S = {
   profile: null,
@@ -28,7 +29,8 @@ let audioCtx;
 let replyTarget = null;
 let mentionIdx = -1;
 let _dmiRoomKey = null;
-let driveUrl = null;
+const roomDriveUrls = new Map();
+const decryptedUrls = new Map();
 let draftDriveUrl = null;
 const DRAFT_STORAGE_KEY = "peerchat-msg-drafts";
 const ACTIVE_ROOM_KEY = "peerchat-active-room";
@@ -163,17 +165,18 @@ function expandLargeMedia(wrap) {
   const el = document.createElement(isVideo ? 'video' : 'img');
   el.className = 'msg-file-img';
   if (isVideo) {
-    el.src = url;
     el.controls = true;
     el.preload = 'metadata';
     el.muted = true;
   } else {
-    el.src = url;
     el.alt = 'image';
     el.loading = 'lazy';
   }
-  wrap.replaceWith(el);
-  el.focus();
+  const src = wrap.getAttribute("data-file-enc") === "1"
+    ? resolveDecryptedUrl(url, wrap.getAttribute("data-file-room"), wrap.querySelector(".msg-file-attach-name")?.textContent)
+    : Promise.resolve(url);
+  src.then((s) => { el.src = s; wrap.replaceWith(el); el.focus(); })
+    .catch(() => { if (openZone) openZone.innerHTML = '<span class="muted small">Attachment could not be decrypted</span>'; });
 }
 
 function isHyperFileUrl(url) {
@@ -187,12 +190,14 @@ function sanitizeDownloadFilename(name) {
   return (name || "download").replace(/[/\\?%*:|"<>]/g, "_").slice(0, 200) || "download";
 }
 
-async function downloadHyperFile(url, filename) {
+async function downloadHyperFile(url, filename, roomKey = null) {
   const safe = sanitizeDownloadFilename(filename || displayNameFromHyperPath(url));
   try {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const blob = await resp.blob();
+    const blob = roomKey
+      ? new Blob([await decryptAttachment(new Uint8Array(await resp.arrayBuffer()), roomKey)], { type: mimeFromName(filename) })
+      : await resp.blob();
     if (typeof window.showSaveFilePicker === "function") {
       try {
         const handle = await window.showSaveFilePicker({ suggestedName: safe });
@@ -219,12 +224,12 @@ async function downloadHyperFile(url, filename) {
   }
 }
 
-function fileAttachHtml(url, fileNameOpt, fileSizeOpt) {
+function fileAttachHtml(url, fileNameOpt, fileSizeOpt, extraAttrs = "") {
   const name = fileNameOpt || displayNameFromHyperPath(url);
   const sizeLbl = formatFileSize(fileSizeOpt);
   const escU = esc(url);
   const escN = esc(name);
-  return `<div class="msg-file-attach" data-file-url="${escU}">
+  return `<div class="msg-file-attach" data-file-url="${escU}"${extraAttrs}>
     <div class="msg-file-attach-open" role="link" tabindex="0" aria-label="Open file in new tab">
       <div class="msg-file-attach-icon"><img class="msg-file-attach-icon-img" src="./assets/svg/p2p.svg" alt="" width="36" height="36" /></div>
       <div class="msg-file-attach-info">
@@ -232,19 +237,19 @@ function fileAttachHtml(url, fileNameOpt, fileSizeOpt) {
         ${sizeLbl ? `<span class="msg-file-attach-size">${esc(sizeLbl)}</span>` : ""}
       </div>
     </div>
-    <button type="button" class="msg-file-attach-dl-btn" aria-label="Download file" data-file-url="${escU}" data-file-name="${escN}">
+    <button type="button" class="msg-file-attach-dl-btn" aria-label="Download file" data-file-url="${escU}" data-file-name="${escN}"${extraAttrs}>
       <img class="msg-file-attach-dl-icon" src="./assets/svg/download.svg" alt="" width="20" height="20" />
     </button>
   </div>`;
 }
 
-function largeMediaHtml(url, fileNameOpt, fileSizeOpt, mediaType) {
+function largeMediaHtml(url, fileNameOpt, fileSizeOpt, mediaType, extraAttrs = "") {
   const name = fileNameOpt || displayNameFromHyperPath(url);
   const sizeLbl = formatFileSize(fileSizeOpt);
   const escU = esc(url);
   const escN = esc(name);
   const iconSvg = './assets/svg/p2p.svg';
-  return `<div class="msg-file-attach large-media-placeholder" data-file-url="${escU}" data-large-type="${mediaType}">
+  return `<div class="msg-file-attach large-media-placeholder" data-file-url="${escU}" data-large-type="${mediaType}"${extraAttrs}>
     <div class="msg-file-attach-open" role="button" tabindex="0" aria-label="Load media">
       <div class="msg-file-attach-icon"><img class="msg-file-attach-icon-img" src="${iconSvg}" alt="" width="36" height="36" /></div>
       <div class="msg-file-attach-info">
@@ -252,7 +257,7 @@ function largeMediaHtml(url, fileNameOpt, fileSizeOpt, mediaType) {
         ${sizeLbl ? `<span class="msg-file-attach-size">${esc(sizeLbl)}</span>` : ""}
       </div>
     </div>
-    <button type="button" class="msg-file-attach-dl-btn" aria-label="Download file" data-file-url="${escU}" data-file-name="${escN}">
+    <button type="button" class="msg-file-attach-dl-btn" aria-label="Download file" data-file-url="${escU}" data-file-name="${escN}"${extraAttrs}>
       <img class="msg-file-attach-dl-icon" src="./assets/svg/download.svg" alt="" width="20" height="20" />
     </button>
   </div>`;
@@ -438,9 +443,58 @@ async function toggleEmojiPanel() {
   }
 }
 
+const MIME_BY_EXT = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", ogg: "video/ogg" };
+function mimeFromName(name) {
+  const ext = (name || "").split(".").pop().toLowerCase();
+  return MIME_BY_EXT[ext] || "application/octet-stream";
+}
+
+// Fetch, decrypt, and hand back a blob URL. Cached per attachment URL.
+function resolveDecryptedUrl(url, roomKey, fileName) {
+  const cacheKey = url + "|" + roomKey;
+  if (!decryptedUrls.has(cacheKey)) {
+    decryptedUrls.set(cacheKey, (async () => {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const plain = await decryptAttachment(new Uint8Array(await resp.arrayBuffer()), roomKey);
+      return URL.createObjectURL(new Blob([plain], { type: mimeFromName(fileName) }));
+    })().catch((err) => { decryptedUrls.delete(cacheKey); throw err; }));
+  }
+  return decryptedUrls.get(cacheKey);
+}
+
+function encAttrs(roomKey) {
+  return ` data-file-enc="1" data-file-room="${esc(roomKey)}"`;
+}
+
+function encryptedAttachmentHtml(url, msg) {
+  const roomKey = msg.roomKey || S.activeRoom;
+  const name = msg.fileName || "";
+  const attrs = encAttrs(roomKey);
+  const kind = isImageFile(name) ? "image" : isVideoFile(name) ? "video" : "file";
+  if (kind === "file") return fileAttachHtml(url, name, msg.fileSize, attrs);
+  if (!shouldAutoInline(msg.fileSize)) return largeMediaHtml(url, name, msg.fileSize, kind, attrs);
+  const tag = kind === "video" ? "video" : "img";
+  const extra = kind === "video" ? " controls preload=\"metadata\" muted" : " alt=\"image\" loading=\"lazy\"";
+  return `<${tag} class="msg-file-img" data-enc-src="${esc(url)}" data-file-room="${esc(roomKey)}" data-file-name="${esc(name)}"${extra}></${tag}>`;
+}
+
+function hydrateEncryptedMedia(root) {
+  for (const el of root.querySelectorAll("[data-enc-src]")) {
+    const url = el.getAttribute("data-enc-src");
+    el.removeAttribute("data-enc-src");
+    resolveDecryptedUrl(url, el.getAttribute("data-file-room"), el.getAttribute("data-file-name"))
+      .then((src) => { el.src = src; })
+      .catch(() => { el.replaceWith(Object.assign(document.createElement("span"), { className: "muted small", textContent: "Attachment could not be decrypted" })); });
+  }
+}
+
 function linkify(text, msg) {
   if (!text) return "";
   const trimmed = text.trim();
+  if (msg?.fileEnc && /^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed)) {
+    return encryptedAttachmentHtml(trimmed, msg);
+  }
   if (/^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed) && isHyperFileUrl(trimmed)) {
     return fileAttachHtml(trimmed, msg?.fileName, msg?.fileSize);
   }
@@ -650,16 +704,20 @@ function resizeImage(file, maxPx = 369) {
   });
 }
 
-async function getDriveUrl() {
-  if (driveUrl) return driveUrl;
+// One attachment drive per room, named from the room key so nothing in the
+// archive listing identifies the room.
+async function getRoomDriveUrl(roomKey) {
+  if (roomDriveUrls.has(roomKey)) return roomDriveUrls.get(roomKey);
   try {
-    const resp = await fetch("hyper://localhost/?key=peerchat", { method: "POST" });
+    const name = await attachmentDriveName(roomKey);
+    const resp = await fetch("hyper://localhost/?key=" + name, { method: "POST" });
     if (resp.ok) {
       const text = await resp.text();
       const match = text.match(/(hyper:\/\/[a-f0-9]+\/)/);
-      driveUrl = match ? match[1] : text.trim();
-      if (!driveUrl.endsWith("/")) driveUrl += "/";
-      return driveUrl;
+      let url = match ? match[1] : text.trim();
+      if (!url.endsWith("/")) url += "/";
+      roomDriveUrls.set(roomKey, url);
+      return url;
     }
   } catch (e) { console.error("Drive init error:", e); }
   return null;
@@ -800,7 +858,6 @@ async function init() {
     cleanupStaleSelfEntries();
     showApp();
     connectGlobalSSE();
-    getDriveUrl().catch(() => {});
     getDraftDriveUrl().then(() => saveDrafts()).catch(() => {});
   } catch (err) {
     console.error("Init error:", err);
@@ -1232,6 +1289,7 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
       sep.textContent = label;
       container.appendChild(sep);
     }
+    m.roomKey = m.roomKey || roomKey;
     container.appendChild(makeMsgEl(m));
   }
   if (scrollToBottom) {
@@ -1542,6 +1600,7 @@ function appendMessage(roomKey, msg) {
       el.className = "system-msg";
       el.textContent = msg.text;
     } else {
+      msg.roomKey = msg.roomKey || roomKey;
       el = makeMsgEl(msg);
       el.classList.add("msg-animate");
     }
@@ -2593,7 +2652,7 @@ document.addEventListener("click", (ev) => {
     ev.stopPropagation();
     const url = dlBtn.getAttribute("data-file-url");
     const fname = dlBtn.getAttribute("data-file-name");
-    if (url) downloadHyperFile(url, fname);
+    if (url) downloadHyperFile(url, fname, dlBtn.getAttribute("data-file-enc") === "1" ? dlBtn.getAttribute("data-file-room") : null);
     return;
   }
   const openZone = ev.target.closest(".msg-file-attach-open");
@@ -2634,17 +2693,16 @@ $("file-input")?.addEventListener("change", async (e) => {
 });
 
 async function uploadAndSendFile(file) {
-  const base = await getDriveUrl();
+  const roomKey = S.activeRoom;
+  const base = await getRoomDriveUrl(roomKey);
   if (!base) { alert("Could not initialize file storage."); return; }
-  const ts = Date.now();
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const path = `${S.activeRoom.slice(0, 8)}/${ts}-${safeName}`;
+  const path = opaqueAttachmentPath();
   try {
-    const buf = await file.arrayBuffer();
-    const uploadResp = await fetch(base + path, { method: "PUT", body: new Uint8Array(buf) });
+    const sealed = await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
+    const uploadResp = await fetch(base + path, { method: "PUT", body: sealed });
     if (!uploadResp.ok) throw new Error("Upload failed");
     const fileUrl = base + path;
-    const resp = await chat.sendMessage(S.activeRoom, { message: fileUrl, fileName: file.name, fileSize: file.size });
+    const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
     if (resp.sent) appendMessage(S.activeRoom, resp.sent);
     playSound("send");
   } catch (err) { alert("Upload failed: " + err.message); }
@@ -2652,13 +2710,14 @@ async function uploadAndSendFile(file) {
 
 const msgArea = $("messages");
 if (msgArea) {
+  new MutationObserver(() => hydrateEncryptedMedia(msgArea)).observe(msgArea, { childList: true, subtree: true });
   msgArea.addEventListener("keydown", (e) => {
     const dlBtn = e.target.closest(".msg-file-attach-dl-btn");
     if (dlBtn && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
       const url = dlBtn.getAttribute("data-file-url");
       const fname = dlBtn.getAttribute("data-file-name");
-      if (url) downloadHyperFile(url, fname);
+      if (url) downloadHyperFile(url, fname, dlBtn.getAttribute("data-file-enc") === "1" ? dlBtn.getAttribute("data-file-room") : null);
       return;
     }
     const openZone = e.target.closest(".msg-file-attach-open");
@@ -2669,6 +2728,9 @@ if (msgArea) {
       if (!url) return;
       if (wrap?.classList.contains("large-media-placeholder")) {
         expandLargeMedia(wrap);
+      } else if (wrap?.getAttribute("data-file-enc") === "1") {
+        resolveDecryptedUrl(url, wrap.getAttribute("data-file-room"), wrap.querySelector(".msg-file-attach-name")?.textContent)
+          .then((src) => window.open(src)).catch(() => alert("Could not decrypt this attachment."));
       } else {
         window.open(url);
       }
