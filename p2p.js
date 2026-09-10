@@ -447,6 +447,7 @@ function feedEntryToMsg(entry, roomKey) {
     if (payload.preview) out.preview = payload.preview;
     if (entry.fileName) out.fileName = entry.fileName;
     if (entry.fileSize != null) out.fileSize = entry.fileSize;
+    if (entry.fileEnc === true) out.fileEnc = true;
     return out;
   }
   return {
@@ -1202,7 +1203,7 @@ export function initChat(sdk, options = {}) {
               ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
               ...(msg.replyTo && { replyTo: msg.replyTo }),
               ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
-              ...(msg.fileSize != null && { fileSize: msg.fileSize }),
+              ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
             }).catch(() => {});
             continue;
           }
@@ -1248,7 +1249,7 @@ export function initChat(sdk, options = {}) {
             ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
             ...(msg.replyTo && { replyTo: msg.replyTo }),
             ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
-            ...(msg.fileSize != null && { fileSize: msg.fileSize }),
+            ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
           }).catch((e) => console.error("[chat] Peer msg error:", e.message));
 
           const room = savedData.rooms[msg.roomKey];
@@ -1537,11 +1538,13 @@ export async function handleChatRequest(req, sdk) {
         if (typeof body.fileSize === "number" && Number.isFinite(body.fileSize) && body.fileSize >= 0) {
           fileSize = Math.floor(body.fileSize);
         }
+        const fileEnc = body.fileEnc === true && !!fileName;
         const entry = {
           id, sender: localId, sn, ct, iv, tag, ts,
           ...(replyTo && { replyTo }),
           ...(fileName && { fileName }),
           ...(fileSize != null && fileName && { fileSize }),
+          ...(fileEnc && { fileEnc: true }),
         };
 
         cacheDecryptedMessage(roomKey, id, payload);
@@ -1554,6 +1557,7 @@ export async function handleChatRequest(req, sdk) {
             ...(preview && { preview }),
             ...(fileName && { fileName }),
             ...(fileSize != null && { fileSize }),
+            ...(fileEnc && { fileEnc: true }),
           },
         });
       }
