@@ -4,6 +4,7 @@ import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
 import { stickToBottom } from "./lib/scroll.js";
 import { attachmentKind } from "./lib/render-rules.js";
+import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
 
 const S = {
   profile: null,
@@ -32,7 +33,8 @@ let replyTarget = null;
 let mentionIdx = -1;
 let _dmiRoomKey = null;
 const roomDriveUrls = new Map();
-const decryptedUrls = new Map();
+const decryptedUrls = new DecryptedUrlCache();
+const roomRefs = new RoomRefs();
 let draftDriveUrl = null;
 const DRAFT_STORAGE_KEY = "peerchat-msg-drafts";
 const ACTIVE_ROOM_KEY = "peerchat-active-room";
@@ -175,7 +177,7 @@ function expandLargeMedia(wrap) {
     el.loading = 'lazy';
   }
   const src = wrap.getAttribute("data-file-enc") === "1"
-    ? resolveDecryptedUrl(url, wrap.getAttribute("data-file-room"), wrap.querySelector(".msg-file-attach-name")?.textContent)
+    ? resolveDecryptedUrl(url, roomRefs.key(wrap.getAttribute("data-file-room")), wrap.querySelector(".msg-file-attach-name")?.textContent)
     : Promise.resolve(url);
   src.then((s) => { el.src = s; wrap.replaceWith(el); el.focus(); })
     .catch(() => { if (openZone) openZone.innerHTML = '<span class="muted small">Attachment could not be decrypted</span>'; });
@@ -453,20 +455,16 @@ function mimeFromName(name) {
 
 // Fetch, decrypt, and hand back a blob URL. Cached per attachment URL.
 function resolveDecryptedUrl(url, roomKey, fileName) {
-  const cacheKey = url + "|" + roomKey;
-  if (!decryptedUrls.has(cacheKey)) {
-    decryptedUrls.set(cacheKey, (async () => {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error("HTTP " + resp.status);
-      const plain = await decryptAttachment(new Uint8Array(await resp.arrayBuffer()), roomKey);
-      return URL.createObjectURL(new Blob([plain], { type: mimeFromName(fileName) }));
-    })().catch((err) => { decryptedUrls.delete(cacheKey); throw err; }));
-  }
-  return decryptedUrls.get(cacheKey);
+  return decryptedUrls.get(url, roomKey, async () => {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const plain = await decryptAttachment(new Uint8Array(await resp.arrayBuffer()), roomKey);
+    return URL.createObjectURL(new Blob([plain], { type: mimeFromName(fileName) }));
+  });
 }
 
 function encAttrs(roomKey) {
-  return ` data-file-enc="1" data-file-room="${esc(roomKey)}"`;
+  return ` data-file-enc="1" data-file-room="${roomRefs.ref(roomKey)}"`;
 }
 
 function encryptedAttachmentHtml(url, msg) {
@@ -478,14 +476,14 @@ function encryptedAttachmentHtml(url, msg) {
   if (!shouldAutoInline(msg.fileSize)) return largeMediaHtml(url, name, msg.fileSize, kind, attrs);
   const tag = kind === "video" ? "video" : "img";
   const extra = kind === "video" ? " controls preload=\"metadata\" muted" : " alt=\"image\" loading=\"lazy\"";
-  return `<${tag} class="msg-file-img" data-enc-src="${esc(url)}" data-file-room="${esc(roomKey)}" data-file-name="${esc(name)}"${extra}></${tag}>`;
+  return `<${tag} class="msg-file-img" data-enc-src="${esc(url)}" data-file-room="${roomRefs.ref(roomKey)}" data-file-name="${esc(name)}"${extra}></${tag}>`;
 }
 
 function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("[data-enc-src]")) {
     const url = el.getAttribute("data-enc-src");
     el.removeAttribute("data-enc-src");
-    resolveDecryptedUrl(url, el.getAttribute("data-file-room"), el.getAttribute("data-file-name"))
+    resolveDecryptedUrl(url, roomRefs.key(el.getAttribute("data-file-room")), el.getAttribute("data-file-name"))
       .then((src) => { el.src = src; })
       .catch(() => { el.replaceWith(Object.assign(document.createElement("span"), { className: "muted small", textContent: "Attachment could not be decrypted" })); });
   }
@@ -1115,6 +1113,7 @@ async function openRoom(roomKey) {
   if (roomSyncTimer) { clearInterval(roomSyncTimer); roomSyncTimer = null; }
   const prevRoom = S.activeRoom;
   if (prevRoom && prevRoom !== roomKey) {
+    decryptedUrls.revokeRoom(prevRoom);
     const input = $("message-input");
     if (input) saveDraft(prevRoom, input.value);
   }
@@ -2619,7 +2618,7 @@ document.addEventListener("click", (ev) => {
     ev.stopPropagation();
     const url = dlBtn.getAttribute("data-file-url");
     const fname = dlBtn.getAttribute("data-file-name");
-    if (url) downloadHyperFile(url, fname, dlBtn.getAttribute("data-file-enc") === "1" ? dlBtn.getAttribute("data-file-room") : null);
+    if (url) downloadHyperFile(url, fname, dlBtn.getAttribute("data-file-enc") === "1" ? roomRefs.key(dlBtn.getAttribute("data-file-room")) : null);
     return;
   }
   const openZone = ev.target.closest(".msg-file-attach-open");
@@ -2684,7 +2683,7 @@ if (msgArea) {
       e.preventDefault();
       const url = dlBtn.getAttribute("data-file-url");
       const fname = dlBtn.getAttribute("data-file-name");
-      if (url) downloadHyperFile(url, fname, dlBtn.getAttribute("data-file-enc") === "1" ? dlBtn.getAttribute("data-file-room") : null);
+      if (url) downloadHyperFile(url, fname, dlBtn.getAttribute("data-file-enc") === "1" ? roomRefs.key(dlBtn.getAttribute("data-file-room")) : null);
       return;
     }
     const openZone = e.target.closest(".msg-file-attach-open");
@@ -2696,7 +2695,7 @@ if (msgArea) {
       if (wrap?.classList.contains("large-media-placeholder")) {
         expandLargeMedia(wrap);
       } else if (wrap?.getAttribute("data-file-enc") === "1") {
-        resolveDecryptedUrl(url, wrap.getAttribute("data-file-room"), wrap.querySelector(".msg-file-attach-name")?.textContent)
+        resolveDecryptedUrl(url, roomRefs.key(wrap.getAttribute("data-file-room")), wrap.querySelector(".msg-file-attach-name")?.textContent)
           .then((src) => window.open(src)).catch(() => alert("Could not decrypt this attachment."));
       } else {
         window.open(url);

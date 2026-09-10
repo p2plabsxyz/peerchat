@@ -38,6 +38,8 @@ Small teams or group of friends who already trust each other and want something 
 | Message key | `peersky-chat:key:` | Never leaves the process |
 | Attachment key | `peersky-chat:attachment:` | Never leaves the process; seals files in the per-room drive |
 
+**Attachment format** (wire contract; mobile must match): `PCA1` (4 bytes), a 12-byte random IV, then AES-256-GCM ciphertext with the 16-byte tag last, under the attachment key above. The drive is named `peerchat-` + the first 32 hex of `SHA-256("peersky-chat:drive:" + roomKey)`; object names are opaque and the filename travels inside the encrypted message.
+
 They are kept apart because the swarm topic is published. `dht.announce()` and `dht.lookup()` send the topic to whichever DHT nodes are nearest it in keyspace, so anything recoverable from the topic is effectively public. Deriving both from the room key with different contexts means an observer holding the topic learns nothing about the message key.
 
 Earlier builds joined the swarm on the raw room key and derived the message key as `SHA-256("peersky-chat:" + roomKey)`. That published the room secret to DHT nodes and let them reconstruct the message key. If you ran a build from before this change, rooms created then should be recreated with fresh keys. Message history from those builds still decrypts, since the old derivation is retained for reading.
