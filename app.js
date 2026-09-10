@@ -3,6 +3,7 @@ import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
 import { stickToBottom } from "./lib/scroll.js";
+import { attachmentKind } from "./lib/render-rules.js";
 
 const S = {
   profile: null,
@@ -490,15 +491,26 @@ function hydrateEncryptedMedia(root) {
   }
 }
 
+function legacyAttachmentHtml(url, msg) {
+  if (isImageFile(url)) {
+    return shouldAutoInline(msg.fileSize)
+      ? `<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`
+      : largeMediaHtml(url, msg.fileName, msg.fileSize, "image");
+  }
+  if (isVideoFile(url)) {
+    return shouldAutoInline(msg.fileSize)
+      ? `<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`
+      : largeMediaHtml(url, msg.fileName, msg.fileSize, "video");
+  }
+  return fileAttachHtml(url, msg.fileName, msg.fileSize);
+}
+
 function linkify(text, msg) {
   if (!text) return "";
   const trimmed = text.trim();
-  if (msg?.fileEnc && /^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed)) {
-    return encryptedAttachmentHtml(trimmed, msg);
-  }
-  if (/^hyper:\/\//i.test(trimmed) && !/\s/.test(trimmed) && isHyperFileUrl(trimmed)) {
-    return fileAttachHtml(trimmed, msg?.fileName, msg?.fileSize);
-  }
+  const kind = attachmentKind(text, msg);
+  if (kind === "encrypted") return encryptedAttachmentHtml(trimmed, msg);
+  if (kind === "upload") return legacyAttachmentHtml(trimmed, msg);
   const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
@@ -507,20 +519,6 @@ function linkify(text, msg) {
     const url = m[0];
     if (url.includes('@') && !url.includes('://')) {
       parts.push(`<a href="mailto:${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
-    } else if (isImageFile(url)) {
-      if (shouldAutoInline(msg?.fileSize)) {
-        parts.push(`<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`);
-      } else {
-        parts.push(largeMediaHtml(url, msg?.fileName, msg?.fileSize, 'image'));
-      }
-    } else if (isVideoFile(url)) {
-      if (shouldAutoInline(msg?.fileSize)) {
-        parts.push(`<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`);
-      } else {
-        parts.push(largeMediaHtml(url, msg?.fileName, msg?.fileSize, 'video'));
-      }
-    } else if (isHyperFileUrl(url)) {
-      parts.push(fileAttachHtml(url, null, null));
     } else {
       parts.push(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
     }
