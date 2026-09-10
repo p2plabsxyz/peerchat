@@ -2,6 +2,7 @@ import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
 
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
+import { stickToBottom } from "./lib/scroll.js";
 
 const S = {
   profile: null,
@@ -1213,38 +1214,6 @@ function messageMatchesSearch(m, q) {
   if (!q) return true;
   if (m.type === "system") return (m.text || "").toLowerCase().includes(q);
   return (m.message || "").toLowerCase().includes(q);
-}
-
-const scrollWatches = new WeakMap();
-
-function stickToBottom(container, { smooth = false, budgetMs = 1500 } = {}) {
-  if (!container) return;
-
-  const watch = (scrollWatches.get(container) || 0) + 1;
-  scrollWatches.set(container, watch);
-
-  const jump = () => { container.scrollTop = container.scrollHeight; };
-  if (smooth) container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-  else jump();
-
-  const deadline = performance.now() + budgetMs;
-  let lastHeight = container.scrollHeight;
-
-  const step = () => {
-    if (!container.isConnected) return;
-    if (scrollWatches.get(container) !== watch) return; // superseded
-
-    const height = container.scrollHeight;
-    if (height !== lastHeight) {
-      lastHeight = height;
-      if (smooth) container.scrollTo({ top: height, behavior: "smooth" });
-      else jump();
-    }
-
-    if (performance.now() > deadline) { jump(); return; }
-    requestAnimationFrame(step);
-  };
-  requestAnimationFrame(step);
 }
 
 function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
