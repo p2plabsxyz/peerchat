@@ -615,8 +615,33 @@ function announcedJoinTs(ts) {
   return Number.isFinite(ts) && ts > 0 && ts <= now ? ts : now;
 }
 
+// Announcing before onboarding sets a name would publish the peer id as the
+// display name, and peers write that into their feed permanently.
+function announceRoomJoin(roomKey) {
+  const uname = savedData.profile?.username;
+  const room = savedData.rooms[roomKey];
+  if (!uname || !room) return;
+
+  const joinTs = room.joinedAt || room.createdAt || Date.now();
+  if (!room.joinedAt) { room.joinedAt = joinTs; debouncePersist(); }
+  const joinId = `${roomKey}-${localId}-join-${joinTs}`;
+  if (roomFeeds[roomKey] && trackId(joinId)) {
+    appendToFeed(roomKey, { id: joinId, type: "system", text: `${uname} joined`, ts: joinTs }).catch(() => {});
+  }
+  relayToRoom(roomKey, JSON.stringify({
+    type: "join", roomKey,
+    peerId: localId,
+    username: uname,
+    bio: savedData.profile?.bio || "",
+    avatar: savedData.profile?.avatar || null,
+    id: joinId,
+    ts: joinTs,
+  }) + "\n");
+}
+
 function announceJoins(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
-  const uname = savedData.profile?.username || localId;
+  const uname = savedData.profile?.username;
+  if (!uname) return;
   for (const rk of roomKeys) {
     const room = savedData.rooms[rk];
     if (!room || !roomFeeds[rk]) continue;
@@ -1446,25 +1471,9 @@ export async function handleChatRequest(req, sdk) {
         }
         await joinRoom(sdk, roomKey);
 
-        const uname = savedData.profile?.username || localId;
-        const joinTs = Date.now();
-        const joinId = `${roomKey}-${localId}-join-${joinTs}`;
         const room = savedData.rooms[roomKey];
-        if (room && !room.joinedAt) { room.joinedAt = joinTs; debouncePersist(); }
-        if (roomFeeds[roomKey] && trackId(joinId)) {
-          appendToFeed(roomKey, { id: joinId, type: "system", text: `${uname} joined`, ts: joinTs }).catch(() => {});
-        }
-
-        const joinMsg = JSON.stringify({
-          type: "join", roomKey,
-          peerId: localId,
-          username: uname,
-          bio: savedData.profile?.bio || "",
-          avatar: savedData.profile?.avatar || null,
-          id: joinId,
-          ts: joinTs,
-        }) + "\n";
-        relayToRoom(roomKey, joinMsg);
+        if (room && !room.joinedAt) { room.joinedAt = Date.now(); debouncePersist(); }
+        announceRoomJoin(roomKey);
 
         if (isNew) {
           for (let i = 0; i < 20; i++) {
@@ -1622,6 +1631,7 @@ export async function handleChatRequest(req, sdk) {
         for (const p of peers) {
           if (!p.conn.destroyed) shareProfile(p.conn, p.rooms);
         }
+        for (const rk of joinedRooms) announceRoomJoin(rk);
         broadcastGlobal("profile-update", {
           peerId: localId,
           username: savedData.profile.username,
