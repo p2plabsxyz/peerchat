@@ -339,7 +339,9 @@ function peerForConnection(conn) {
 }
 
 function connectionSharesRoom(conn, roomKey) {
-  return peerSharesRoom(peerForConnection(conn), roomKey);
+  // Pending peers count: a join can arrive before activation, and dropping it
+  // would leave us without the join time history sync needs.
+  return peerSharesRoom(peerForConnection(conn) || pendingPeers.get(conn), roomKey);
 }
 
 function broadcastGlobal(event, data) {
