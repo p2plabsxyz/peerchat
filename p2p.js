@@ -339,7 +339,9 @@ function peerForConnection(conn) {
 }
 
 function connectionSharesRoom(conn, roomKey) {
-  return peerSharesRoom(peerForConnection(conn), roomKey);
+  // Pending peers count: a join can arrive before activation, and dropping it
+  // would leave us without the join time history sync needs.
+  return peerSharesRoom(peerForConnection(conn) || pendingPeers.get(conn), roomKey);
 }
 
 function broadcastGlobal(event, data) {
@@ -460,10 +462,22 @@ function feedEntryToMsg(entry, roomKey) {
   };
 }
 
+// When a peer joined the room, from their own join announcement. Null until it
+// arrives, which is why an unknown peer gets no history here.
+function peerJoinedAt(conn, rk) {
+  const peer = peerForConnection(conn) || pendingPeers.get(conn);
+  const at = peer && savedData.rooms[rk]?.members?.[peer.id]?.joinedAt;
+  return Number.isFinite(at) ? at : null;
+}
+
 async function syncRoomHistoryTo(conn, rk) {
   if (!connectionSharesRoom(conn, rk)) return;
   const feed = roomFeeds[rk];
   if (!feed || !feed.length) return;
+  // Sending history the receiver will discard costs every member bandwidth and
+  // battery, multiplied by room size. The join announcement re-triggers this.
+  const since = peerJoinedAt(conn, rk);
+  if (since === null) return;
   const len = feed.length;
   for (let i = 0; i < len; i++) {
     try {
@@ -471,6 +485,7 @@ async function syncRoomHistoryTo(conn, rk) {
       if (!connectionSharesRoom(conn, rk)) return;
       const e = await feed.get(i);
       if (isModerationNoticeEntry(e)) continue;
+      if (Number.isFinite(e?.ts) && e.ts < since) continue;
       const syncType = e.type === "system" ? "sync-system" : e.type === "reaction" ? "sync-reaction" : "sync";
       const ok = writeToConnection(conn, JSON.stringify({ type: syncType, roomKey: rk, ...e }) + "\n");
       if (!ok) {
@@ -595,8 +610,40 @@ function shareMembers(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   }
 }
 
+// A peer reports when it joined; trust it for history scope only (a peer can
+// always run a client that ignores this) but never accept a future timestamp.
+function announcedJoinTs(ts) {
+  const now = Date.now();
+  return Number.isFinite(ts) && ts > 0 && ts <= now ? ts : now;
+}
+
+// Announcing before onboarding sets a name would publish the peer id as the
+// display name, and peers write that into their feed permanently.
+function announceRoomJoin(roomKey) {
+  const uname = savedData.profile?.username;
+  const room = savedData.rooms[roomKey];
+  if (!uname || !room) return;
+
+  const joinTs = room.joinedAt || room.createdAt || Date.now();
+  if (!room.joinedAt) { room.joinedAt = joinTs; debouncePersist(); }
+  const joinId = `${roomKey}-${localId}-join-${joinTs}`;
+  if (roomFeeds[roomKey] && trackId(joinId)) {
+    appendToFeed(roomKey, { id: joinId, type: "system", text: `${uname} joined`, ts: joinTs }).catch(() => {});
+  }
+  relayToRoom(roomKey, JSON.stringify({
+    type: "join", roomKey,
+    peerId: localId,
+    username: uname,
+    bio: savedData.profile?.bio || "",
+    avatar: savedData.profile?.avatar || null,
+    id: joinId,
+    ts: joinTs,
+  }) + "\n");
+}
+
 function announceJoins(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
-  const uname = savedData.profile?.username || localId;
+  const uname = savedData.profile?.username;
+  if (!uname) return;
   for (const rk of roomKeys) {
     const room = savedData.rooms[rk];
     if (!room || !roomFeeds[rk]) continue;
@@ -962,7 +1009,7 @@ export function initChat(sdk, options = {}) {
                 username: joinName,
                 bio: clamp(msg.bio, MAX_BIO_LEN),
                 avatar: sanitizeAvatar(msg.avatar),
-                joinedAt: room.members[joinPeerId]?.joinedAt || Date.now(),
+                joinedAt: room.members[joinPeerId]?.joinedAt ?? announcedJoinTs(msg.ts),
               };
               debouncePersist();
               broadcastGlobal("member-update", { peerId: joinPeerId, username: joinName, bio: clamp(msg.bio, MAX_BIO_LEN), avatar: sanitizeAvatar(msg.avatar), isOnline: true, rooms: [msg.roomKey] });
@@ -1426,25 +1473,9 @@ export async function handleChatRequest(req, sdk) {
         }
         await joinRoom(sdk, roomKey);
 
-        const uname = savedData.profile?.username || localId;
-        const joinTs = Date.now();
-        const joinId = `${roomKey}-${localId}-join-${joinTs}`;
         const room = savedData.rooms[roomKey];
-        if (room && !room.joinedAt) { room.joinedAt = joinTs; debouncePersist(); }
-        if (roomFeeds[roomKey] && trackId(joinId)) {
-          appendToFeed(roomKey, { id: joinId, type: "system", text: `${uname} joined`, ts: joinTs }).catch(() => {});
-        }
-
-        const joinMsg = JSON.stringify({
-          type: "join", roomKey,
-          peerId: localId,
-          username: uname,
-          bio: savedData.profile?.bio || "",
-          avatar: savedData.profile?.avatar || null,
-          id: joinId,
-          ts: joinTs,
-        }) + "\n";
-        relayToRoom(roomKey, joinMsg);
+        if (room && !room.joinedAt) { room.joinedAt = Date.now(); debouncePersist(); }
+        announceRoomJoin(roomKey);
 
         if (isNew) {
           for (let i = 0; i < 20; i++) {
@@ -1602,6 +1633,7 @@ export async function handleChatRequest(req, sdk) {
         for (const p of peers) {
           if (!p.conn.destroyed) shareProfile(p.conn, p.rooms);
         }
+        for (const rk of joinedRooms) announceRoomJoin(rk);
         broadcastGlobal("profile-update", {
           peerId: localId,
           username: savedData.profile.username,

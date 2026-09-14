@@ -44,7 +44,7 @@
       <h1>About PeerChat</h1>
 
       <p class="lead">
-        Small-group chat inside PeerSky Browser. You create a room, share a key, and everyone who has that key joins the same swarm and sees the same history; no chat server in the middle. <br>
+        Small-group chat inside PeerSky Browser. You create a room, share a key, and everyone who has that key joins the same swarm; no chat server in the middle. <br>
         <strong>No account.</strong> <strong>Everything stays local on your machine</strong> (room list, profile, keys file); except what you explicitly sync over the peer network.<br>
         <strong>You own your chats:</strong> there’s no company holding logs or resetting your password; the room key is the shared secret.        
       </p>
@@ -59,12 +59,13 @@
         <li><strong>Direct Messages (DMs):</strong> click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived from both peer IDs so only those two people share it.</li>
         <li><strong>Link previews:</strong> when a message contains a link, the sender fetches that page’s title and description once and ships them inside the encrypted message. Readers see a small text card without ever connecting to the site, so opening a room never tells the linked host who read it. Turn it off in Settings.</li>
         <li><strong>Moderation</strong> runs locally on every peer, with per-room settings chosen by whoever created the room. See below.</li>
+        <li><strong>Works with the internet down:</strong> rooms are joined on an isolated LAN swarm as well as the public one (<code>@p2plabs/hyperdht-mdns</code>, no public bootstrap), so peers on the same network keep talking. It needs a network, not an internet connection.</li>
         <li>Optional Electron <code>safeStorage</code> for the local JSON that holds rooms and keys.</li>
       </ul>
 
       <h2>How the room key works</h2>
       <p class="muted">
-        The key is a random secret shown as 64 hex characters. Anyone with it can join that room and read history
+        The key is a random secret shown as 64 hex characters. Anyone with it can join that room and read messages sent from then on; history from before a join is not backfilled. They can read history
         from peers who have the data. Treat it like a shared password. Use <strong>Join room</strong> with the key;
         for room details or keys from your archive, see <strong>peerchat-rooms</strong> under Hyperdrives in
         <a href="peersky://settings/archive">Settings → Archive</a>.

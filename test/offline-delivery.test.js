@@ -1,5 +1,5 @@
-// Messages sent while a peer is away must arrive when they reconnect, via the
-// per-message sync that runs on activation and on handshake-opened rooms.
+// Messages sent while a peer is away must arrive when they reconnect. History
+// is scoped to when that peer joined the room, which it reports on connect.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -17,6 +17,7 @@ const ROOM_Y = "bb".repeat(32);
 const M1 = "sent in X while you were offline";
 const M2 = "sent in Y while you were offline";
 const M3 = "sent live while connected";
+const JOINED_LONG_AGO = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
 const swarm = new EventEmitter();
 swarm.flush = async () => {};
@@ -71,6 +72,13 @@ describe("offline delivery", () => {
       waiters.push({ match, resolve: (f) => { clearTimeout(timer); resolve(f); } });
     });
   };
+  // Real clients call announceJoins on activation. History is scoped to the
+  // time reported here, so the harness has to send it like a real peer.
+  const announceJoin = (roomKey, ts) => transport.send(JSON.stringify({
+    type: "join", roomKey, peerId: "beefbeef", username: "away-peer",
+    id: `${roomKey}-beefbeef-join-${ts}`, ts,
+  }) + "\n");
+
   const encryptedFor = (roomKey, plaintext) => (f) => {
     if (f.roomKey !== roomKey || !f.ct || !f.iv || !f.tag) return false;
     try { return decryptMsg(f.ct, f.iv, f.tag, roomKey) === plaintext; } catch { return false; }
@@ -111,7 +119,9 @@ describe("offline delivery", () => {
         try { onFrame(JSON.parse(line)); } catch {}
       }
     }, {});
+    await transport.ready();
 
+    announceJoin(ROOM_X, JOINED_LONG_AGO);
     await nextFrame(encryptedFor(ROOM_X, M1), "missed message in the connection-forming room");
   });
 
@@ -121,11 +131,40 @@ describe("offline delivery", () => {
       topics: [topicHex(deriveTopic(ROOM_X)), topicHex(deriveTopic(ROOM_Y))],
     }) + "\n");
 
+    announceJoin(ROOM_Y, JOINED_LONG_AGO);
     await nextFrame(encryptedFor(ROOM_Y, M2), "missed message in the handshake-opened room");
   });
 
   it("delivers live messages while connected", async () => {
     await call("send", "POST", { message: M3 }, ROOM_X);
     await nextFrame(encryptedFor(ROOM_X, M3), "live message");
+  });
+
+  // The perf half: a brand-new member is not sent history it would discard.
+  // Every member pays this cost, multiplied by room size, on every join.
+  it("sends no history to a peer that just joined", async () => {
+    const fresh = await securePair();
+    const seen = [];
+    let buffer = "";
+    const freshTransport = attachChatTransport(fresh.clientStream, (raw) => {
+      buffer += raw.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) { if (line) { try { seen.push(JSON.parse(line)); } catch {} } }
+    }, {});
+    swarm.emit("connection", fresh.serverStream, { topics: [deriveTopic(ROOM_X)] });
+    await new Promise((r) => setTimeout(r, 400));
+
+    freshTransport.send(JSON.stringify({
+      type: "join", roomKey: ROOM_X, peerId: "cafecafe", username: "newcomer",
+      id: `${ROOM_X}-cafecafe-join-${Date.now()}`, ts: Date.now(),
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 600));
+
+    const history = seen.filter((f) => f.type === "sync" && f.roomKey === ROOM_X);
+    assert.equal(history.length, 0, `expected no history, got ${history.length} messages`);
+
+    try { freshTransport.close(); } catch {}
+    await fresh.close();
   });
 });

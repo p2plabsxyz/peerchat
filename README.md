@@ -4,7 +4,7 @@
     <img src="./demo.png" width="639" alt="Screenshot of PeerChat in light mode: browser tab with peersky://p2p/peerchat URL, sidebar with rooms and a selected chat with “Capt Jack Sparrow,” conversation bubbles, an embedded video, and the emoji picker above the input field.">
 </div>
 
-Small-group chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser). You create a room, share a key, and everyone who has that key joins the same swarm and sees the same history—no chat server in the middle.
+Small-group chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser). You create a room, share a key, and everyone who has that key joins the same swarm—no chat server in the middle. History starts at the moment you join; nobody backfills what came before.
 
 **No account.** **Everything stays local** on your machine (room list, profile, keys file)—except what you explicitly sync over the peer network. **You own your chats:** there’s no company holding logs or resetting your password; the room key is the shared secret.
 
@@ -23,6 +23,7 @@ Small teams or group of friends who already trust each other and want something 
 - **Direct Messages (DMs):** click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived deterministically from both peer IDs so only those two people share it
 - Room list, unread counts, and local settings persist on disk
 - **Built-in moderation:** obvious abuse, spam bursts, profanity and slurs, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse and profanity filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
+- **Works with the internet down:** room topics are joined on an isolated LAN swarm too (`@p2plabs/hyperdht-mdns`, no public bootstrap), so peers on the same network keep talking. Needs a network, not an internet connection.
 - **Emoji picker** in the message composer: type keywords to filter characters; data comes from [emojilib](https://github.com/muan/emojilib), vendored as `lib/emojilib-emoji-en-US.json`.
 - **Link previews:** when an outgoing message contains an http(s) URL, the sender fetches the first link's title and description once and ships them in the encrypted message. Readers see a small card (text only, no image) instead of only a bare link, without ever connecting to the linked host. Previews respect the room's filters (blocked/adult domains and filtered metadata never reach the feed) and can be turned off in Settings.
 
@@ -109,14 +110,11 @@ These apps solve different problems; the table is to set expectations, not to pi
 | **Good when** | You want mainstream, audited E2E messaging | You want federation or a public server | You want **local-first, small groups**, same app as Hyper browsing |
 | **File uploads** | Platform limits | Varies by server | **No limit** |
 
-**P2P angle:** PeerChat avoids a message database run by a third party. In PeerSky,
-room topics are joined on both the public swarm and an isolated LAN swarm. The
-LAN swarm uses `hyperdht-mdns` with zero public bootstrap nodes, so nearby peers
-can discover each other and exchange messages without internet access. Desktop
-builds use the default `bonjour-service` adapter; mobile builds can inject a
-system Bonjour or Android NSD adapter through the same two-method interface.
-Noise protects the bytes on the wire; the **room key** protects message content
-on disk. That’s simpler than Signal’s ratchet—it’s also **weaker** if the key is
+**P2P angle:** PeerChat avoids a message database run by a third party. Desktop
+uses the default `bonjour-service` LAN adapter; mobile can inject a system
+Bonjour or Android NSD adapter through the same two-method interface. Noise
+protects the bytes on the wire; the **room key** protects message content on
+disk. That’s simpler than Signal’s ratchet—it’s also **weaker** if the key is
 stolen or shared carelessly.
 
 ### PeerChat specifics
@@ -144,9 +142,7 @@ To run from a standalone clone, point `node_modules` at a PeerSky checkout first
 ln -s /path/to/peersky-browser/node_modules node_modules && node --test "test/*.test.js"
 ```
 
-`test/crypto.test.js` covers topic and message key derivation, including that an observer holding only the announced topic cannot decrypt. `test/two-peer.test.js` runs two real peers against an isolated `hyperdht` testnet and checks that they discover each other by room key and exchange an encrypted message. `test/routing.test.js`, `test/transport.test.js`, `test/moderation.test.js` and `test/room-moderation.test.js` cover topic matching, the Protomux channel, the filtering engine and per-room moderation settings.
-
-`test/transport.integration.test.js` needs `@p2plabs/hyperdht-mdns`, which is not published yet, so it fails until that lands.
+`test/crypto.test.js` and `test/attachment-crypto.test.js` cover the key derivations, including that an observer holding only the announced topic cannot decrypt. `test/two-peer.test.js` and `test/transport.integration.test.js` run real peers against an isolated `hyperdht` testnet. The rest cover routing, transport, moderation, offline delivery, rendering and scroll behaviour.
 
 ### Chat API 
 
