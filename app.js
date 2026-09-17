@@ -1,4 +1,5 @@
 import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
+import { buildInviteUrl, parseInvite } from "./lib/invite.js";
 
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
@@ -843,6 +844,28 @@ function hideBoot() {
   $("boot-screen")?.setAttribute("hidden", "");
 }
 
+// An invite carries the room key, so it is read once and wiped from the URL
+// before the app renders; history and the address bar must not keep it.
+const pendingInvite = parseInvite(location.hash);
+if (pendingInvite) {
+  try { history.replaceState(null, "", location.pathname + location.search); } catch {}
+}
+
+async function consumeInvite() {
+  if (!pendingInvite) return;
+  try {
+    if (!S.rooms[pendingInvite]) {
+      await chat.joinRoom(pendingInvite);
+      await loadRooms();
+      renderRoomList();
+    }
+    await openRoom(pendingInvite);
+  } catch (err) {
+    console.error("[chat] invite:", err);
+    alert("Could not open that invite link.");
+  }
+}
+
 async function init() {
   try {
     const profile = await chat.getProfile();
@@ -856,6 +879,7 @@ async function init() {
     showApp();
     connectGlobalSSE();
     getDraftDriveUrl().then(() => saveDrafts()).catch(() => {});
+    await consumeInvite();
   } catch (err) {
     console.error("Init error:", err);
     hideBoot();
@@ -937,6 +961,7 @@ $("onboard-submit")?.addEventListener("click", async () => {
     }
     showApp();
     connectGlobalSSE();
+    await consumeInvite();
   } catch (err) {
     alert(err.message);
   } finally {
@@ -2298,6 +2323,20 @@ $("chat-header-main")?.addEventListener("click", () => {
     keyRow.style.display = "none";
   } else {
     keyRow.style.display = "";
+  }
+
+  const inviteRow = $("ri-copy-invite")?.parentElement;
+  if (inviteRow) inviteRow.style.display = keyRow.style.display;
+  const inviteBtn = $("ri-copy-invite");
+  if (inviteBtn) {
+    inviteBtn.onclick = () => {
+      const link = buildInviteUrl(S.activeRoom);
+      if (!link) return;
+      copyText(link).then(() => {
+        inviteBtn.textContent = "Copied!";
+        setTimeout(() => { inviteBtn.textContent = "Copy"; }, 1500);
+      });
+    };
   }
 
   $("ri-copy-key").onclick = () => {

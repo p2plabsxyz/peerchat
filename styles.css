@@ -3,6 +3,7 @@
 
 :root {
   --sidebar-w: 360px;
+  --sidebar-min-w: 200px;
 
   /* Solid base for color-mix() / shadows when browser background is none (transparent theme) */
   --surface-mix: var(--browser-theme-background);
@@ -109,7 +110,10 @@ html, body {
 
 /* ---- Sidebar ---- */
 #sidebar {
-  width: var(--sidebar-w); min-width: var(--sidebar-w);
+  /* Shrinks before the chat panel does: a narrow window should cost room-list
+     width, not the composer. */
+  width: clamp(var(--sidebar-min-w), 34vw, var(--sidebar-w));
+  flex: 0 0 auto;
   background: var(--list-bg);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
@@ -629,7 +633,7 @@ html, body {
 .mention-item:last-child { border-radius: 0 0 8px 8px; }
 .mention-item img { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; object-fit: cover; }
 #message-input {
-  flex: 1; min-height: 2.5rem; max-height: 8.75rem;
+  flex: 1; min-width: 0; min-height: 2.5rem; max-height: 8.75rem;
   line-height: 1.35;
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
