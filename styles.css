@@ -745,6 +745,11 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   padding: 6px 10px; border-radius: 6px; background: var(--base01);
 }
 .blocked-row span { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-offline-note {
+  padding: 8px 14px; font-size: 0.8rem; text-align: center;
+  color: var(--muted); background: var(--base01);
+  border-bottom: 1px solid var(--border);
+}
 .dm-blocked-banner {
   padding: 8px 14px; font-size: 0.8rem; text-align: center;
   color: var(--danger); background: var(--base01);

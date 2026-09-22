@@ -1119,6 +1119,21 @@ function applyDMComposerGate(roomKey) {
   const banner = $("dm-blocked-banner");
   const blockedByPeer = !!(room.isDM && room.blockedByPeer);
   const blockedByMe = !!(room.isDM && room.dmWith && isPeerBlocked(room.dmWith));
+
+  // Messaging someone offline is allowed. There is no server holding the
+  // message, so it only moves while both sides are running.
+  const offlineNote = $("dm-offline-note");
+  if (offlineNote) {
+    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe &&
+      !S.onlinePeers.has(room.dmWith));
+    offlineNote.style.display = peerOffline ? "" : "none";
+    if (peerOffline) {
+      const peerName = S.peerProfiles[room.dmWith]?.username || room.name || room.dmWith;
+      offlineNote.textContent =
+        `${peerName} is offline. Your message arrives the next time you are both online, so keep PeerSky running.`;
+    }
+  }
+
   if (banner) {
     banner.style.display = blockedByPeer || blockedByMe ? "" : "none";
     banner.textContent = blockedByMe
@@ -1889,6 +1904,8 @@ function connectGlobalSSE() {
       }
       updateRoomPeerCount(S.activeRoom);
       renderRoomList();
+      // The offline note in a direct room hangs off this.
+      applyDMComposerGate(S.activeRoom);
     } catch {}
   });
 
@@ -2417,10 +2434,10 @@ function showUserInfo(senderId, displayName) {
   const msgBtn = $("ui-message-btn");
   if (msgBtn) {
     msgBtn.style.display = isSelf ? "none" : "";
-    // A direct message needs the other side online to accept the request, so
-    // offline people are listed but not messageable.
-    msgBtn.disabled = blocked || !isOn;
-    msgBtn.textContent = blocked ? "Blocked" : isOn ? "Message" : "Offline";
+    // Offline is fine: the invite is re-sent by shareDMInvites the moment they
+    // reconnect, so the room opens now and the note in it explains the wait.
+    msgBtn.disabled = blocked;
+    msgBtn.textContent = blocked ? "Blocked" : "Message";
   }
 
   const safety = document.querySelector(".user-info-safety");
