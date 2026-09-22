@@ -45,6 +45,7 @@ const PING_MS = 25_000;
 const SEEN_CAP = 10_000;
 const PERSIST_DELAY_MS = 2_000;
 const MAX_BLOCKED_PEERS = 500;
+const MEMBERS_LIST_CHUNK = 50;
 const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject", "dm-blocked"]);
 
 const DEFAULT_ROOM_MODERATION = {
@@ -631,13 +632,30 @@ function shareRoomMeta(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   }
 }
 
+// Sent in chunks and without avatars. A room of 64 people carrying data-url
+// pictures is megabytes, which is past the receive cap on both this side and
+// mobile, so the whole list was silently dropped. Pictures arrive with the
+// profile frame instead.
 function shareMembers(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   for (const rk of roomKeys) {
     const room = savedData.rooms[rk];
     if (!room || !room.members || !roomFeeds[rk]) continue;
-    try {
-      writeToConnection(conn, JSON.stringify({ type: "members-list", roomKey: rk, members: room.members }) + "\n");
-    } catch {}
+    const entries = Object.entries(room.members);
+    for (let i = 0; i < entries.length; i += MEMBERS_LIST_CHUNK) {
+      const members = {};
+      for (const [peerId, m] of entries.slice(i, i + MEMBERS_LIST_CHUNK)) {
+        if (!peerId || !m?.username) continue;
+        members[peerId] = {
+          username: m.username,
+          bio: m.bio || "",
+          ...(Number.isFinite(m.joinedAt) ? { joinedAt: m.joinedAt } : {}),
+        };
+      }
+      if (Object.keys(members).length === 0) continue;
+      try {
+        writeToConnection(conn, JSON.stringify({ type: "members-list", roomKey: rk, members }) + "\n");
+      } catch {}
+    }
   }
 }
 
