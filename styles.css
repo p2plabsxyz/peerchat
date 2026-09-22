@@ -727,6 +727,30 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem;
 }
 
+/* Blocking and reporting */
+.user-info-safety {
+  display: flex; justify-content: center; gap: 1rem;
+  width: 100%; margin-top: 0.35rem;
+}
+.link-btn {
+  background: none; border: 0; padding: 0;
+  font-size: 0.8rem; cursor: pointer; text-decoration: underline;
+}
+.link-btn.danger { color: var(--danger); }
+.link-btn.muted { color: var(--muted); }
+.link-btn:hover { opacity: 0.8; }
+.blocked-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.blocked-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  padding: 6px 10px; border-radius: 6px; background: var(--base01);
+}
+.blocked-row span { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-blocked-banner {
+  padding: 8px 14px; font-size: 0.8rem; text-align: center;
+  color: var(--danger); background: var(--base01);
+  border-bottom: 1px solid var(--border);
+}
+
 /* Room / User info modals */
 .room-info, .user-info { align-items: center; text-align: center; }
 .avatar-lg { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; object-position: center; }

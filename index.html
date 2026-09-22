@@ -77,6 +77,9 @@
           <div id="chat-message-search-panel" class="chat-message-search-panel" hidden>
             <input type="text" id="message-search" placeholder="Search messages…" autocomplete="off" spellcheck="false" />
           </div>
+          <div id="dm-blocked-banner" class="dm-blocked-banner" style="display:none">
+            This person blocked your direct messages. You can still see each other in shared rooms.
+          </div>
           <div id="messages">
             <div id="dropzone" class="dropzone" style="display:none">Drop file here</div>
           </div>
@@ -209,6 +212,10 @@
           <button type="button" class="btn-secondary" data-close>Close</button>
           <button type="button" id="ui-message-btn">Message</button>
         </div>
+        <div class="user-info-safety">
+          <button type="button" id="ui-block-btn" class="link-btn danger"></button>
+          <button type="button" id="ui-report-btn" class="link-btn muted">Report</button>
+        </div>
       </div>
     </div>
 
@@ -249,6 +256,10 @@
           <div class="field toggle-row">
             <label>Link previews</label>
             <label class="toggle"><input type="checkbox" id="set-linkpreview" checked /><span class="slider"></span></label>
+          </div>
+          <div class="field" id="set-blocked-field" style="display:none">
+            <label>Blocked people</label>
+            <div id="set-blocked-list" class="blocked-list"></div>
           </div>
           <div class="modal-actions">
             <button type="submit" id="settings-save">Save</button>

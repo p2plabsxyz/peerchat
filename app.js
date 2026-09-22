@@ -18,7 +18,10 @@ const S = {
   reactionNotified: {},
   settings: { sounds: true, notifications: true },
   pendingDMs: {},
+  blockedPeers: [],
 };
+
+const REPORT_EMAIL = "contact@p2plabs.xyz";
 
 const REACT_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 const AUTO_INLINE_PREVIEW_MAX_BYTES = 100 * 1024 * 1024;
@@ -894,6 +897,7 @@ async function loadRooms() {
   S.peerProfiles = data.peerProfiles || {};
   S.onlinePeers = new Set(data.onlinePeers || []);
   S.pendingDMs = data.pendingDMs || {};
+  S.blockedPeers = data.blockedPeers || [];
   const next = {};
   for (const r of data.rooms) {
     next[r.roomKey] = r;
@@ -1112,7 +1116,20 @@ function applyDMComposerGate(roomKey) {
   const messageInput = $("message-input");
   const sendBtn = $("send-btn");
   if (!room || !messageInput || !sendBtn) return;
-  if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
+  const banner = $("dm-blocked-banner");
+  const blockedByPeer = !!(room.isDM && room.blockedByPeer);
+  const blockedByMe = !!(room.isDM && room.dmWith && isPeerBlocked(room.dmWith));
+  if (banner) {
+    banner.style.display = blockedByPeer || blockedByMe ? "" : "none";
+    banner.textContent = blockedByMe
+      ? "You blocked this person. Unblock them in Settings to message them again."
+      : "This person blocked your direct messages. You can still see each other in shared rooms.";
+  }
+  if (blockedByPeer || blockedByMe) {
+    messageInput.disabled = true;
+    messageInput.placeholder = blockedByMe ? "You blocked this person." : "This person blocked your direct messages.";
+    sendBtn.disabled = true;
+  } else if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
     messageInput.disabled = true;
     messageInput.placeholder = "Waiting for the other peer to accept your message request...";
     sendBtn.disabled = true;
@@ -1956,6 +1973,20 @@ function connectGlobalSSE() {
     } catch {}
   });
 
+  es.addEventListener("dm-blocked", (ev) => {
+    touch();
+    try {
+      const { roomKey } = JSON.parse(ev.data);
+      const room = S.rooms[roomKey];
+      if (!room?.isDM) return;
+      room.pendingAcceptance = false;
+      room.blockedByPeer = true;
+      delete S.pendingDMs?.[roomKey];
+      renderRoomList();
+      applyDMComposerGate(roomKey);
+    } catch {}
+  });
+
   es.addEventListener("dm-rejected", (ev) => {
     touch();
     try {
@@ -2380,10 +2411,104 @@ function showUserInfo(senderId, displayName) {
   const member = room?.members?.[senderId];
   $("ui-joined").textContent = member?.joinedAt ? `Joined ${formatDate(member.joinedAt)}` : "";
 
+  const isSelf = senderId === S.profile?.id;
+  const blocked = isPeerBlocked(senderId);
+
   const msgBtn = $("ui-message-btn");
-  if (msgBtn) msgBtn.style.display = senderId === S.profile?.id ? "none" : "";
+  if (msgBtn) {
+    msgBtn.style.display = isSelf ? "none" : "";
+    // A direct message needs the other side online to accept the request, so
+    // offline people are listed but not messageable.
+    msgBtn.disabled = blocked || !isOn;
+    msgBtn.textContent = blocked ? "Blocked" : isOn ? "Message" : "Offline";
+  }
+
+  const safety = document.querySelector(".user-info-safety");
+  if (safety) safety.style.display = isSelf ? "none" : "";
+  const blockBtn = $("ui-block-btn");
+  if (blockBtn) {
+    blockBtn.textContent = blocked ? "Unblock" : "Block direct messages";
+    blockBtn.title = blocked
+      ? "Lets this person send you direct messages again"
+      : "Stops direct messages from this person. They can still see you in shared rooms.";
+  }
 
   openModal("user-info-modal");
+}
+
+function isPeerBlocked(peerId) {
+  const id = String(peerId || "").toLowerCase();
+  return !!id && S.blockedPeers.some((entry) => entry.peerId === id);
+}
+
+async function blockPeer(peerId, username) {
+  try {
+    const result = await chat.blockPeer({ peerId, username });
+    S.blockedPeers = result.blockedPeers || [];
+    S.pendingDMs = result.pendingDMs || {};
+    closeAllModals();
+    renderRoomList();
+    applyDMComposerGate(S.activeRoom);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function unblockPeer(peerId) {
+  try {
+    const result = await chat.unblockPeer({ peerId });
+    S.blockedPeers = result.blockedPeers || [];
+    renderBlockedList();
+    applyDMComposerGate(S.activeRoom);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// Nobody runs PeerChat, so a report goes to the maintainers by email with
+// enough context to act on.
+function reportPeer(peerId, username) {
+  const room = S.rooms[S.activeRoom];
+  const subject = `PeerChat report: ${username || peerId}`;
+  const body = [
+    `Reported user: ${username || peerId}`,
+    `Peer ID: ${peerId}`,
+    `Room: ${room?.name || "unknown"}`,
+    `Room key: ${S.activeRoom || "unknown"}`,
+    `Reported at: ${new Date().toISOString()}`,
+    "",
+    "What happened?",
+    "",
+    "",
+    "Please describe the behaviour above. PeerChat is peer to peer, so nobody",
+    "can remove content for you, but blocking stops their direct messages.",
+  ].join("\n");
+  closeAllModals();
+  window.open(`mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
+}
+
+function renderBlockedList() {
+  const field = $("set-blocked-field");
+  const list = $("set-blocked-list");
+  if (!field || !list) return;
+  list.innerHTML = "";
+  if (!S.blockedPeers.length) {
+    field.style.display = "none";
+    return;
+  }
+  field.style.display = "";
+  for (const entry of S.blockedPeers) {
+    const row = document.createElement("div");
+    row.className = "blocked-row";
+    row.innerHTML = `<span>${esc(entry.username || entry.peerId)}</span>`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-secondary btn-sm";
+    btn.textContent = "Unblock";
+    btn.addEventListener("click", () => unblockPeer(entry.peerId));
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
 }
 
 async function dmRoomKey(id1, id2) {
@@ -2460,6 +2585,20 @@ $("ui-message-btn")?.addEventListener("click", () => {
   if (_uiCurrentPeerId) openDM(_uiCurrentPeerId, _uiCurrentPeerName);
 });
 
+$("ui-block-btn")?.addEventListener("click", () => {
+  if (!_uiCurrentPeerId) return;
+  if (isPeerBlocked(_uiCurrentPeerId)) {
+    unblockPeer(_uiCurrentPeerId);
+    closeAllModals();
+    return;
+  }
+  blockPeer(_uiCurrentPeerId, _uiCurrentPeerName);
+});
+
+$("ui-report-btn")?.addEventListener("click", () => {
+  if (_uiCurrentPeerId) reportPeer(_uiCurrentPeerId, _uiCurrentPeerName);
+});
+
 $("dmi-accept")?.addEventListener("click", () => {
   if (_dmiRoomKey) acceptDM(_dmiRoomKey);
 });
@@ -2476,6 +2615,7 @@ $("settings-btn")?.addEventListener("click", () => {
   $("set-linkpreview").checked = S.settings.linkPreview;
   $("set-avatar-preview").src = avatar(S.profile?.username, 64, S.profile?.avatar);
   pendingAvatar = null;
+  renderBlockedList();
   openModal("settings-modal");
 });
 
@@ -2493,9 +2633,12 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) =>
       id !== S.profile?.id && !isSelfStale(id) && p.username?.toLowerCase() === lower
     );
-    const preRoom = PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY];
-    const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) =>
-      id !== S.profile?.id && !isSelfStale(id) && m.username?.toLowerCase() === lower
+    // Every room, not just the welcome room. A name you share with someone in
+    // any room you are in reads as a different person in that room's history.
+    const memberTaken = Object.values(S.rooms).some((room) =>
+      Object.entries(room.members || {}).some(([id, m]) =>
+        id !== S.profile?.id && !isSelfStale(id) && m.username?.toLowerCase() === lower
+      )
     );
     if (profileTaken || memberTaken) {
       alert("Username is already taken. Please choose a different one.");
