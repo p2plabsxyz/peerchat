@@ -44,7 +44,8 @@ const KEEPALIVE_MS = 15_000;
 const PING_MS = 25_000;
 const SEEN_CAP = 10_000;
 const PERSIST_DELAY_MS = 2_000;
-const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject"]);
+const MAX_BLOCKED_PEERS = 500;
+const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject", "dm-blocked"]);
 
 const DEFAULT_ROOM_MODERATION = {
   abuseFilter: true,
@@ -82,7 +83,7 @@ let activeRoom = null;
 let persistTimer = null;
 let peerCountTimer = null;
 
-let savedData = { profile: {}, rooms: {}, peerProfiles: {} };
+let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {} };
 
 function isValidRoomKey(k) {
   return typeof k === "string" && /^[a-f0-9]{64}$/i.test(k);
@@ -104,6 +105,34 @@ function parseProfileUsername(raw) {
 
 function normPeerId(id) {
   return clamp(String(id ?? ""), MAX_SENDER_LEN).toLowerCase();
+}
+
+// Blocking closes direct messages only. A blocked peer stays visible in any
+// room you share, the same as every other messenger.
+function isPeerBlocked(peerId) {
+  const id = normPeerId(peerId);
+  return !!id && !!savedData.blockedPeers?.[id];
+}
+
+function listBlockedPeers() {
+  return Object.values(savedData.blockedPeers || {})
+    .sort((a, b) => (b.blockedAt || 0) - (a.blockedAt || 0));
+}
+
+function sanitizeBlockedPeers(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const entry of Object.values(raw)) {
+    const peerId = normPeerId(entry?.peerId);
+    if (!peerId || peerId === normPeerId(localId)) continue;
+    out[peerId] = {
+      peerId,
+      username: clamp(entry?.username, MAX_NAME_LEN) || peerId,
+      blockedAt: Number.isFinite(entry?.blockedAt) ? entry.blockedAt : Date.now(),
+    };
+    if (Object.keys(out).length >= MAX_BLOCKED_PEERS) break;
+  }
+  return out;
 }
 
 function normalizePersistedDmIds() {
@@ -227,6 +256,7 @@ function loadData() {
       savedData.profile = raw.profile || {};
       savedData.peerProfiles = raw.peerProfiles || {};
       savedData.pendingDMs = raw.pendingDMs || {};
+      savedData.blockedPeers = sanitizeBlockedPeers(raw.blockedPeers);
       for (const [id, r] of Object.entries(raw.rooms)) {
         savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
       }
@@ -254,7 +284,7 @@ function loadData() {
 function persistData() {
   if (!dataPath) return;
   try {
-    const out = { v: DATA_VERSION, profile: savedData.profile, peerProfiles: savedData.peerProfiles, pendingDMs: savedData.pendingDMs || {}, rooms: {} };
+    const out = { v: DATA_VERSION, profile: savedData.profile, peerProfiles: savedData.peerProfiles, pendingDMs: savedData.pendingDMs || {}, blockedPeers: savedData.blockedPeers || {}, rooms: {} };
     for (const [id, r] of Object.entries(savedData.rooms)) {
       out.rooms[id] = { ...r, roomKey: enc4disk(r.roomKey) };
     }
@@ -364,6 +394,7 @@ function roomUpdatePayload(roomKey) {
     isDM: !!room.isDM,
     dmWith: room.dmWith || null,
     pendingAcceptance: !!room.pendingAcceptance,
+    blockedByPeer: !!room.blockedByPeer,
     createdBy: room.createdBy || "",
     createdByName: room.createdByName || "",
     isPinned: !!room.isPinned,
@@ -925,6 +956,13 @@ export function initChat(sdk, options = {}) {
             !connectionSharesRoom(conn, msg.roomKey)
           ) continue;
 
+          // Scoped to the one-to-one room, not the peer, so a block never
+          // silences someone in a room you both belong to.
+          if (msg.roomKey && !DM_CONTROL_TYPES.has(msg.type)) {
+            const dmRoom = savedData.rooms[msg.roomKey];
+            if (dmRoom?.isDM && normPeerId(dmRoom.dmWith) === remoteId && isPeerBlocked(remoteId)) continue;
+          }
+
           if (msg.type === "ping") {
             try { writeToConnection(conn, JSON.stringify({ type: "pong" }) + "\n"); } catch {}
             continue;
@@ -1034,6 +1072,16 @@ export function initChat(sdk, options = {}) {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             if (moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (msg.toId && normPeerId(msg.toId) !== normPeerId(localId)) continue;
+            if (isPeerBlocked(remoteId)) {
+              // Tell them rather than dropping it silently, so the request does
+              // not sit there looking like it is still pending.
+              try {
+                writeToConnection(conn, JSON.stringify({
+                  type: "dm-blocked", roomKey: msg.roomKey, fromId: localId,
+                }) + "\n");
+              } catch {}
+              continue;
+            }
             if (savedData.rooms[msg.roomKey]) {
               try {
                 writeToConnection(conn, JSON.stringify({
@@ -1084,6 +1132,17 @@ export function initChat(sdk, options = {}) {
               roomKey: msg.roomKey, fromId: remoteId, fromUsername: acceptName,
               fromAvatar: acceptAvatar, fromBio: acceptBio,
             });
+            continue;
+          }
+
+          if (msg.type === "dm-blocked") {
+            if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
+            const room = savedData.rooms[msg.roomKey];
+            if (!room?.isDM || normPeerId(room.dmWith) !== remoteId) continue;
+            room.pendingAcceptance = false;
+            room.blockedByPeer = true;
+            debouncePersist();
+            broadcastGlobal("dm-blocked", { roomKey: msg.roomKey, fromId: remoteId });
             continue;
           }
 
@@ -1374,6 +1433,7 @@ export async function handleChatRequest(req, sdk) {
         if (!dmRoomKey || !isValidRoomKey(dmRoomKey)) return respond(400, { error: "Invalid room key" });
         if (!toId) return respond(400, { error: "toId required" });
         const toIdNorm = normPeerId(toId);
+        if (isPeerBlocked(toIdNorm)) return respond(403, { error: "Unblock this person before messaging them." });
         if (!savedData.rooms[dmRoomKey]) {
           savedData.rooms[dmRoomKey] = {
             roomKey: dmRoomKey, isHost: false, isDM: true,
@@ -1399,6 +1459,43 @@ export async function handleChatRequest(req, sdk) {
         }) + "\n";
         relayToPeer(toIdNorm, inviteMsg);
         return respond(200, { roomKey: dmRoomKey });
+      }
+
+      if (action === "block-peer") {
+        const body = await req.json().catch(() => ({}));
+        const peerId = normPeerId(body.peerId);
+        if (!peerId) return respond(400, { error: "peerId required" });
+        if (peerId === normPeerId(localId)) return respond(400, { error: "You cannot block yourself." });
+
+        if (!savedData.blockedPeers) savedData.blockedPeers = {};
+        const existing = savedData.blockedPeers[peerId];
+        savedData.blockedPeers[peerId] = {
+          peerId,
+          username: clamp(body.username, MAX_NAME_LEN) || existing?.username || peerId,
+          blockedAt: existing?.blockedAt ?? Date.now(),
+        };
+        const ids = Object.keys(savedData.blockedPeers);
+        while (ids.length > MAX_BLOCKED_PEERS) delete savedData.blockedPeers[ids.shift()];
+
+        // Drop any request they already had waiting.
+        if (savedData.pendingDMs) {
+          for (const [key, pending] of Object.entries(savedData.pendingDMs)) {
+            if (normPeerId(pending.fromId) === peerId) delete savedData.pendingDMs[key];
+          }
+        }
+        persistData();
+        return respond(200, { blockedPeers: listBlockedPeers(), pendingDMs: savedData.pendingDMs || {} });
+      }
+
+      if (action === "unblock-peer") {
+        const body = await req.json().catch(() => ({}));
+        const peerId = normPeerId(body.peerId);
+        if (!peerId || !savedData.blockedPeers?.[peerId]) {
+          return respond(404, { error: "That person is not blocked." });
+        }
+        delete savedData.blockedPeers[peerId];
+        persistData();
+        return respond(200, { blockedPeers: listBlockedPeers() });
       }
 
       if (action === "accept-dm") {
@@ -1516,6 +1613,14 @@ export async function handleChatRequest(req, sdk) {
 
         const _sendRoom = savedData.rooms[roomKey];
         const _sendRoomMod = _sendRoom?.moderation || null;
+
+        // A block closes the conversation both ways, so neither side can send.
+        if (_sendRoom?.isDM && _sendRoom.blockedByPeer) {
+          return respond(403, { error: "This person blocked your direct messages." });
+        }
+        if (_sendRoom?.isDM && isPeerBlocked(_sendRoom.dmWith)) {
+          return respond(403, { error: "Unblock this person before messaging them." });
+        }
 
         const modResult = moderationCheck(localId, roomKey, message, undefined, {
           allowKick: false,
@@ -1731,6 +1836,7 @@ export async function handleChatRequest(req, sdk) {
           createdAt: savedData.profile?.createdAt || 0,
           notifications: savedData.profile?.notifications ?? true,
           linkPreview: savedData.profile?.linkPreview ?? true,
+          blockedPeers: listBlockedPeers(),
         });
       }
 
@@ -1754,6 +1860,7 @@ export async function handleChatRequest(req, sdk) {
             isDM: !!r.isDM,
             dmWith: r.dmWith || null,
             pendingAcceptance: !!r.pendingAcceptance,
+            blockedByPeer: !!r.blockedByPeer,
             isPinned: !!r.isPinned,
             isMuted: !!r.isMuted,
             createdAt: r.createdAt || 0,
@@ -1769,7 +1876,7 @@ export async function handleChatRequest(req, sdk) {
         }
         prunePeers();
         const onlinePeers = [...new Set(peers.map((p) => p.id))];
-        return respond(200, { rooms, peerProfiles: savedData.peerProfiles || {}, onlinePeers, pendingDMs: savedData.pendingDMs || {} });
+        return respond(200, { rooms, peerProfiles: savedData.peerProfiles || {}, onlinePeers, pendingDMs: savedData.pendingDMs || {}, blockedPeers: listBlockedPeers() });
       }
 
       if (action === "get-history") {
