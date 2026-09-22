@@ -1125,6 +1125,7 @@ export function initChat(sdk, options = {}) {
               room.avatar = acceptAvatar;
               room.bio = acceptBio || "";
               room.pendingAcceptance = false;
+              room.blockedByPeer = false;
               room.dmWith = fromPeer;
               debouncePersist();
             }
@@ -1434,6 +1435,15 @@ export async function handleChatRequest(req, sdk) {
         if (!toId) return respond(400, { error: "toId required" });
         const toIdNorm = normPeerId(toId);
         if (isPeerBlocked(toIdNorm)) return respond(403, { error: "Unblock this person before messaging them." });
+        // Asking again clears it. A block that could never be retried would
+        // make the other side's unblock meaningless, and if they are still
+        // blocking us the answer comes straight back.
+        const retried = savedData.rooms[dmRoomKey];
+        if (retried?.blockedByPeer) {
+          retried.blockedByPeer = false;
+          retried.pendingAcceptance = true;
+          persistData();
+        }
         if (!savedData.rooms[dmRoomKey]) {
           savedData.rooms[dmRoomKey] = {
             roomKey: dmRoomKey, isHost: false, isDM: true,

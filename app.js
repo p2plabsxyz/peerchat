@@ -1138,7 +1138,7 @@ function applyDMComposerGate(roomKey) {
     banner.style.display = blockedByPeer || blockedByMe ? "" : "none";
     banner.textContent = blockedByMe
       ? "You blocked this person. Unblock them in Settings to message them again."
-      : "This person blocked your direct messages. You can still see each other in shared rooms.";
+      : "This person blocked your direct messages. Open their profile and press Message to ask again.";
   }
   if (blockedByPeer || blockedByMe) {
     messageInput.disabled = true;
@@ -2540,7 +2540,16 @@ async function openDM(peerId, peerUsername) {
   try {
     const roomKey = await dmRoomKey(myId, peerId);
     closeAllModals();
-    if (S.rooms[roomKey]) {
+    if (S.rooms[roomKey] && !S.rooms[roomKey].blockedByPeer) {
+      await openRoom(roomKey);
+      return;
+    }
+    // A room they blocked goes back through join-dm, which clears the flag and
+    // re-sends the request. Otherwise their unblock would never reach us.
+    if (S.rooms[roomKey]?.blockedByPeer) {
+      await chat.joinDM({ roomKey, toId: peerId, toUsername: peerUsername });
+      await loadRooms();
+      renderRoomList();
       await openRoom(roomKey);
       return;
     }

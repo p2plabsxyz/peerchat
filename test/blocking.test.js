@@ -36,6 +36,9 @@ async function request(action, method, body, roomKey) {
 
 const call = async (action, method, body, roomKey) => (await request(action, method, body, roomKey)).body;
 
+const findRoom = async (roomKey) =>
+  (await call("get-rooms", "GET")).rooms.find((room) => room.roomKey === roomKey);
+
 describe("blocking a peer", () => {
   let dir, storagePath, pair, transport, peerId;
   const frames = [];
@@ -162,6 +165,29 @@ describe("blocking a peer", () => {
     const after = await request("send", "POST", { message: "after the block" }, DM_ROOM);
     assert.equal(after.status, 403);
     assert.match(after.body.error, /Unblock/);
+  });
+
+  it("lets the blocked sender ask again, so an unblock can reach them", async () => {
+    await call("unblock-peer", "POST", { peerId });
+
+    // This is what our side looks like after they block us.
+    transport.send(JSON.stringify({ type: "dm-blocked", roomKey: DM_ROOM, fromId: peerId }) + "\n");
+    let room;
+    for (let i = 0; i < 100; i++) {
+      room = await findRoom(DM_ROOM);
+      if (room?.blockedByPeer) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(room?.blockedByPeer, true, "dm-blocked never landed");
+
+    // Without this an unblock on their side could never reach us again.
+    const retry = await request("join-dm", "POST", { roomKey: DM_ROOM, toId: peerId, toUsername: "Blocked Bob" });
+    assert.equal(retry.status, 200);
+    const reopened = await findRoom(DM_ROOM);
+    assert.equal(reopened.blockedByPeer, false, "asking again clears it");
+    assert.equal(reopened.pendingAcceptance, true, "and the request goes back out");
+
+    await call("block-peer", "POST", { peerId, username: "Blocked Bob" });
   });
 
   it("leaves the shared room alone", async () => {
