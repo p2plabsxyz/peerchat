@@ -22,6 +22,7 @@ Small teams or group of friends who already trust each other and want something 
 - Join / leave, @mentions, replies, **emoji reactions** on messages (stored in the room feed and synced like other events), **file attachments**, encrypted with a key derived from the room key and stored in a per-room Hyperdrive (`peerchat-…` entries in Settings -> Archive; the link alone yields ciphertext). **No file upload limits** in PeerChat.
 - **Direct Messages (DMs):** click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived deterministically from both peer IDs so only those two people share it
 - Room list, unread counts, and local settings persist on disk
+- **Blocking and reporting:** open a peer's profile to block them, which closes direct messages both ways and drops any request of theirs still waiting. They keep appearing in rooms you both belong to, and they are told their direct messages are blocked rather than left waiting on a reply. The list of blocked people, with unblock, lives in Settings. Report opens an email to the maintainers with the person's name, peer ID and room filled in.
 - **Built-in moderation:** obvious abuse, spam bursts, profanity and slurs, and known adult-domain links are filtered before they reach the room feed. Room creators can toggle the abuse and profanity filters and choose a spam rate limit at room creation. Repeat live-message violations can trigger warnings and a short room rejoin cooldown.
 - **Works with the internet down:** room topics are joined on an isolated LAN swarm too (`@p2plabs/hyperdht-mdns`, no public bootstrap), so peers on the same network keep talking. Needs a network, not an internet connection.
 - **Emoji picker** in the message composer: type keywords to filter characters; data comes from [emojilib](https://github.com/muan/emojilib), vendored as `lib/emojilib-emoji-en-US.json`.
@@ -54,6 +55,19 @@ Earlier builds joined the swarm on the raw room key and derived the message key 
 **Joining again** — Use **Join room** with the 64-character key. For room metadata or keys stored in your archive, open **Settings -> Archive** in PeerSky and look under Hyperdrives for **peerchat-rooms**.
 
 **Moderation path** — Outgoing messages are checked locally before encryption. Live incoming messages are decrypted, checked, and either appended or replaced with a local system notice. History sync uses a content-only check so old filtered messages are not reintroduced when a new peer joins, while the syncing peer is not punished for replaying past history. Kick/rejoin checks use the connection-level peer identity instead of a self-reported message field.
+
+### Blocking details
+
+Blocking is user-initiated and separate from the automatic moderation below. It
+is stored locally in `blockedPeers` and never announced to anyone but the peer
+it applies to.
+
+- A blocked peer's `dm-invite` is answered with a `dm-blocked` frame and dropped.
+- Anything they send into a direct room you share with them is dropped, while
+  rooms you both belong to keep working.
+- `join-dm` and `send` refuse with 403 in both directions once a block is in
+  place, so neither side can keep the conversation going.
+- Blocks survive a restart and are capped at 500 entries.
 
 ### Moderation details
 
@@ -155,7 +169,7 @@ import { chat } from "./path/to/peerchat/chat-api.js";
 const profile = await chat.getProfile();
 
 // Get all rooms
-const { rooms, peerProfiles, onlinePeers } = await chat.getRooms();
+const { rooms, peerProfiles, onlinePeers, blockedPeers } = await chat.getRooms();
 
 // Send a message
 try {
@@ -191,6 +205,8 @@ es.addEventListener("message", (ev) => {
 - `chat.joinDM(body)` — Initiate DM with peer
 - `chat.acceptDM(body)` — Accept incoming DM request
 - `chat.rejectDM(body)` — Reject incoming DM request
+- `chat.blockPeer(body)` — Block a peer's direct messages (`{ peerId, username }`); returns the updated block list and pending requests
+- `chat.unblockPeer(body)` — Unblock a peer (`{ peerId }`); returns the updated block list
 - `chat.updateRoom(roomKey, body)` — Update room settings (pin, mute)
 - `chat.deleteRoom(roomKey)` — Leave room
 - `chat.requestMeta(roomKey)` — Broadcast a request to connected peers to re-send room metadata (name, bio, avatar, creator)
