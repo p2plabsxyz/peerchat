@@ -30,8 +30,10 @@ function fakeFeed() {
 }
 const sdk = { publicKey: Buffer.alloc(32, 5), corestore: { get: () => fakeFeed() }, join() {}, swarm };
 
-function bigAvatar() {
-  return "data:image/png;base64," + "A".repeat(100_000);
+// What resizeImage actually produces: 369px, JPEG q0.8, around 27 KB as a
+// data url. Nine of these in one frame is already past what a receiver takes.
+function realisticAvatar() {
+  return "data:image/jpeg;base64," + "A".repeat(27_000);
 }
 
 describe("member list propagation", () => {
@@ -45,7 +47,7 @@ describe("member list propagation", () => {
       members[i.toString(16).padStart(8, "0")] = {
         username: `Member ${i}`,
         bio: "Here since the start",
-        avatar: bigAvatar(),
+        avatar: realisticAvatar(),
         joinedAt: 1_700_000_000_000 + i,
       };
     }
@@ -105,13 +107,16 @@ describe("member list propagation", () => {
     }
 
     const seen = new Set();
+    let withPictures = 0;
     for (const frame of lists) {
       for (const [peerId, member] of Object.entries(frame.message.members)) {
         seen.add(peerId);
-        assert.equal("avatar" in member, false, "avatars are what made this too big");
         assert.ok(member.username, "a member without a name is not worth sending");
+        if (member.avatar) withPictures += 1;
       }
     }
-    assert.equal(seen.size, MEMBER_COUNT);
+    assert.equal(seen.size, MEMBER_COUNT, "everyone has to arrive");
+    // Splitting the list is not an excuse to throw the pictures away.
+    assert.equal(withPictures, MEMBER_COUNT, "pictures have to survive the split");
   });
 });
