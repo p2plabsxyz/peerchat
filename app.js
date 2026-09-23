@@ -6,6 +6,13 @@ import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttach
 import { stickToBottom } from "./lib/scroll.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
+import {
+  describeTooManyFiles,
+  isTooManyFiles,
+  MAX_UPLOAD_BATCH,
+  screenUploadBatch,
+} from "./lib/media-moderation.js";
+import { scanMediaFile } from "./lib/media-scanner.js";
 
 const S = {
   profile: null,
@@ -2860,10 +2867,37 @@ $("emoji-btn")?.addEventListener("click", (e) => {
 });
 
 $("file-input")?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
+  const files = [...(e.target.files || [])];
   e.target.value = "";
-  if (!file || !S.activeRoom) return;
-  await uploadAndSendFile(file);
+  if (files.length === 0 || !S.activeRoom) return;
+
+  if (isTooManyFiles(files.length)) {
+    alert(describeTooManyFiles(files.length));
+    return;
+  }
+
+  const sendBtn = $("send-btn");
+  const attachBtn = $("attach-btn");
+  if (attachBtn) attachBtn.disabled = true;
+  if (sendBtn) sendBtn.disabled = true;
+  try {
+    // Every file is checked before any of them is uploaded, so a refusal never
+    // leaves half a batch in the room.
+    const screened = await Promise.all(files.map(async (file) => ({
+      file,
+      fileName: file.name,
+      verdict: await scanMediaFile(file),
+    })));
+    const decision = screenUploadBatch(screened);
+    if (!decision.allowed) {
+      alert(decision.reason);
+      return;
+    }
+    for (const file of files) await uploadAndSendFile(file);
+  } finally {
+    if (attachBtn) attachBtn.disabled = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
 });
 
 async function uploadAndSendFile(file) {

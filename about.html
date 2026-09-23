@@ -97,6 +97,18 @@
         being blocked again immediately. You are never blocked from your own rooms.
       </p>
 
+      <h2>Photos and videos</h2>
+      <p class="muted">
+        The filters above read text, and an attachment is only a link to encrypted bytes, so nothing in the room
+        ever reads the picture. Instead every photo and video you attach is checked on your own machine before it
+        is uploaded, and an explicit one is refused rather than sent. Videos are sampled across several frames.
+        The model runs locally and nothing about your files leaves the machine.
+      </p>
+      <p class="muted">
+        Like the text filters, this is your copy doing the work. Someone running a modified build can skip it,
+        which is what blocking and reporting are for.
+      </p>
+
       <h2>Blocking and reporting</h2>
       <p class="muted">
         Open anyone's profile from a message or the member list to block or report them.
