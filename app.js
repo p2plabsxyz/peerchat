@@ -805,8 +805,10 @@ async function saveDrafts() {
   } catch (e) { console.error("saveDrafts error:", e); }
 }
 
-function isImageFile(name) { return /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(name); }
-function isVideoFile(name) { return /\.(mp4|webm|mov|ogg)$/i.test(name); }
+// Kept in step with IMAGE_EXT and VIDEO_EXT in lib/media-scanner.js: a format
+// that renders but is not recognised by the screener uploads unchecked.
+function isImageFile(name) { return /\.(jpg|jpeg|png|gif|webp|svg|avif|heic|heif)$/i.test(name); }
+function isVideoFile(name) { return /\.(mp4|webm|mov|ogg|m4v|mkv|avi|3gp)$/i.test(name); }
 
 function updateTabTitle() {
   let total = 0;

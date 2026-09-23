@@ -176,6 +176,44 @@ describe("media moderation", () => {
     assert.match(fn, /Folders cannot be sent/);
   });
 
+  it("keeps what renders and what is screened in step", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    const scanner = await readFile(new URL("../lib/media-scanner.js", import.meta.url), "utf8");
+
+    // Pull the real regex literals out and run filenames through them, rather
+    // than comparing token lists: jpe?g and jpg|jpeg spell the same thing.
+    const literal = (src, label) => {
+      const raw = src.match(new RegExp(`${label}[^/]*?(/\\\\\\..+?/i)`))?.[1];
+      assert.ok(raw, `could not find the ${label} pattern`);
+      // eslint-disable-next-line no-eval
+      return eval(raw);
+    };
+    const renderImage = literal(app, "function isImageFile");
+    const renderVideo = literal(app, "function isVideoFile");
+    const screenImage = literal(scanner, "IMAGE_EXT =");
+    const screenVideo = literal(scanner, "VIDEO_EXT =");
+
+    // A format that renders but is not recognised by the screener uploads
+    // unchecked. That is exactly how heic slipped past.
+    const candidates = ["jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif",
+                        "mp4", "mov", "m4v", "webm", "mkv", "avi", "3gp", "ogg"];
+    for (const ext of candidates) {
+      const name = `holiday.${ext}`;
+      if (renderImage.test(name) && ext !== "svg") {
+        assert.ok(screenImage.test(name), `${ext} renders as an image but is never screened`);
+      }
+      if (renderVideo.test(name)) {
+        assert.ok(screenVideo.test(name), `${ext} renders as video but is never screened`);
+      }
+    }
+
+    // An iPhone writes these by default, so leaving them out missed the
+    // commonest photo on the platform.
+    for (const ext of ["heic", "heif", "avif"]) {
+      assert.ok(screenImage.test(`photo.${ext}`), `${ext} must be screened`);
+    }
+  });
+
   it("screens what arrived, not only what is sent", async () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
     const scanner = await readFile(new URL("../lib/media-scanner.js", import.meta.url), "utf8");
