@@ -14,6 +14,7 @@ import {
   screenUploadBatch,
 } from "./lib/media-moderation.js";
 import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
+import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 
 const S = {
   profile: null,
@@ -1407,19 +1408,37 @@ function makePreviewCard(preview) {
   const host = previewCardHost(preview);
   const title = typeof preview.title === "string" ? preview.title.trim() : "";
   const description = typeof preview.description === "string" ? preview.description.trim() : "";
-  if (!host && !title && !description) return null;
+  const assessment = assessLink(preview.url);
+  const warning = describeLinkRisk(assessment);
+  // A scam link often has no metadata to show, which is the moment the warning
+  // is worth most. Keep the card in that case so there is something to read.
+  if (!host && !title && !description && !warning) return null;
   const url = typeof preview.url === "string" && /^https?:\/\//i.test(preview.url) ? preview.url : "#";
   const card = document.createElement("a");
   card.className = "link-preview";
+  if (warning) card.classList.add(assessment.level === LINK_SUSPICIOUS ? "lp-unsafe" : "lp-opaque");
   card.target = "_blank";
   card.rel = "noopener noreferrer";
   card.href = url;
   const parts = [];
+  if (warning) parts.push(`<span class="lp-warn">${esc(warning)}</span>`);
   if (host) parts.push(`<span class="lp-host">${esc(host)}</span>`);
   if (title) parts.push(`<span class="lp-title">${esc(title)}</span>`);
   if (description) parts.push(`<span class="lp-desc">${esc(description)}</span>`);
   card.innerHTML = parts.join("");
   return card;
+}
+
+// Previews can be off, or the fetch can fail, and neither makes the link any
+// safer. Say it plainly when there is no card to hang the warning on.
+function makeLinkWarningNote(text) {
+  const assessment = assessLink(extractFirstLink(text));
+  const warning = describeLinkRisk(assessment);
+  if (!warning) return null;
+  const note = document.createElement("div");
+  note.className = `link-warning ${assessment.level === LINK_SUSPICIOUS ? "lp-unsafe" : "lp-opaque"}`;
+  note.textContent = warning;
+  return note;
 }
 
 function makeMsgEl(msg) {
@@ -1458,6 +1477,10 @@ function makeMsgEl(msg) {
 
   const previewCard = makePreviewCard(msg.preview);
   if (previewCard) bubble.appendChild(previewCard);
+  else {
+    const warningNote = makeLinkWarningNote(msg.message);
+    if (warningNote) bubble.appendChild(warningNote);
+  }
 
   const reactTrigger = document.createElement("button");
   reactTrigger.type = "button";

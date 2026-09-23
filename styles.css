@@ -485,6 +485,17 @@ html, body {
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.link-preview .lp-warn {
+  font-size: 0.72rem; font-weight: 600;
+}
+.link-preview.lp-unsafe { border-color: var(--danger); }
+.lp-unsafe .lp-warn, .link-warning.lp-unsafe { color: var(--danger); }
+.lp-opaque .lp-warn, .link-warning.lp-opaque { color: var(--muted); }
+.link-warning {
+  margin-top: 6px;
+  font-size: 0.72rem; font-weight: 600;
+  max-width: 380px;
+}
 
 .mention { background: var(--mention-bg); border-radius: 3px; padding: 0 3px; color: var(--accent); font-weight: 500; cursor: pointer; }
 
