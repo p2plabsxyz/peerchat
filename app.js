@@ -10,9 +10,10 @@ import {
   describeTooManyFiles,
   isTooManyFiles,
   MAX_UPLOAD_BATCH,
+  MEDIA_BLOCKED,
   screenUploadBatch,
 } from "./lib/media-moderation.js";
-import { scanMediaFile } from "./lib/media-scanner.js";
+import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 
 const S = {
   profile: null,
@@ -490,13 +491,47 @@ function encryptedAttachmentHtml(url, msg) {
   return `<${tag} class="msg-file-img" data-enc-src="${esc(url)}" data-file-room="${roomRefs.ref(roomKey)}" data-file-name="${esc(name)}"${extra}></${tag}>`;
 }
 
+function replaceWithNotice(el, text, className) {
+  el.replaceWith(Object.assign(document.createElement("span"), { className, textContent: text }));
+}
+
+// Screens what arrived, not only what is sent. The sending side can be stripped
+// out by anyone running a modified build, which is why the text filters check
+// inbound messages too.
+async function screenIncomingMedia(el, src) {
+  const kind = el.tagName === "VIDEO" ? "video" : "image";
+  const verdict = await scanMediaUrl(src, kind);
+  if (verdict === MEDIA_BLOCKED) {
+    replaceWithNotice(el, "Hidden: this looks explicit", "msg-media-blocked");
+    return;
+  }
+  el.src = src;
+}
+
+// Your own upload was already screened before it was sent, so re-checking it
+// on your own screen only means seeing your own picture hidden from you.
+function isOwnMessageMedia(el) {
+  return !!el.closest(".msg-right");
+}
+
 function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("[data-enc-src]")) {
     const url = el.getAttribute("data-enc-src");
     el.removeAttribute("data-enc-src");
+    const own = isOwnMessageMedia(el);
     resolveDecryptedUrl(url, roomRefs.key(el.getAttribute("data-file-room")), el.getAttribute("data-file-name"))
-      .then((src) => { el.src = src; })
-      .catch(() => { el.replaceWith(Object.assign(document.createElement("span"), { className: "muted small", textContent: "Attachment could not be decrypted" })); });
+      .then((src) => (own ? (el.src = src) : screenIncomingMedia(el, src)))
+      .catch(() => { replaceWithNotice(el, "Attachment could not be decrypted", "muted small"); });
+  }
+
+  // Unencrypted attachments come straight off a drive, so they are screened
+  // where they are rendered rather than after a decrypt.
+  for (const el of root.querySelectorAll("img.msg-file-img[src], video.msg-file-img[src]")) {
+    if (el.dataset.screened) continue;
+    el.dataset.screened = "1";
+    if (isOwnMessageMedia(el)) continue;
+    const src = el.getAttribute("src");
+    if (src) void screenIncomingMedia(el, src);
   }
 }
 
@@ -2869,7 +2904,21 @@ $("emoji-btn")?.addEventListener("click", (e) => {
 $("file-input")?.addEventListener("change", async (e) => {
   const files = [...(e.target.files || [])];
   e.target.value = "";
-  if (files.length === 0 || !S.activeRoom) return;
+  await screenAndUploadFiles(files);
+});
+
+// The one function every attachment path funnels through: the picker, and
+// drag-and-drop, which used to go straight to the upload and skip the screen
+// entirely. Screening at each entry point is how a new one gets missed.
+async function screenAndUploadFiles(selected) {
+  if (!S.activeRoom) return;
+  // A dropped folder arrives as a 0-byte pseudo-file, not its contents. There
+  // is no directory upload here; refuse it rather than upload an empty entry.
+  const files = (selected || []).filter((file) => file && file.size > 0);
+  if (files.length === 0) {
+    if ((selected || []).length > 0) alert("Folders cannot be sent. Pick the files inside it instead.");
+    return;
+  }
 
   if (isTooManyFiles(files.length)) {
     alert(describeTooManyFiles(files.length));
@@ -2898,7 +2947,14 @@ $("file-input")?.addEventListener("change", async (e) => {
     if (attachBtn) attachBtn.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
   }
-});
+}
+
+// A profile or room picture is broadcast to every peer, so it goes through the
+// same check as an attachment. Refused rather than uploaded, same as mobile.
+async function refuseIfExplicit(file) {
+  const decision = screenUploadBatch([{ fileName: file.name, verdict: await scanMediaFile(file) }]);
+  if (!decision.allowed) throw new Error(decision.reason);
+}
 
 async function uploadAndSendFile(file) {
   const roomKey = S.activeRoom;
@@ -2950,8 +3006,8 @@ if (msgArea) {
   });
   msgArea.addEventListener("drop", async (e) => {
     e.preventDefault(); $("dropzone").style.display = "none";
-    const file = e.dataTransfer?.files?.[0];
-    if (file && S.activeRoom) await uploadAndSendFile(file);
+    // Every dropped file, through the same screen as the picker.
+    await screenAndUploadFiles([...(e.dataTransfer?.files || [])]);
   });
 }
 
@@ -2959,6 +3015,7 @@ $("set-avatar-input")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
+    await refuseIfExplicit(file);
     pendingAvatar = await resizeImage(file);
     $("set-avatar-preview").src = pendingAvatar;
   } catch (err) { alert(err.message); }
@@ -2968,6 +3025,7 @@ $("new-room-avatar-input")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
+    await refuseIfExplicit(file);
     pendingRoomAvatar = await resizeImage(file);
     $("new-room-avatar-preview").src = pendingRoomAvatar;
   } catch (err) { alert(err.message); }

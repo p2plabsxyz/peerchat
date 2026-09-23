@@ -7,7 +7,6 @@ import { stat } from "node:fs/promises";
 
 import {
   describeTooManyFiles,
-  EXPLICIT_THRESHOLD,
   isTooManyFiles,
   MAX_UPLOAD_BATCH,
   MEDIA_ALLOWED,
@@ -20,19 +19,33 @@ import {
 } from "../lib/media-moderation.js";
 
 describe("media moderation", () => {
-  it("refuses the explicit classes and lets the rest through", () => {
-    const at = (className, probability) => [{ className, probability }];
-    assert.equal(verdictFromPredictions(at("Porn", 0.97)), MEDIA_BLOCKED);
-    assert.equal(verdictFromPredictions(at("Hentai", 0.8)), MEDIA_BLOCKED);
-    assert.equal(verdictFromPredictions(at("Neutral", 0.99)), MEDIA_ALLOWED);
-    assert.equal(verdictFromPredictions(at("Drawing", 0.99)), MEDIA_ALLOWED);
+  it("refuses a photo however the model divides up its score", () => {
+    const at = (scores) => Object.entries(scores).map(([className, probability]) => ({ className, probability }));
 
-    // Sexy is swimwear and underwear. Refusing it would refuse a beach photo.
-    assert.equal(verdictFromPredictions(at("Sexy", 0.99)), MEDIA_ALLOWED);
+    // Clearly explicit.
+    assert.equal(verdictFromPredictions(at({ Porn: 0.97, Neutral: 0.03 })), MEDIA_BLOCKED);
+    assert.equal(verdictFromPredictions(at({ Hentai: 0.8, Neutral: 0.2 })), MEDIA_BLOCKED);
 
-    // Just under the line is not a refusal; the model is not that certain.
-    assert.equal(verdictFromPredictions(at("Porn", EXPLICIT_THRESHOLD - 0.01)), MEDIA_ALLOWED);
-    assert.equal(verdictFromPredictions(at("Porn", EXPLICIT_THRESHOLD)), MEDIA_BLOCKED);
+    // Nudity usually lands here, which is most of what actually gets posted.
+    assert.equal(verdictFromPredictions(at({ Sexy: 0.85, Neutral: 0.15 })), MEDIA_BLOCKED);
+
+    // And the case that made this necessary: a split where no single class
+    // looks decisive on its own but the photo is plainly not safe.
+    assert.equal(verdictFromPredictions(at({ Porn: 0.3, Sexy: 0.45, Neutral: 0.25 })), MEDIA_BLOCKED);
+    assert.equal(verdictFromPredictions(at({ Porn: 0.25, Hentai: 0.25, Neutral: 0.5 })), MEDIA_BLOCKED);
+
+    // Ordinary photos still go through.
+    assert.equal(verdictFromPredictions(at({ Neutral: 0.99, Sexy: 0.01 })), MEDIA_ALLOWED);
+    assert.equal(verdictFromPredictions(at({ Drawing: 0.95, Neutral: 0.05 })), MEDIA_ALLOWED);
+
+    // A beach photo scores some Sexy without being nudity.
+    assert.equal(verdictFromPredictions(at({ Sexy: 0.5, Neutral: 0.45, Drawing: 0.05 })), MEDIA_ALLOWED);
+  });
+
+  it("can be tuned without editing the rule", () => {
+    const split = [{ className: "Sexy", probability: 0.5 }, { className: "Neutral", probability: 0.5 }];
+    assert.equal(verdictFromPredictions(split), MEDIA_ALLOWED);
+    assert.equal(verdictFromPredictions(split, { combined: 0.4 }), MEDIA_BLOCKED);
   });
 
   it("says nothing rather than allowing when there is nothing to go on", () => {
@@ -97,10 +110,88 @@ describe("media moderation", () => {
 
     // Scan all, decide once, then upload. Uploading as we go would leave half
     // a batch in the room when the third file is refused.
-    const scanAt = handler.indexOf("scanMediaFile");
-    const uploadAt = handler.indexOf("uploadAndSendFile");
+    // Anchor on the real call, not the bare name, so a comment cannot fool it.
+    const scanAt = handler.indexOf("await scanMediaFile(file)");
+    const uploadAt = handler.indexOf("await uploadAndSendFile(file)");
     assert.ok(scanAt > -1 && uploadAt > scanAt, "the upload must come after the scan");
     assert.match(handler, /screenUploadBatch/);
     assert.match(handler, /isTooManyFiles/);
+  });
+
+  it("detects an image by its extension when the file has no MIME type", async () => {
+    const scanner = await readFile(new URL("../lib/media-scanner.js", import.meta.url), "utf8");
+    const fn = scanner.slice(scanner.indexOf("export async function scanMediaFile"));
+
+    // A picked file often arrives with an empty file.type. Gating on that alone
+    // let an explicit image with no MIME type past the upload check, and it was
+    // only caught on the way back in.
+    assert.match(fn, /!type && IMAGE_EXT\.test\(name\)/);
+    assert.match(fn, /!type && VIDEO_EXT\.test\(name\)/);
+    assert.match(scanner, /IMAGE_EXT = .*jpe\?g/);
+  });
+
+  it("does not hide the sender's own media back to them", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    const hydrate = app.slice(app.indexOf("function hydrateEncryptedMedia"), app.indexOf("function legacyAttachmentHtml"));
+
+    // The sender already screened it on the way out, so re-checking on their own
+    // screen only means seeing their own picture hidden from them.
+    assert.match(app, /function isOwnMessageMedia\(el\)/);
+    assert.match(app, /el\.closest\("\.msg-right"\)/);
+    assert.match(hydrate, /own \? \(el\.src = src\) : screenIncomingMedia/);
+    assert.match(hydrate, /if \(isOwnMessageMedia\(el\)\) continue/);
+  });
+
+  it("funnels every way in through the same screen", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+
+    // Drag-and-drop used to call uploadAndSendFile directly and skip the screen
+    // entirely. Now the picker and the drop path share one function, and the
+    // upload call lives only inside it.
+    assert.match(app, /async function screenAndUploadFiles\(selected\)/);
+    const drop = app.slice(app.indexOf('msgArea.addEventListener("drop"'), app.indexOf("$(\"set-avatar-input\")"));
+    assert.match(drop, /screenAndUploadFiles\(\[\.\.\.\(e\.dataTransfer\?\.files \|\| \[\]\)\]\)/);
+    assert.doesNotMatch(drop, /uploadAndSendFile\(/);
+    // ... and it takes every dropped file, not just the first.
+    assert.doesNotMatch(drop, /files\?\.\[0\]/);
+    assert.equal((app.match(/await uploadAndSendFile\(file\)/g) || []).length, 1, "uploads happen in exactly one place");
+
+    // A profile or room picture is broadcast to every peer, so both go through
+    // the check too, before they are even resized.
+    for (const input of ["set-avatar-input", "new-room-avatar-input"]) {
+      const handler = app.slice(app.indexOf(`$("${input}")?.addEventListener`));
+      const guard = handler.indexOf("await refuseIfExplicit(file)");
+      const resize = handler.indexOf("await resizeImage(file)");
+      assert.ok(guard > -1 && guard < resize, `${input} must be screened before it is resized`);
+    }
+  });
+
+  it("refuses a dropped folder instead of uploading an empty entry", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
+
+    // There is no directory upload. A dropped folder arrives as a 0-byte
+    // pseudo-file, not its contents, so it is filtered out and named as such.
+    assert.match(fn, /filter\(\(file\) => file && file\.size > 0\)/);
+    assert.match(fn, /Folders cannot be sent/);
+  });
+
+  it("screens what arrived, not only what is sent", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    const scanner = await readFile(new URL("../lib/media-scanner.js", import.meta.url), "utf8");
+
+    // The sending side can be stripped out by anyone running a modified build,
+    // which is why the text filters check inbound messages too.
+    assert.match(scanner, /export async function scanMediaUrl/);
+    const hydrate = app.slice(app.indexOf("async function screenIncomingMedia"), app.indexOf("function hydrateEncryptedMedia"));
+    assert.match(hydrate, /await scanMediaUrl\(src, kind\)/);
+
+    // The picture must not be shown before the verdict is in.
+    assert.ok(hydrate.indexOf("scanMediaUrl") < hydrate.indexOf("el.src = src"));
+    assert.match(hydrate, /MEDIA_BLOCKED/);
+
+    // Both the encrypted and the plain path go through it.
+    const hydrateBody = app.slice(app.indexOf("function hydrateEncryptedMedia"), app.indexOf("function legacyAttachmentHtml"));
+    assert.equal((hydrateBody.match(/screenIncomingMedia/g) || []).length, 2);
   });
 });

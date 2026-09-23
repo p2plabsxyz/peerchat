@@ -727,6 +727,13 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem;
 }
 
+.msg-media-blocked {
+  display: inline-block; padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--base01); color: var(--danger);
+  font-size: 0.85rem; font-weight: 600;
+}
+
 /* Blocking and reporting */
 .user-info-safety {
   display: flex; justify-content: center; gap: 1rem;
