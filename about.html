@@ -97,6 +97,55 @@
         being blocked again immediately. You are never blocked from your own rooms.
       </p>
 
+      <h2>What is blocked for everyone</h2>
+      <p class="muted">
+        These are on for everyone and there is nothing to switch on:
+      </p>
+      <ul>
+        <li><strong>Nudity in pictures and video</strong>: refused before it is sent, and checked again when it
+          arrives. Covers attachments, dropped files, your profile picture and a room picture.</li>
+        <li><strong>Abuse and threats</strong> in text, on by default per room.</li>
+        <li><strong>Profanity and slurs</strong> in text, on by default per room.</li>
+        <li><strong>Adult domain links</strong>, always, not toggleable.</li>
+        <li><strong>Spam bursts</strong>, with a per-room rate limit.</li>
+        <li><strong>Scam links</strong>: a link whose address is built to impersonate a real site is
+          marked under its preview. The link still opens if you decide to open it.</li>
+      </ul>
+      <p class="muted">
+        <strong>Not detected:</strong> violent or graphic images, injury and death. No workable model for that
+        exists that could run on your own machine, and PeerChat will not send your pictures to a company to have
+        them checked. Blocking and reporting are what to use for those.
+      </p>
+
+      <h2>Photos and videos</h2>
+      <p class="muted">
+        The filters above read text, and an attachment is only a link to encrypted bytes, so nothing in the room
+        ever reads the picture. Instead every photo and video you attach is checked on your own machine before it
+        is uploaded, and an explicit one is refused rather than sent. Videos are sampled across several frames.
+        The model runs locally and nothing about your files leaves the machine.
+      </p>
+      <p class="muted">
+        Every way a picture gets in is checked the same way: the attach button, a file dropped onto the chat, your
+        profile picture and a room picture. There is no folder upload; a dropped folder is refused, so pick the
+        files inside it. Pictures that arrive are checked as well, not only the ones you send. Someone running a modified build
+        could skip the check on their side, so your copy has its own say before anything is shown to you. That is
+        the same thing the text filters do with incoming messages.
+      </p>
+
+      <h2>Blocking and reporting</h2>
+      <p class="muted">
+        Open anyone's profile from a message or the member list to block or report them.
+      </p>
+      <ul>
+        <li><strong>Block</strong> closes direct messages from that person, both ways, and drops any request of
+          theirs still waiting. They keep appearing in rooms you both belong to, the same as in any other
+          messenger, and they are told their direct messages are blocked rather than left waiting on a reply that
+          never comes. The list of people you have blocked, with unblock, is in Settings.</li>
+        <li><strong>Report</strong> opens an email to the maintainers with the person's name, peer ID and room
+          filled in. Nobody runs PeerChat, so no one can delete a message for you; blocking is what actually stops
+          contact.</li>
+      </ul>
+
       <h2>Security</h2>
       <p class="muted" style="margin-bottom: 0.5rem">These apps solve different problems; the table is to set expectations, not to pick a “winner.”</p>
       <table>

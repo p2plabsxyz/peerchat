@@ -6,6 +6,15 @@ import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttach
 import { stickToBottom } from "./lib/scroll.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
+import {
+  describeTooManyFiles,
+  isTooManyFiles,
+  MAX_UPLOAD_BATCH,
+  MEDIA_BLOCKED,
+  screenUploadBatch,
+} from "./lib/media-moderation.js";
+import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
+import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 
 const S = {
   profile: null,
@@ -18,7 +27,10 @@ const S = {
   reactionNotified: {},
   settings: { sounds: true, notifications: true },
   pendingDMs: {},
+  blockedPeers: [],
 };
+
+const REPORT_EMAIL = "contact@p2plabs.xyz";
 
 const REACT_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 const AUTO_INLINE_PREVIEW_MAX_BYTES = 100 * 1024 * 1024;
@@ -480,13 +492,47 @@ function encryptedAttachmentHtml(url, msg) {
   return `<${tag} class="msg-file-img" data-enc-src="${esc(url)}" data-file-room="${roomRefs.ref(roomKey)}" data-file-name="${esc(name)}"${extra}></${tag}>`;
 }
 
+function replaceWithNotice(el, text, className) {
+  el.replaceWith(Object.assign(document.createElement("span"), { className, textContent: text }));
+}
+
+// Screens what arrived, not only what is sent. The sending side can be stripped
+// out by anyone running a modified build, which is why the text filters check
+// inbound messages too.
+async function screenIncomingMedia(el, src) {
+  const kind = el.tagName === "VIDEO" ? "video" : "image";
+  const verdict = await scanMediaUrl(src, kind);
+  if (verdict === MEDIA_BLOCKED) {
+    replaceWithNotice(el, "Hidden: this looks explicit", "msg-media-blocked");
+    return;
+  }
+  el.src = src;
+}
+
+// Your own upload was already screened before it was sent, so re-checking it
+// on your own screen only means seeing your own picture hidden from you.
+function isOwnMessageMedia(el) {
+  return !!el.closest(".msg-right");
+}
+
 function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("[data-enc-src]")) {
     const url = el.getAttribute("data-enc-src");
     el.removeAttribute("data-enc-src");
+    const own = isOwnMessageMedia(el);
     resolveDecryptedUrl(url, roomRefs.key(el.getAttribute("data-file-room")), el.getAttribute("data-file-name"))
-      .then((src) => { el.src = src; })
-      .catch(() => { el.replaceWith(Object.assign(document.createElement("span"), { className: "muted small", textContent: "Attachment could not be decrypted" })); });
+      .then((src) => (own ? (el.src = src) : screenIncomingMedia(el, src)))
+      .catch(() => { replaceWithNotice(el, "Attachment could not be decrypted", "muted small"); });
+  }
+
+  // Unencrypted attachments come straight off a drive, so they are screened
+  // where they are rendered rather than after a decrypt.
+  for (const el of root.querySelectorAll("img.msg-file-img[src], video.msg-file-img[src]")) {
+    if (el.dataset.screened) continue;
+    el.dataset.screened = "1";
+    if (isOwnMessageMedia(el)) continue;
+    const src = el.getAttribute("src");
+    if (src) void screenIncomingMedia(el, src);
   }
 }
 
@@ -760,8 +806,10 @@ async function saveDrafts() {
   } catch (e) { console.error("saveDrafts error:", e); }
 }
 
-function isImageFile(name) { return /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(name); }
-function isVideoFile(name) { return /\.(mp4|webm|mov|ogg)$/i.test(name); }
+// Kept in step with IMAGE_EXT and VIDEO_EXT in lib/media-scanner.js: a format
+// that renders but is not recognised by the screener uploads unchecked.
+function isImageFile(name) { return /\.(jpg|jpeg|png|gif|webp|svg|avif|heic|heif)$/i.test(name); }
+function isVideoFile(name) { return /\.(mp4|webm|mov|ogg|m4v|mkv|avi|3gp)$/i.test(name); }
 
 function updateTabTitle() {
   let total = 0;
@@ -894,6 +942,7 @@ async function loadRooms() {
   S.peerProfiles = data.peerProfiles || {};
   S.onlinePeers = new Set(data.onlinePeers || []);
   S.pendingDMs = data.pendingDMs || {};
+  S.blockedPeers = data.blockedPeers || [];
   const next = {};
   for (const r of data.rooms) {
     next[r.roomKey] = r;
@@ -1112,7 +1161,35 @@ function applyDMComposerGate(roomKey) {
   const messageInput = $("message-input");
   const sendBtn = $("send-btn");
   if (!room || !messageInput || !sendBtn) return;
-  if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
+  const banner = $("dm-blocked-banner");
+  const blockedByPeer = !!(room.isDM && room.blockedByPeer);
+  const blockedByMe = !!(room.isDM && room.dmWith && isPeerBlocked(room.dmWith));
+
+  // Messaging someone offline is allowed. There is no server holding the
+  // message, so it only moves while both sides are running.
+  const offlineNote = $("dm-offline-note");
+  if (offlineNote) {
+    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe &&
+      !S.onlinePeers.has(room.dmWith));
+    offlineNote.style.display = peerOffline ? "" : "none";
+    if (peerOffline) {
+      const peerName = S.peerProfiles[room.dmWith]?.username || room.name || room.dmWith;
+      offlineNote.textContent =
+        `${peerName} is offline. Your message arrives the next time you are both online, so keep PeerSky running.`;
+    }
+  }
+
+  if (banner) {
+    banner.style.display = blockedByPeer || blockedByMe ? "" : "none";
+    banner.textContent = blockedByMe
+      ? "You blocked this person. Unblock them in Settings to message them again."
+      : "This person blocked your direct messages. Open their profile and press Message to ask again.";
+  }
+  if (blockedByPeer || blockedByMe) {
+    messageInput.disabled = true;
+    messageInput.placeholder = blockedByMe ? "You blocked this person." : "This person blocked your direct messages.";
+    sendBtn.disabled = true;
+  } else if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
     messageInput.disabled = true;
     messageInput.placeholder = "Waiting for the other peer to accept your message request...";
     sendBtn.disabled = true;
@@ -1331,19 +1408,37 @@ function makePreviewCard(preview) {
   const host = previewCardHost(preview);
   const title = typeof preview.title === "string" ? preview.title.trim() : "";
   const description = typeof preview.description === "string" ? preview.description.trim() : "";
-  if (!host && !title && !description) return null;
+  const assessment = assessLink(preview.url);
+  const warning = describeLinkRisk(assessment);
+  // A scam link often has no metadata to show, which is the moment the warning
+  // is worth most. Keep the card in that case so there is something to read.
+  if (!host && !title && !description && !warning) return null;
   const url = typeof preview.url === "string" && /^https?:\/\//i.test(preview.url) ? preview.url : "#";
   const card = document.createElement("a");
   card.className = "link-preview";
+  if (warning) card.classList.add(assessment.level === LINK_SUSPICIOUS ? "lp-unsafe" : "lp-opaque");
   card.target = "_blank";
   card.rel = "noopener noreferrer";
   card.href = url;
   const parts = [];
+  if (warning) parts.push(`<span class="lp-warn">${esc(warning)}</span>`);
   if (host) parts.push(`<span class="lp-host">${esc(host)}</span>`);
   if (title) parts.push(`<span class="lp-title">${esc(title)}</span>`);
   if (description) parts.push(`<span class="lp-desc">${esc(description)}</span>`);
   card.innerHTML = parts.join("");
   return card;
+}
+
+// Previews can be off, or the fetch can fail, and neither makes the link any
+// safer. Say it plainly when there is no card to hang the warning on.
+function makeLinkWarningNote(text) {
+  const assessment = assessLink(extractFirstLink(text));
+  const warning = describeLinkRisk(assessment);
+  if (!warning) return null;
+  const note = document.createElement("div");
+  note.className = `link-warning ${assessment.level === LINK_SUSPICIOUS ? "lp-unsafe" : "lp-opaque"}`;
+  note.textContent = warning;
+  return note;
 }
 
 function makeMsgEl(msg) {
@@ -1382,6 +1477,10 @@ function makeMsgEl(msg) {
 
   const previewCard = makePreviewCard(msg.preview);
   if (previewCard) bubble.appendChild(previewCard);
+  else {
+    const warningNote = makeLinkWarningNote(msg.message);
+    if (warningNote) bubble.appendChild(warningNote);
+  }
 
   const reactTrigger = document.createElement("button");
   reactTrigger.type = "button";
@@ -1872,6 +1971,8 @@ function connectGlobalSSE() {
       }
       updateRoomPeerCount(S.activeRoom);
       renderRoomList();
+      // The offline note in a direct room hangs off this.
+      applyDMComposerGate(S.activeRoom);
     } catch {}
   });
 
@@ -1953,6 +2054,20 @@ function connectGlobalSSE() {
           applyDMComposerGate(roomKey);
         }
       }
+    } catch {}
+  });
+
+  es.addEventListener("dm-blocked", (ev) => {
+    touch();
+    try {
+      const { roomKey } = JSON.parse(ev.data);
+      const room = S.rooms[roomKey];
+      if (!room?.isDM) return;
+      room.pendingAcceptance = false;
+      room.blockedByPeer = true;
+      delete S.pendingDMs?.[roomKey];
+      renderRoomList();
+      applyDMComposerGate(roomKey);
     } catch {}
   });
 
@@ -2232,6 +2347,15 @@ $("chat-header-main")?.addEventListener("click", () => {
   if (!S.activeRoom) return;
   const room = S.rooms[S.activeRoom];
   if (!room) return;
+
+  // A direct message has no room to describe, only a person. Opening their
+  // profile puts Block and Report one click away instead of behind a member
+  // list of one.
+  if (room.isDM && room.dmWith) {
+    const peer = S.peerProfiles[room.dmWith] || {};
+    showUserInfo(room.dmWith, peer.username || room.name || room.dmWith);
+    return;
+  }
   $("ri-avatar").src = avatar(room.name, 64, room.avatar);
   $("ri-name").textContent = room.name;
   $("ri-bio").textContent = room.bio || "No description";
@@ -2380,10 +2504,104 @@ function showUserInfo(senderId, displayName) {
   const member = room?.members?.[senderId];
   $("ui-joined").textContent = member?.joinedAt ? `Joined ${formatDate(member.joinedAt)}` : "";
 
+  const isSelf = senderId === S.profile?.id;
+  const blocked = isPeerBlocked(senderId);
+
   const msgBtn = $("ui-message-btn");
-  if (msgBtn) msgBtn.style.display = senderId === S.profile?.id ? "none" : "";
+  if (msgBtn) {
+    msgBtn.style.display = isSelf ? "none" : "";
+    // Offline is fine: the invite is re-sent by shareDMInvites the moment they
+    // reconnect, so the room opens now and the note in it explains the wait.
+    msgBtn.disabled = blocked;
+    msgBtn.textContent = blocked ? "Blocked" : "Message";
+  }
+
+  const safety = document.querySelector(".user-info-safety");
+  if (safety) safety.style.display = isSelf ? "none" : "";
+  const blockBtn = $("ui-block-btn");
+  if (blockBtn) {
+    blockBtn.textContent = blocked ? "Unblock" : "Block direct messages";
+    blockBtn.title = blocked
+      ? "Lets this person send you direct messages again"
+      : "Stops direct messages from this person. They can still see you in shared rooms.";
+  }
 
   openModal("user-info-modal");
+}
+
+function isPeerBlocked(peerId) {
+  const id = String(peerId || "").toLowerCase();
+  return !!id && S.blockedPeers.some((entry) => entry.peerId === id);
+}
+
+async function blockPeer(peerId, username) {
+  try {
+    const result = await chat.blockPeer({ peerId, username });
+    S.blockedPeers = result.blockedPeers || [];
+    S.pendingDMs = result.pendingDMs || {};
+    closeAllModals();
+    renderRoomList();
+    applyDMComposerGate(S.activeRoom);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function unblockPeer(peerId) {
+  try {
+    const result = await chat.unblockPeer({ peerId });
+    S.blockedPeers = result.blockedPeers || [];
+    renderBlockedList();
+    applyDMComposerGate(S.activeRoom);
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// Nobody runs PeerChat, so a report goes to the maintainers by email with
+// enough context to act on.
+function reportPeer(peerId, username) {
+  const room = S.rooms[S.activeRoom];
+  const subject = `PeerChat report: ${username || peerId}`;
+  const body = [
+    `Reported user: ${username || peerId}`,
+    `Peer ID: ${peerId}`,
+    `Room: ${room?.name || "unknown"}`,
+    `Room key: ${S.activeRoom || "unknown"}`,
+    `Reported at: ${new Date().toISOString()}`,
+    "",
+    "What happened?",
+    "",
+    "",
+    "Please describe the behaviour above. PeerChat is peer to peer, so nobody",
+    "can remove content for you, but blocking stops their direct messages.",
+  ].join("\n");
+  closeAllModals();
+  window.open(`mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
+}
+
+function renderBlockedList() {
+  const field = $("set-blocked-field");
+  const list = $("set-blocked-list");
+  if (!field || !list) return;
+  list.innerHTML = "";
+  if (!S.blockedPeers.length) {
+    field.style.display = "none";
+    return;
+  }
+  field.style.display = "";
+  for (const entry of S.blockedPeers) {
+    const row = document.createElement("div");
+    row.className = "blocked-row";
+    row.innerHTML = `<span>${esc(entry.username || entry.peerId)}</span>`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-secondary btn-sm";
+    btn.textContent = "Unblock";
+    btn.addEventListener("click", () => unblockPeer(entry.peerId));
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
 }
 
 async function dmRoomKey(id1, id2) {
@@ -2398,7 +2616,16 @@ async function openDM(peerId, peerUsername) {
   try {
     const roomKey = await dmRoomKey(myId, peerId);
     closeAllModals();
-    if (S.rooms[roomKey]) {
+    if (S.rooms[roomKey] && !S.rooms[roomKey].blockedByPeer) {
+      await openRoom(roomKey);
+      return;
+    }
+    // A room they blocked goes back through join-dm, which clears the flag and
+    // re-sends the request. Otherwise their unblock would never reach us.
+    if (S.rooms[roomKey]?.blockedByPeer) {
+      await chat.joinDM({ roomKey, toId: peerId, toUsername: peerUsername });
+      await loadRooms();
+      renderRoomList();
       await openRoom(roomKey);
       return;
     }
@@ -2460,6 +2687,20 @@ $("ui-message-btn")?.addEventListener("click", () => {
   if (_uiCurrentPeerId) openDM(_uiCurrentPeerId, _uiCurrentPeerName);
 });
 
+$("ui-block-btn")?.addEventListener("click", () => {
+  if (!_uiCurrentPeerId) return;
+  if (isPeerBlocked(_uiCurrentPeerId)) {
+    unblockPeer(_uiCurrentPeerId);
+    closeAllModals();
+    return;
+  }
+  blockPeer(_uiCurrentPeerId, _uiCurrentPeerName);
+});
+
+$("ui-report-btn")?.addEventListener("click", () => {
+  if (_uiCurrentPeerId) reportPeer(_uiCurrentPeerId, _uiCurrentPeerName);
+});
+
 $("dmi-accept")?.addEventListener("click", () => {
   if (_dmiRoomKey) acceptDM(_dmiRoomKey);
 });
@@ -2476,6 +2717,7 @@ $("settings-btn")?.addEventListener("click", () => {
   $("set-linkpreview").checked = S.settings.linkPreview;
   $("set-avatar-preview").src = avatar(S.profile?.username, 64, S.profile?.avatar);
   pendingAvatar = null;
+  renderBlockedList();
   openModal("settings-modal");
 });
 
@@ -2493,9 +2735,12 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     const profileTaken = Object.entries(S.peerProfiles).some(([id, p]) =>
       id !== S.profile?.id && !isSelfStale(id) && p.username?.toLowerCase() === lower
     );
-    const preRoom = PRE_JOINED_ROOM_KEY && S.rooms[PRE_JOINED_ROOM_KEY];
-    const memberTaken = preRoom && Object.entries(preRoom.members || {}).some(([id, m]) =>
-      id !== S.profile?.id && !isSelfStale(id) && m.username?.toLowerCase() === lower
+    // Every room, not just the welcome room. A name you share with someone in
+    // any room you are in reads as a different person in that room's history.
+    const memberTaken = Object.values(S.rooms).some((room) =>
+      Object.entries(room.members || {}).some(([id, m]) =>
+        id !== S.profile?.id && !isSelfStale(id) && m.username?.toLowerCase() === lower
+      )
     );
     if (profileTaken || memberTaken) {
       alert("Username is already taken. Please choose a different one.");
@@ -2691,11 +2936,59 @@ $("emoji-btn")?.addEventListener("click", (e) => {
 });
 
 $("file-input")?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
+  const files = [...(e.target.files || [])];
   e.target.value = "";
-  if (!file || !S.activeRoom) return;
-  await uploadAndSendFile(file);
+  await screenAndUploadFiles(files);
 });
+
+// The one function every attachment path funnels through: the picker, and
+// drag-and-drop, which used to go straight to the upload and skip the screen
+// entirely. Screening at each entry point is how a new one gets missed.
+async function screenAndUploadFiles(selected) {
+  if (!S.activeRoom) return;
+  // A dropped folder arrives as a 0-byte pseudo-file, not its contents. There
+  // is no directory upload here; refuse it rather than upload an empty entry.
+  const files = (selected || []).filter((file) => file && file.size > 0);
+  if (files.length === 0) {
+    if ((selected || []).length > 0) alert("Folders cannot be sent. Pick the files inside it instead.");
+    return;
+  }
+
+  if (isTooManyFiles(files.length)) {
+    alert(describeTooManyFiles(files.length));
+    return;
+  }
+
+  const sendBtn = $("send-btn");
+  const attachBtn = $("attach-btn");
+  if (attachBtn) attachBtn.disabled = true;
+  if (sendBtn) sendBtn.disabled = true;
+  try {
+    // Every file is checked before any of them is uploaded, so a refusal never
+    // leaves half a batch in the room.
+    const screened = await Promise.all(files.map(async (file) => ({
+      file,
+      fileName: file.name,
+      verdict: await scanMediaFile(file),
+    })));
+    const decision = screenUploadBatch(screened);
+    if (!decision.allowed) {
+      alert(decision.reason);
+      return;
+    }
+    for (const file of files) await uploadAndSendFile(file);
+  } finally {
+    if (attachBtn) attachBtn.disabled = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+// A profile or room picture is broadcast to every peer, so it goes through the
+// same check as an attachment. Refused rather than uploaded, same as mobile.
+async function refuseIfExplicit(file) {
+  const decision = screenUploadBatch([{ fileName: file.name, verdict: await scanMediaFile(file) }]);
+  if (!decision.allowed) throw new Error(decision.reason);
+}
 
 async function uploadAndSendFile(file) {
   const roomKey = S.activeRoom;
@@ -2747,8 +3040,8 @@ if (msgArea) {
   });
   msgArea.addEventListener("drop", async (e) => {
     e.preventDefault(); $("dropzone").style.display = "none";
-    const file = e.dataTransfer?.files?.[0];
-    if (file && S.activeRoom) await uploadAndSendFile(file);
+    // Every dropped file, through the same screen as the picker.
+    await screenAndUploadFiles([...(e.dataTransfer?.files || [])]);
   });
 }
 
@@ -2756,6 +3049,7 @@ $("set-avatar-input")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
+    await refuseIfExplicit(file);
     pendingAvatar = await resizeImage(file);
     $("set-avatar-preview").src = pendingAvatar;
   } catch (err) { alert(err.message); }
@@ -2765,6 +3059,7 @@ $("new-room-avatar-input")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
+    await refuseIfExplicit(file);
     pendingRoomAvatar = await resizeImage(file);
     $("new-room-avatar-preview").src = pendingRoomAvatar;
   } catch (err) { alert(err.message); }

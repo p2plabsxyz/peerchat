@@ -485,6 +485,17 @@ html, body {
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.link-preview .lp-warn {
+  font-size: 0.72rem; font-weight: 600;
+}
+.link-preview.lp-unsafe { border-color: var(--danger); }
+.lp-unsafe .lp-warn, .link-warning.lp-unsafe { color: var(--danger); }
+.lp-opaque .lp-warn, .link-warning.lp-opaque { color: var(--muted); }
+.link-warning {
+  margin-top: 6px;
+  font-size: 0.72rem; font-weight: 600;
+  max-width: 380px;
+}
 
 .mention { background: var(--mention-bg); border-radius: 3px; padding: 0 3px; color: var(--accent); font-weight: 500; cursor: pointer; }
 
@@ -725,6 +736,42 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 }
 .modal-actions {
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.5rem;
+}
+
+.msg-media-blocked {
+  display: inline-block; padding: 14px 16px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--base01); color: var(--danger);
+  font-size: 0.85rem; font-weight: 600;
+}
+
+/* Blocking and reporting */
+.user-info-safety {
+  display: flex; justify-content: center; gap: 1rem;
+  width: 100%; margin-top: 0.35rem;
+}
+.link-btn {
+  background: none; border: 0; padding: 0;
+  font-size: 0.8rem; cursor: pointer; text-decoration: underline;
+}
+.link-btn.danger { color: var(--danger); }
+.link-btn.muted { color: var(--muted); }
+.link-btn:hover { opacity: 0.8; }
+.blocked-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.blocked-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  padding: 6px 10px; border-radius: 6px; background: var(--base01);
+}
+.blocked-row span { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-offline-note {
+  padding: 8px 14px; font-size: 0.8rem; text-align: center;
+  color: var(--muted); background: var(--base01);
+  border-bottom: 1px solid var(--border);
+}
+.dm-blocked-banner {
+  padding: 8px 14px; font-size: 0.8rem; text-align: center;
+  color: var(--danger); background: var(--base01);
+  border-bottom: 1px solid var(--border);
 }
 
 /* Room / User info modals */
