@@ -2347,6 +2347,15 @@ $("chat-header-main")?.addEventListener("click", () => {
   if (!S.activeRoom) return;
   const room = S.rooms[S.activeRoom];
   if (!room) return;
+
+  // A direct message has no room to describe, only a person. Opening their
+  // profile puts Block and Report one click away instead of behind a member
+  // list of one.
+  if (room.isDM && room.dmWith) {
+    const peer = S.peerProfiles[room.dmWith] || {};
+    showUserInfo(room.dmWith, peer.username || room.name || room.dmWith);
+    return;
+  }
   $("ri-avatar").src = avatar(room.name, 64, room.avatar);
   $("ri-name").textContent = room.name;
   $("ri-bio").textContent = room.bio || "No description";
