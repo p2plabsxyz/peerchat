@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { stickToBottom } from "../lib/scroll.js";
+import { shouldScrollToUnread, stickToBottom } from "../lib/scroll.js";
 
 // A scroll container with the browser's clamping, driven by a manual frame
 // queue and clock so the loop's decisions are deterministic.
@@ -100,5 +100,48 @@ describe("stickToBottom", () => {
     stickToBottom(box, h.opts);
     h.tick();
     assert.equal(h.pending, 1, "only the newest loop keeps running");
+  });
+});
+
+// Opening a room with a couple of unread messages jumped to the divider above
+// them, which pulls the reader up from the message they came to see even though
+// it was already on screen.
+describe("shouldScrollToUnread", () => {
+  it("goes to the divider when the unread run starts off screen", () => {
+    assert.equal(
+      shouldScrollToUnread({ dividerTop: 100, scrollHeight: 3000, clientHeight: 500 }),
+      true,
+    );
+  });
+
+  it("stays at the newest message when the whole run already fits there", () => {
+    // Bottom sits at 2500, and the divider is below it, so the unread messages
+    // are in view without moving.
+    assert.equal(
+      shouldScrollToUnread({ dividerTop: 2700, scrollHeight: 3000, clientHeight: 500 }),
+      false,
+    );
+  });
+
+  it("stays put when the divider is exactly on the last screen", () => {
+    assert.equal(
+      shouldScrollToUnread({ dividerTop: 2500, scrollHeight: 3000, clientHeight: 500 }),
+      false,
+    );
+  });
+
+  it("stays put when the pane does not scroll at all", () => {
+    assert.equal(
+      shouldScrollToUnread({ dividerTop: 40, scrollHeight: 400, clientHeight: 500 }),
+      false,
+    );
+  });
+
+  it("has no opinion without a divider", () => {
+    assert.equal(shouldScrollToUnread({ scrollHeight: 3000, clientHeight: 500 }), false);
+    assert.equal(
+      shouldScrollToUnread({ dividerTop: -1, scrollHeight: 3000, clientHeight: 500 }),
+      false,
+    );
   });
 });

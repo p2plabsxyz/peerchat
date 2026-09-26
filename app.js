@@ -3,7 +3,7 @@ import { buildInviteUrl, parseInvite } from "./lib/invite.js";
 
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
-import { stickToBottom } from "./lib/scroll.js";
+import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
 import {
@@ -1283,6 +1283,7 @@ async function openRoom(roomKey) {
           const fresh = rooms.find(r => r.roomKey === roomKey);
           if (fresh) {
             Object.assign(S.rooms[roomKey], fresh);
+            if (ticket !== openRoomTicket || S.activeRoom !== roomKey) return;
             $("chat-room-name").textContent = fresh.name || roomKey.slice(0, 8) + "...";
             $("chat-room-avatar").src = avatar(fresh.name, 32, fresh.avatar);
             renderRoomList();
@@ -1293,6 +1294,8 @@ async function openRoom(roomKey) {
           $("chat-room-avatar").src = avatar(_r.name, 32, _r.avatar);
         }
         const { messages: freshMsgs } = await chat.getHistory(roomKey);
+        // getHistory can outlast the click that moved to another room.
+        if (ticket !== openRoomTicket || S.activeRoom !== roomKey) return;
         const bufLen = (S.messages[roomKey] || []).length;
         const msgContainer = $("messages");
         const domCount = msgContainer ? msgContainer.querySelectorAll(".message, .system-msg").length : 0;
@@ -1316,6 +1319,11 @@ function messageMatchesSearch(m, q) {
 }
 
 function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
+  // One pane, and every caller reaches this after an await. A render for a room
+  // that was left while its history was loading used to paint that room's
+  // messages over the one now open, which is how clicking a direct message
+  // could show the group you just came from.
+  if (S.activeRoom && roomKey !== S.activeRoom) return;
   const container = $("messages");
   const savedScroll = container.scrollTop;
   const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
@@ -1362,7 +1370,14 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
   }
   if (scrollToBottom) {
     const divider = document.getElementById("unread-divider");
-    if (divider) {
+    // Only when the unread run starts above the last screenful. Two new
+    // messages are already in view at the bottom, and going to the divider for
+    // those reads as being pulled up away from the newest one.
+    if (divider && shouldScrollToUnread({
+      dividerTop: divider.offsetTop,
+      scrollHeight: container.scrollHeight,
+      clientHeight: container.clientHeight,
+    })) {
       requestAnimationFrame(() => { divider.scrollIntoView({ block: "start" }); });
     } else {
       stickToBottom(container);
