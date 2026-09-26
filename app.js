@@ -4,6 +4,7 @@ import { buildInviteUrl, parseInvite } from "./lib/invite.js";
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
 import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
+import { createPresenceHold } from "./lib/presence.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
 import {
@@ -1397,6 +1398,29 @@ function mergeWithHistory(existing, incoming) {
   return combined;
 }
 
+const presenceHold = createPresenceHold();
+let presenceTimer = null;
+
+// Nothing else fires when a held peer finally drops off, so without this the
+// count would stay as it was until some unrelated event moved it.
+function schedulePresencePrune() {
+  if (presenceTimer) return;
+  const expiresAt = presenceHold.nextExpiryAt();
+  if (expiresAt === null) return;
+
+  presenceTimer = setTimeout(() => {
+    presenceTimer = null;
+    const dropped = presenceHold.prune();
+    if (dropped.length) {
+      for (const peerId of dropped) S.onlinePeers.delete(peerId);
+      updateRoomPeerCount(S.activeRoom);
+      renderRoomList();
+      applyDMComposerGate(S.activeRoom);
+    }
+    schedulePresencePrune();
+  }, Math.max(0, expiresAt - Date.now()));
+}
+
 function roomOnlineCount(roomKey) {
   const room = S.rooms[roomKey];
   if (!room) return 0;
@@ -1967,7 +1991,12 @@ function connectGlobalSSE() {
     touch();
     try {
       const { peers: ids } = JSON.parse(ev.data);
-      S.onlinePeers = new Set(ids || []);
+      const next = new Set(ids || []);
+      for (const id of next) presenceHold.online(id);
+      // A snapshot taken mid-redial would otherwise undo the hold.
+      for (const id of presenceHold.heldIds()) next.add(id);
+      S.onlinePeers = next;
+      schedulePresencePrune();
       loadRooms().then(() => {
         renderRoomList();
         updateRoomPeerCount(S.activeRoom);
@@ -1980,9 +2009,14 @@ function connectGlobalSSE() {
     try {
       const { peerId, isOnline } = JSON.parse(ev.data);
       if (isOnline) {
+        presenceHold.online(peerId);
         S.onlinePeers.add(peerId);
       } else {
-        S.onlinePeers.delete(peerId);
+        // Usually a redial. Keep them on screen until the grace runs out, and
+        // let the prune below take them off if they really have gone.
+        presenceHold.offline(peerId);
+        schedulePresencePrune();
+        return;
       }
       updateRoomPeerCount(S.activeRoom);
       renderRoomList();
@@ -2013,6 +2047,9 @@ function connectGlobalSSE() {
       const { roomKey, peerId } = JSON.parse(ev.data);
       const room = S.rooms[roomKey];
       if (room?.members?.[peerId]) delete room.members[peerId];
+      // Leaving a room is a decision, not a dropped socket.
+      presenceHold.forget(peerId);
+      S.onlinePeers.delete(peerId);
       updateRoomPeerCount(roomKey);
       renderRoomList();
     } catch {}
