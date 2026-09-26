@@ -5,6 +5,7 @@ import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
 import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { createPresenceHold } from "./lib/presence.js";
+import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
 import {
@@ -1300,7 +1301,17 @@ async function openRoom(roomKey) {
         const bufLen = (S.messages[roomKey] || []).length;
         const msgContainer = $("messages");
         const domCount = msgContainer ? msgContainer.querySelectorAll(".message, .system-msg").length : 0;
-        if (freshMsgs && (freshMsgs.length > bufLen || (bufLen > 0 && domCount < bufLen))) {
+        // Counted the way the buffer is counted. The raw history carries
+        // reactions and empty entries that never reach the pane, and comparing
+        // against those made every room with a reaction in it rebuild itself
+        // every two seconds, which is what made the pictures blink.
+        const freshCount = (freshMsgs || []).filter(chatMessageRenders).length;
+        if (freshMsgs && shouldRerenderMessages({
+          freshCount,
+          bufferedCount: bufLen,
+          domCount,
+          searching: Boolean(messageSearchQuery.trim()),
+        })) {
           S.messages[roomKey] = extractReactions(roomKey, mergeWithHistory(S.messages[roomKey], freshMsgs));
           renderMessages(roomKey, false);
         }
@@ -2047,9 +2058,6 @@ function connectGlobalSSE() {
       const { roomKey, peerId } = JSON.parse(ev.data);
       const room = S.rooms[roomKey];
       if (room?.members?.[peerId]) delete room.members[peerId];
-      // Leaving a room is a decision, not a dropped socket.
-      presenceHold.forget(peerId);
-      S.onlinePeers.delete(peerId);
       updateRoomPeerCount(roomKey);
       renderRoomList();
     } catch {}
