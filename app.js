@@ -3024,17 +3024,22 @@ async function screenAndUploadFiles(selected) {
   if (attachBtn) attachBtn.disabled = true;
   if (sendBtn) sendBtn.disabled = true;
   try {
-    // Every file is checked before any of them is uploaded, so a refusal never
-    // leaves half a batch in the room.
-    const screened = await Promise.all(files.map(async (file) => ({
-      file,
-      fileName: file.name,
-      verdict: await scanMediaFile(file),
-    })));
-    const decision = screenUploadBatch(screened);
-    if (!decision.allowed) {
-      alert(decision.reason);
-      return;
+    // A room shows a picture to everyone in it at once, which is what the
+    // screen is for. A direct message reaches one person, who can block the
+    // sender, so it goes the way mobile sends it: unscreened.
+    if (!S.rooms[S.activeRoom]?.isDM) {
+      // Every file is checked before any of them is uploaded, so a refusal
+      // never leaves half a batch in the room.
+      const screened = await Promise.all(files.map(async (file) => ({
+        file,
+        fileName: file.name,
+        verdict: await scanMediaFile(file),
+      })));
+      const decision = screenUploadBatch(screened);
+      if (!decision.allowed) {
+        alert(decision.reason);
+        return;
+      }
     }
     for (const file of files) await uploadAndSendFile(file);
   } finally {

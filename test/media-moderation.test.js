@@ -166,6 +166,27 @@ describe("media moderation", () => {
     }
   });
 
+  // A room shows a picture to everyone in it at once, which is what the screen
+  // is for. A direct message reaches one person, who can block the sender, and
+  // mobile already sends those unscreened.
+  it("screens a room upload and lets a direct message through, same as mobile", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
+
+    const guard = fn.indexOf("if (!S.rooms[S.activeRoom]?.isDM)");
+    const scan = fn.indexOf("await scanMediaFile(file)");
+    const upload = fn.indexOf("await uploadAndSendFile(file)");
+    assert.ok(guard > -1, "the direct message case has to be asked about");
+    assert.ok(guard < scan, "the scan sits inside the guard");
+    assert.ok(scan < upload, "and still runs before anything is uploaded");
+
+    // The batch cap is not a content check, so it applies either way.
+    assert.ok(fn.indexOf("isTooManyFiles(files.length)") < guard);
+
+    // A profile or room picture goes to everyone, so that one is untouched.
+    assert.match(app, /async function refuseIfExplicit\(file\)/);
+  });
+
   it("refuses a dropped folder instead of uploading an empty entry", async () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
     const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
