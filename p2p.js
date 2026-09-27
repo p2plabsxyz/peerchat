@@ -49,6 +49,17 @@ const MAX_BLOCKED_PEERS = 500;
 const MEMBERS_LIST_MAX_BYTES = 192 * 1024;
 const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject", "dm-blocked"]);
 
+import {
+  acceptsCreatorKey,
+  addRoomBan,
+  isPeerBannedFromRoom,
+  isRoomCreatorConnection,
+  normalizeCreatorKey,
+  normalizeRoomBans,
+  removeRoomBan,
+  resolveCreatorKey,
+} from "./lib/room-moderation.js";
+
 const DEFAULT_ROOM_MODERATION = {
   abuseFilter: true,
   nsfwFilter: true,
@@ -79,6 +90,7 @@ const pendingPeers = new WeakMap();
 
 let peers = [];
 let localId = "";
+let localKey = "";
 let safeStore = null;
 let dataPath = null;
 let activeRoom = null;
@@ -359,7 +371,98 @@ function writeToConnection(conn, payload) {
 }
 
 function relayToRoom(roomKey, payload) {
-  relayToMatchingPeers(payload, (peer) => peerSharesRoom(peer, roomKey));
+  relayToMatchingPeers(
+    payload,
+    (peer) => peerSharesRoom(peer, roomKey) && !isPeerRemovedFromRoom(roomKey, peer),
+  );
+}
+
+/**
+ * Removing people from a room, mirroring mobile so the two agree on the wire.
+ *
+ * Only whoever made the room can do it, and a removal is checked against the
+ * connection it arrived on rather than anything claimed in the payload. See
+ * lib/room-moderation.js for why the short creator id is not good enough.
+ */
+function isRoomCreator(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  if (!room) return false;
+  const creatorKey = resolveCreatorKey(roomKey, room.creatorKey);
+  // A room made before any of this has no key on record. Its host is still its
+  // host locally, which is what lets them fill the key in.
+  return creatorKey ? creatorKey === localKey : room.isHost === true;
+}
+
+function isPeerRemovedFromRoom(roomKey, peer) {
+  const bans = savedData.rooms?.[roomKey]?.bans;
+  if (!bans?.length) return false;
+  return isPeerBannedFromRoom(bans, { peerId: peer.id, connectionKey: peer.fullId });
+}
+
+/**
+ * By id alone, for the member list and for history somebody else relays.
+ *
+ * Weaker than the connection check: a ban held by key cannot be matched against
+ * an id, so it only catches what the room already knows about them.
+ */
+function isPeerIdRemovedFromRoom(roomKey, peerId) {
+  const bans = savedData.rooms?.[roomKey]?.bans;
+  if (!bans?.length) return false;
+  return isPeerBannedFromRoom(bans, { peerId });
+}
+
+/**
+ * The line in the room saying somebody was removed.
+ *
+ * Written by each peer that honours the removal rather than relayed, so it
+ * appears exactly where the removal took effect and cannot be forged by
+ * somebody who is not the creator.
+ */
+function appendRemovalNotice(roomKey, peerId, username) {
+  const name = clamp(username, MAX_NAME_LEN) ||
+    savedData.rooms?.[roomKey]?.members?.[peerId]?.username ||
+    savedData.peerProfiles?.[peerId]?.username ||
+    peerId;
+  return appendToFeed(roomKey, {
+    id: `removed-${roomKey}-${peerId}-${Date.now()}`,
+    type: "system",
+    moderationNotice: true,
+    text: `${name} was removed from the room by its creator`,
+    ts: Date.now(),
+  }).catch(() => {});
+}
+
+function isRemovedFromRoom(roomKey) {
+  const bans = savedData.rooms?.[roomKey]?.bans;
+  if (!bans?.length || isRoomCreator(roomKey)) return false;
+  return isPeerBannedFromRoom(bans, { peerId: localId, connectionKey: localKey });
+}
+
+function sendRoomBans(conn, roomKey) {
+  if (!isRoomCreator(roomKey)) return;
+  try {
+    writeToConnection(conn, JSON.stringify({
+      type: "room-bans",
+      roomKey,
+      bans: normalizeRoomBans(savedData.rooms?.[roomKey]?.bans),
+    }) + "\n");
+  } catch {}
+}
+
+function broadcastRoomBans(roomKey) {
+  if (!isRoomCreator(roomKey)) return;
+  for (const peer of peers) {
+    if (!peer.conn.destroyed && peerSharesRoom(peer, roomKey)) sendRoomBans(peer.conn, roomKey);
+  }
+}
+
+/** Drop anyone in the room who is no longer welcome in it. */
+function enforceRoomBans(roomKey) {
+  for (const peer of [...peers]) {
+    if (!peerSharesRoom(peer, roomKey)) continue;
+    if (!isPeerRemovedFromRoom(roomKey, peer)) continue;
+    try { peer.conn.destroy(); } catch {}
+  }
 }
 
 function relayToPeer(peerId, payload) {
@@ -399,6 +502,9 @@ function roomUpdatePayload(roomKey) {
     blockedByPeer: !!room.blockedByPeer,
     createdBy: room.createdBy || "",
     createdByName: room.createdByName || "",
+    isCreator: isRoomCreator(roomKey),
+    removedByCreator: isRemovedFromRoom(roomKey),
+    bans: normalizeRoomBans(room.bans),
     isPinned: !!room.isPinned,
     isMuted: !!room.isMuted,
     unreadCount: room.unreadCount || 0,
@@ -620,6 +726,9 @@ function sendRoomMeta(conn, rk) {
       link: room.link || "",
       avatar: room.avatar || null,
       createdBy: room.createdBy || (room.isHost ? localId : ""),
+      // Announced by the creator alone. A peer passing this along cannot prove
+      // it, so the other side will not take it from them.
+      creatorKey: room.isHost ? localKey : "",
       createdByName: room.createdByName || (room.isHost ? (savedData.profile?.username || localId) : ""),
       moderation: room.moderation || null,
     }) + "\n");
@@ -845,10 +954,27 @@ export function initChat(sdk, options = {}) {
   if (options.safeStorage) safeStore = options.safeStorage;
   if (options.storagePath) dataPath = options.storagePath;
   localId = sdk.publicKey ? b4a.toString(sdk.publicKey, "hex").slice(0, 8).toLowerCase() : "local";
+  // The whole key. The eight characters above are a label; a removal is checked
+  // against this. See lib/room-moderation.js.
+  localKey = sdk.publicKey ? b4a.toString(sdk.publicKey, "hex").toLowerCase() : "";
 
   initModeration().catch((e) => console.warn("[chat] Moderation blocklist load failed:", e.message));
 
   loadData();
+
+  // After loadData, not before it: there are no rooms to walk until the file
+  // has been read. A room made before any of this has no creator key on record,
+  // and the device that made it is the only one that can fill that in.
+  let filledCreatorKey = false;
+  for (const room of Object.values(savedData.rooms || {})) {
+    if (!room || room.isDM) continue;
+    if (room.isHost && !room.creatorKey) {
+      room.creatorKey = localKey;
+      filledCreatorKey = true;
+    }
+    room.bans = normalizeRoomBans(room.bans);
+  }
+  if (filledCreatorKey) persistData();
 
   // Unref'd so a peer-count heartbeat never keeps a process alive on its own.
   setInterval(() => {
@@ -944,6 +1070,18 @@ export function initChat(sdk, options = {}) {
 
       shareTopics(conn);
       shareProfile(conn);
+      // Before anything else they might act on. If they are the one who was
+      // removed, this is how they find out.
+      const activatedPeer = peerForConnection(conn);
+      let removedHere = false;
+      for (const rk of activatedPeer?.rooms || []) {
+        sendRoomBans(conn, rk);
+        if (isPeerRemovedFromRoom(rk, activatedPeer)) removedHere = true;
+      }
+      if (removedHere) {
+        try { conn.destroy(); } catch {}
+        return;
+      }
       shareRoomMeta(conn);
       shareMembers(conn);
       announceJoins(conn);
@@ -1192,6 +1330,43 @@ export function initChat(sdk, options = {}) {
             continue;
           }
 
+          // Removed by whoever made the room. Nothing they send counts,
+          // including a removal list of their own, so this sits above every
+          // handler below.
+          if (msg.roomKey && isValidRoomKey(msg.roomKey)) {
+            const peerRecord = peerForConnection(conn);
+            if (peerRecord && isPeerRemovedFromRoom(msg.roomKey, peerRecord)) continue;
+          }
+
+          // The removal list, from the creator and nobody else. It carries no
+          // message id and no encrypted body, so a build that predates this
+          // drops it at its first check rather than making anything of it.
+          if (msg.type === "room-bans") {
+            if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
+            const room = savedData.rooms[msg.roomKey];
+            if (!room) continue;
+            if (!isRoomCreatorConnection({
+              roomKey: msg.roomKey,
+              storedKey: room.creatorKey,
+              connectionKey: fullId,
+            })) continue;
+
+            // Their list replaces ours outright: they are the record.
+            const before = new Set(normalizeRoomBans(room.bans).map((ban) => ban.id));
+            room.bans = normalizeRoomBans(msg.bans);
+            for (const ban of room.bans) {
+              if (!before.has(ban.id)) appendRemovalNotice(msg.roomKey, ban.id, "");
+            }
+            // Anyone the creator let back in stops being filtered out.
+            for (const id of Object.keys(room.members || {})) {
+              if (isPeerBannedFromRoom(room.bans, { peerId: id })) delete room.members[id];
+            }
+            enforceRoomBans(msg.roomKey);
+            persistData();
+            emitRoomUpdate(msg.roomKey);
+            continue;
+          }
+
           if (msg.type === "room-meta") {
             const room = savedData.rooms[msg.roomKey];
             if (!room) continue;
@@ -1218,6 +1393,18 @@ export function initChat(sdk, options = {}) {
               if (room.avatar) updated = true;
             }
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
+            // Only from the creator, and only once. The connection is what
+            // proves it: whoever announces has to be the key they announce.
+            if (acceptsCreatorKey({
+              roomKey: msg.roomKey,
+              storedKey: room.creatorKey,
+              createdBy: room.createdBy,
+              announcedKey: msg.creatorKey,
+              connectionKey: fullId,
+            })) {
+              room.creatorKey = normalizeCreatorKey(msg.creatorKey);
+              updated = true;
+            }
             if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
 
             // The host owns the room's moderation settings, so mirror whatever
@@ -1318,6 +1505,11 @@ export function initChat(sdk, options = {}) {
             appendToFeed(msg.roomKey, { id: msg.id, type: "system", text: msg.text, ts: msg.ts || Date.now() }).catch(() => {});
             continue;
           }
+
+          // A removed person's old messages can still reach us through somebody
+          // else's history sync, which is how they kept appearing afterwards.
+          if ((msg.type === "sync" || msg.type === "sync-reaction") && msg.roomKey && msg.sender &&
+              isPeerIdRemovedFromRoom(msg.roomKey, normPeerId(msg.sender))) continue;
 
           if (msg.type === "sync") {
             if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
@@ -1448,6 +1640,11 @@ export async function handleChatRequest(req, sdk) {
           avatar: sanitizeAvatar(body.avatar),
           createdAt: Date.now(),
           createdBy: localId,
+          // The whole key, because the short creator id above is a label and a
+          // removal has to be checked against something that cannot be ground
+          // out. See lib/room-moderation.js.
+          creatorKey: localKey,
+          bans: [],
           createdByName: savedData.profile?.username || localId,
           isPinned: false, isMuted: false,
           unreadCount: 0, unreadMentions: 0,
@@ -1531,6 +1728,55 @@ export async function handleChatRequest(req, sdk) {
         return respond(200, { blockedPeers: listBlockedPeers(), pendingDMs: savedData.pendingDMs || {} });
       }
 
+      if (action === "remove-room-member") {
+        const body = await req.json().catch(() => ({}));
+        const rk = body.roomKey;
+        if (!rk || !isValidRoomKey(rk)) return respond(400, { error: "Invalid room key" });
+        const room = savedData.rooms[rk];
+        if (!room) return respond(404, { error: "Room not found" });
+        if (room.isDM) return respond(400, { error: "There is nobody to remove from a direct message." });
+        if (!isRoomCreator(rk)) {
+          return respond(403, { error: "Only the person who made this room can remove people from it." });
+        }
+
+        const peerId = normPeerId(body.peerId);
+        if (!peerId) return respond(400, { error: "peerId required" });
+        if (peerId === normPeerId(localId)) {
+          return respond(400, { error: "You cannot remove yourself from your own room." });
+        }
+
+        // Their full key if they are here to take it from, so the removal
+        // catches that person rather than anyone sharing their first eight.
+        const connected = peers.find((peer) => peer.id === peerId && peerSharesRoom(peer, rk));
+        const removedName = room.members?.[peerId]?.username || "";
+        room.bans = addRoomBan(room.bans, { id: peerId, key: connected?.fullId || "" });
+        if (room.members?.[peerId]) delete room.members[peerId];
+
+        appendRemovalNotice(rk, peerId, removedName);
+        enforceRoomBans(rk);
+        broadcastRoomBans(rk);
+        persistData();
+        emitRoomUpdate(rk);
+        return respond(200, { bans: room.bans });
+      }
+
+      if (action === "restore-room-member") {
+        const body = await req.json().catch(() => ({}));
+        const rk = body.roomKey;
+        if (!rk || !isValidRoomKey(rk)) return respond(400, { error: "Invalid room key" });
+        const room = savedData.rooms[rk];
+        if (!room) return respond(404, { error: "Room not found" });
+        if (!isRoomCreator(rk)) {
+          return respond(403, { error: "Only the person who made this room can let people back in." });
+        }
+
+        room.bans = removeRoomBan(room.bans, body.peerId);
+        broadcastRoomBans(rk);
+        persistData();
+        emitRoomUpdate(rk);
+        return respond(200, { bans: room.bans });
+      }
+
       if (action === "unblock-peer") {
         const body = await req.json().catch(() => ({}));
         const peerId = normPeerId(body.peerId);
@@ -1609,6 +1855,9 @@ export async function handleChatRequest(req, sdk) {
             // settings. Starting permissive would leak content the host chose
             // to filter during the window before meta lands.
             moderation: { ...DEFAULT_ROOM_MODERATION },
+            // Learned from the creator when they announce it, never assumed.
+            creatorKey: "",
+            bans: [],
           };
           persistData();
         }
@@ -1910,6 +2159,9 @@ export async function handleChatRequest(req, sdk) {
             createdAt: r.createdAt || 0,
             createdBy: r.createdBy || "",
             createdByName: r.createdByName || "",
+            isCreator: isRoomCreator(k),
+            removedByCreator: isRemovedFromRoom(k),
+            bans: normalizeRoomBans(r.bans),
             lastMessage: r.lastMessage || null,
             unreadCount: r.unreadCount || 0,
             unreadMentions: r.unreadMentions || 0,

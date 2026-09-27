@@ -1216,13 +1216,22 @@ function applyDMComposerGate(roomKey) {
     }
   }
 
+  // Nothing sent from here would be passed on, so the composer says so rather
+  // than letting messages go nowhere.
+  const removed = !!room.removedByCreator;
   if (banner) {
-    banner.style.display = blockedByPeer || blockedByMe ? "" : "none";
-    banner.textContent = blockedByMe
-      ? "You blocked this person. Unblock them in Settings to message them again."
-      : "This person blocked your direct messages. Open their profile and press Message to ask again.";
+    banner.style.display = removed || blockedByPeer || blockedByMe ? "" : "none";
+    banner.textContent = removed
+      ? `You were removed from this room by ${room.createdByName || "whoever made it"}.`
+      : blockedByMe
+        ? "You blocked this person. Unblock them in Settings to message them again."
+        : "This person blocked your direct messages. Open their profile and press Message to ask again.";
   }
-  if (blockedByPeer || blockedByMe) {
+  if (removed) {
+    messageInput.disabled = true;
+    messageInput.placeholder = "You were removed from this room.";
+    sendBtn.disabled = true;
+  } else if (blockedByPeer || blockedByMe) {
     messageInput.disabled = true;
     messageInput.placeholder = blockedByMe ? "You blocked this person." : "This person blocked your direct messages.";
     sendBtn.disabled = true;
@@ -2491,8 +2500,12 @@ $("chat-header-main")?.addEventListener("click", () => {
       memberCount = 1;
     } else {
       const members = room.members || {};
+      const removed = new Set((room.bans || []).map((ban) => ban.id));
       const seen = new Map();
       for (const [id, m] of Object.entries(members)) {
+        // Removed people are not in the room. Without this they came back:
+        // the list is rebuilt from what peers relay.
+        if (removed.has(id)) continue;
         const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
         const memberName = S.peerProfiles[id]?.username || m.username || id;
         const existing = seen.get(memberName);
@@ -2514,6 +2527,20 @@ $("chat-header-main")?.addEventListener("click", () => {
           row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
           row.style.cursor = "pointer";
           row.addEventListener("click", () => { closeAllModals(); showUserInfo(id, memberName); });
+
+          // Only whoever made the room, and never themselves.
+          if (room.isCreator && id !== S.profile?.id) {
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "member-remove";
+            remove.textContent = "Remove";
+            remove.addEventListener("click", (ev) => {
+              ev.stopPropagation();
+              removeRoomMember(id, memberName);
+            });
+            row.appendChild(remove);
+          }
+
           memberList.appendChild(row);
         }
       }
@@ -2749,6 +2776,31 @@ async function openDM(peerId, peerUsername) {
     $("chat-empty").style.display = "";
     $("chat-active").style.display = "none";
     alert("Could not open DM: " + err.message);
+  }
+}
+
+/**
+ * Removing somebody from a room you made.
+ *
+ * Permanent, and it is the room's decision rather than a private one, which is
+ * why it asks first. Blocking is the private version and stays separate.
+ */
+async function removeRoomMember(peerId, memberName) {
+  const roomKey = S.activeRoom;
+  if (!roomKey) return;
+  const confirmed = confirm(
+    `Remove ${memberName} from this room?\n\n` +
+    "They will not be able to come back. Everyone running PeerChat will stop passing their messages on.",
+  );
+  if (!confirmed) return;
+
+  try {
+    await chat.removeRoomMember({ roomKey, peerId });
+    await loadRooms();
+    renderRoomList();
+    closeAllModals();
+  } catch (err) {
+    alert("Could not remove them: " + err.message);
   }
 }
 

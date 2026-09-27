@@ -97,6 +97,27 @@
         being blocked again immediately. You are never blocked from your own rooms.
       </p>
 
+      <h2>Removing somebody from a room</h2>
+      <p class="muted">
+        Whoever made a room can remove anyone in it. Nobody else can, and there is no vote and no report queue.
+        A removal lasts: they cannot come back.
+      </p>
+      <p class="muted">
+        Every copy of PeerChat checks that a removal really came from the person who made the room, against the
+        connection it arrived on rather than against anything written in the message, so it cannot be faked by
+        somebody claiming to be them.
+      </p>
+      <p class="muted">
+        <strong>What it does not do:</strong> take the room key back. Somebody removed still holds it, and could
+        run a changed build and listen. So removal means every ordinary PeerChat stops passing their messages on
+        and refuses their connection. It is not a lock they cannot pick, and a room key that has reached the
+        wrong person is still worth replacing.
+      </p>
+      <p class="muted">
+        The three-strikes spam and abuse limit below is a different thing. That one is decided by a filter rather
+        than a person, filters get things wrong, so it is a five minute pause and not a removal.
+      </p>
+
       <h2>What is blocked for everyone</h2>
       <p class="muted">
         These are on for everyone and there is nothing to switch on:

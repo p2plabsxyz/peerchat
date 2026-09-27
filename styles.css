@@ -1173,3 +1173,12 @@ a:hover { text-decoration: none; }
   color: var(--accent);
   font-weight: 600;
 }
+
+.member-remove {
+  margin-left: auto; padding: 2px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: var(--danger);
+  font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+
+.member-remove:hover { background: var(--base01); }
