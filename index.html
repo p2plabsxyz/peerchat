@@ -44,6 +44,7 @@
           <button id="join-room-btn">Join Room</button>
         </div>
         <div id="sidebar-body">
+          <button type="button" id="requests-btn" class="requests-btn" hidden></button>
           <input type="text" id="room-search" placeholder="Search rooms…" autocomplete="off" spellcheck="false" />
           <div id="room-list"></div>
           <footer class="chat-footer">
@@ -220,16 +221,14 @@
       </div>
     </div>
 
-    <!-- DM Invite Modal -->
-    <div id="dm-invite-modal" class="modal">
-      <div class="modal-content user-info">
-        <img id="dmi-avatar" class="avatar-lg" />
-        <h3 id="dmi-name"></h3>
-        <p id="dmi-bio" class="muted"></p>
-        <p class="muted small">wants to send you a direct message</p>
+    <!-- Message requests -->
+    <div id="requests-modal" class="modal">
+      <div class="modal-content">
+        <h3>Message requests</h3>
+        <p class="muted small">Somebody has to ask before they can message you. Blocking one stops them asking again.</p>
+        <div id="requests-list" class="requests-list"></div>
         <div class="modal-actions">
-          <button type="button" id="dmi-reject" class="btn-secondary">Decline</button>
-          <button type="button" id="dmi-accept">Accept</button>
+          <button type="button" id="requests-close" class="btn-secondary">Close</button>
         </div>
       </div>
     </div>

@@ -46,7 +46,6 @@ let ctxTarget = null;
 let audioCtx;
 let replyTarget = null;
 let mentionIdx = -1;
-let _dmiRoomKey = null;
 const roomDriveUrls = new Map();
 const decryptedUrls = new DecryptedUrlCache();
 const roomRefs = new RoomRefs();
@@ -1095,6 +1094,9 @@ function roomMatchesSidebarQuery(r, q) {
 }
 
 function renderRoomList() {
+  // One place, so the count cannot drift from what is actually waiting: every
+  // path that accepts, declines, blocks or loads rooms ends up here.
+  renderRequestsButton();
   const list = $("room-list");
   list.innerHTML = "";
   const q = ($("room-search")?.value || "").trim().toLowerCase();
@@ -2132,11 +2134,11 @@ function connectGlobalSSE() {
       if (S.rooms[roomKey]) return;
       if (!S.pendingDMs) S.pendingDMs = {};
       S.pendingDMs[roomKey] = { fromId, fromUsername, fromAvatar, fromBio };
-      $("dmi-avatar").src = avatar(fromUsername, 64, fromAvatar);
-      $("dmi-name").textContent = fromUsername || fromId;
-      $("dmi-bio").textContent = fromBio || "";
-      _dmiRoomKey = roomKey;
-      openModal("dm-invite-modal");
+      // A request used to take the whole screen the moment it arrived, and a
+      // second one replaced the first with no way back to it. They wait behind
+      // a line of text in the sidebar instead.
+      renderRequestsButton();
+      if (document.getElementById("requests-modal")?.classList.contains("open")) renderRequestsList();
     } catch {}
   });
 
@@ -2848,13 +2850,87 @@ $("ui-report-btn")?.addEventListener("click", () => {
   if (_uiCurrentPeerId) reportPeer(_uiCurrentPeerId, _uiCurrentPeerName);
 });
 
-$("dmi-accept")?.addEventListener("click", () => {
-  if (_dmiRoomKey) acceptDM(_dmiRoomKey);
+/**
+ * The people waiting to message you.
+ *
+ * A request used to open a modal over everything the moment it landed, and a
+ * second one replaced the first with no way back to it. They queue behind a
+ * line in the sidebar now, and the list is where you answer them.
+ */
+function renderRequestsButton() {
+  const button = $("requests-btn");
+  if (!button) return;
+  const count = Object.keys(S.pendingDMs || {}).length;
+  button.hidden = count === 0;
+  button.textContent = `Requests (${count})`;
+}
+
+function renderRequestsList() {
+  const list = $("requests-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const entries = Object.entries(S.pendingDMs || {});
+  if (entries.length === 0) {
+    list.innerHTML = '<p class="muted small">Nobody is waiting.</p>';
+    return;
+  }
+
+  for (const [roomKey, invite] of entries) {
+    const name = invite.fromUsername || invite.fromId;
+    const row = document.createElement("div");
+    row.className = "request-row";
+    row.innerHTML =
+      `<img src="${esc(avatar(name, 32, invite.fromAvatar))}" />` +
+      `<div class="request-copy"><span>${esc(name)}</span>` +
+      `<span class="muted small">wants to message you</span></div>`;
+
+    // Declining answers this one request, so somebody determined asks again.
+    // Blocking drops it and stops the next one.
+    const block = document.createElement("button");
+    block.type = "button";
+    block.className = "request-block";
+    block.textContent = "Block";
+    block.addEventListener("click", () => blockRequest(roomKey, invite));
+
+    const decline = document.createElement("button");
+    decline.type = "button";
+    decline.className = "btn-secondary";
+    decline.textContent = "Decline";
+    decline.addEventListener("click", () => rejectDM(roomKey));
+
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.textContent = "Accept";
+    accept.addEventListener("click", () => acceptDM(roomKey));
+
+    row.append(block, decline, accept);
+    list.appendChild(row);
+  }
+}
+
+async function blockRequest(roomKey, invite) {
+  const name = invite.fromUsername || invite.fromId;
+  if (!confirm(`Block ${name}?\n\nTheir request goes away and they cannot send another. You can unblock them in Settings.`)) return;
+  try {
+    const result = await chat.blockPeer({ peerId: invite.fromId, username: name });
+    S.blockedPeers = result.blockedPeers || [];
+    S.pendingDMs = result.pendingDMs || {};
+    delete S.pendingDMs[roomKey];
+    renderRequestsButton();
+    renderRequestsList();
+  } catch (err) {
+    alert("Could not block them: " + err.message);
+  }
+}
+
+$("requests-btn")?.addEventListener("click", () => {
+  renderRequestsList();
+  openModal("requests-modal");
 });
 
-$("dmi-reject")?.addEventListener("click", () => {
-  if (_dmiRoomKey) rejectDM(_dmiRoomKey);
-});
+$("requests-close")?.addEventListener("click", () => closeAllModals());
+
 
 $("settings-btn")?.addEventListener("click", () => {
   $("set-username").value = S.profile?.username || "";

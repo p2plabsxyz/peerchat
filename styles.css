@@ -1182,3 +1182,28 @@ a:hover { text-decoration: none; }
 }
 
 .member-remove:hover { background: var(--base01); }
+
+.requests-btn {
+  width: 100%; margin-bottom: 0.5rem; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--accent);
+  font-size: 0.8rem; font-weight: 700; cursor: pointer; text-align: left;
+}
+
+.requests-btn:hover { background: var(--base01); }
+
+.requests-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 320px; overflow-y: auto; }
+
+.request-row {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 8px; border-radius: 10px; background: var(--base01);
+}
+
+.request-row img { width: 32px; height: 32px; border-radius: 50%; }
+
+.request-copy { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+
+.request-block {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: var(--danger); font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}

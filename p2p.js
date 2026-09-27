@@ -49,6 +49,7 @@ const MAX_BLOCKED_PEERS = 500;
 const MEMBERS_LIST_MAX_BYTES = 192 * 1024;
 const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject", "dm-blocked"]);
 
+import { earliestRoomCreatedAt } from "./lib/room-created-at.js";
 import {
   acceptsCreatorKey,
   addRoomBan,
@@ -725,6 +726,7 @@ function sendRoomMeta(conn, rk) {
       bio: room.bio || "",
       link: room.link || "",
       avatar: room.avatar || null,
+      createdAt: Number.isSafeInteger(room.createdAt) ? room.createdAt : 0,
       createdBy: room.createdBy || (room.isHost ? localId : ""),
       // Announced by the creator alone. A peer passing this along cannot prove
       // it, so the other side will not take it from them.
@@ -1391,6 +1393,14 @@ export function initChat(sdk, options = {}) {
             if (msg.avatar && !room.avatar) {
               room.avatar = sanitizeAvatar(msg.avatar);
               if (room.avatar) updated = true;
+            }
+            // The room cannot have been created after the first person in it,
+            // so the earliest anyone reports wins. Without this every device
+            // showed the day it joined.
+            const earliestCreatedAt = earliestRoomCreatedAt(room.createdAt, msg.createdAt);
+            if (earliestCreatedAt && earliestCreatedAt !== room.createdAt) {
+              room.createdAt = earliestCreatedAt;
+              updated = true;
             }
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
             // Only from the creator, and only once. The connection is what
