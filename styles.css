@@ -1207,3 +1207,26 @@ a:hover { text-decoration: none; }
   padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
   background: none; color: var(--danger); font-size: 0.75rem; font-weight: 600; cursor: pointer;
 }
+
+#discover-btn {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--accent);
+  font-size: 0.75rem; font-weight: 700; cursor: pointer;
+}
+
+#discover-btn:hover { background: var(--base01); }
+
+.discover-qr { display: flex; justify-content: center; padding: 0.5rem 0; }
+
+.qr-grid {
+  display: grid; width: 190px; aspect-ratio: 1;
+  padding: 8px; background: #ffffff; border-radius: 8px;
+}
+
+.qr-grid span { background: #ffffff; }
+.qr-grid .qr-on { background: #000000; }
+
+.discover-list {
+  display: flex; flex-direction: column; gap: 0.25rem;
+  max-height: 240px; overflow-y: auto; margin-top: 0.5rem;
+}

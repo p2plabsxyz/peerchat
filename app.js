@@ -1,5 +1,12 @@
 import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
-import { buildInviteUrl, parseInvite } from "./lib/invite.js";
+import {
+  buildDirectInviteUrl,
+  buildInviteUrl,
+  parseDirectInvite,
+  parseInvite,
+} from "./lib/invite.js";
+import { createQrMatrix } from "./lib/qrcode-matrix.js";
+import { buildDirectory, collapseMembers } from "./lib/members.js";
 
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
@@ -931,11 +938,25 @@ function hideBoot() {
 // An invite carries the room key, so it is read once and wiped from the URL
 // before the app renders; history and the address bar must not keep it.
 const pendingInvite = parseInvite(location.hash);
-if (pendingInvite) {
+const pendingDirectInvite = parseDirectInvite(location.hash);
+if (pendingInvite || pendingDirectInvite) {
   try { history.replaceState(null, "", location.pathname + location.search); } catch {}
 }
 
 async function consumeInvite() {
+  // A personal link names a person rather than a room, so it asks them.
+  if (pendingDirectInvite) {
+    if (pendingDirectInvite !== S.profile?.id) {
+      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[pendingDirectInvite];
+      const name = S.peerProfiles[pendingDirectInvite]?.username || known?.username || pendingDirectInvite;
+      try {
+        await openDM(pendingDirectInvite, name);
+      } catch (err) {
+        console.error("[chat] personal invite:", err);
+      }
+    }
+    return;
+  }
   if (!pendingInvite) return;
   try {
     if (!S.rooms[pendingInvite]) {
@@ -2503,25 +2524,27 @@ $("chat-header-main")?.addEventListener("click", () => {
     } else {
       const members = room.members || {};
       const removed = new Set((room.bans || []).map((ban) => ban.id));
-      const seen = new Map();
+      const rows = [];
       for (const [id, m] of Object.entries(members)) {
         // Removed people are not in the room. Without this they came back:
         // the list is rebuilt from what peers relay.
         if (removed.has(id)) continue;
-        const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
-        const memberName = S.peerProfiles[id]?.username || m.username || id;
-        const existing = seen.get(memberName);
-        if (!existing || (isOn && !existing.isOn)) {
-          seen.set(memberName, { id, m, isOn, memberName });
-        }
+        const self = id === S.profile?.id;
+        rows.push({
+          id,
+          m,
+          self,
+          online: self || S.onlinePeers.has(id),
+          username: S.peerProfiles[id]?.username || m.username || id,
+        });
       }
-      const memberEntries = [...seen.values()].sort((a, b) => {
-        if (a.isOn === b.isOn) return 0;
-        return a.isOn ? -1 : 1;
+      const memberEntries = collapseMembers(rows).sort((a, b) => {
+        if (a.online === b.online) return 0;
+        return a.online ? -1 : 1;
       });
       memberCount = memberEntries.length;
       
-      for (const { id, m, isOn, memberName } of memberEntries) {
+      for (const { id, m, online: isOn, username: memberName } of memberEntries) {
         if (!query || memberName.toLowerCase().includes(query)) {
           const row = document.createElement("div");
           row.className = "member-row";
@@ -2798,9 +2821,11 @@ async function removeRoomMember(peerId, memberName) {
 
   try {
     await chat.removeRoomMember({ roomKey, peerId });
-    await loadRooms();
-    renderRoomList();
     closeAllModals();
+    // Not just the room list: the removal writes a line into the room, and
+    // waiting for the next sync tick to notice it meant nothing appeared to
+    // have happened.
+    await refreshActiveRoom();
   } catch (err) {
     alert("Could not remove them: " + err.message);
   }
@@ -2923,6 +2948,99 @@ async function blockRequest(roomKey, invite) {
     alert("Could not block them: " + err.message);
   }
 }
+
+/**
+ * Finding somebody to message.
+ *
+ * Two halves. Your own code, which anyone can scan to ask you for a direct
+ * message, and a search over the welcome room's member list, which is the only
+ * place everyone is and so the nearest thing PeerChat has to a directory. No
+ * list is kept anywhere for this.
+ */
+function renderDiscoverQr() {
+  const holder = $("discover-qr");
+  if (!holder) return;
+  holder.innerHTML = "";
+
+  const url = buildDirectInviteUrl(S.profile?.id || "");
+  if (!url) {
+    holder.innerHTML = '<p class="muted small">Set a display name first and your code appears here.</p>';
+    return;
+  }
+
+  let matrix;
+  try {
+    matrix = createQrMatrix(url, "M");
+  } catch {
+    holder.innerHTML = '<p class="muted small">Could not draw your code.</p>';
+    return;
+  }
+
+  // A grid of divs rather than a canvas: it scales with the modal and needs no
+  // pixel maths to stay sharp.
+  const grid = document.createElement("div");
+  grid.className = "qr-grid";
+  grid.style.gridTemplateColumns = `repeat(${matrix.length}, 1fr)`;
+  for (const row of matrix) {
+    for (const on of row) {
+      const cell = document.createElement("span");
+      if (on) cell.className = "qr-on";
+      grid.appendChild(cell);
+    }
+  }
+  holder.appendChild(grid);
+}
+
+function discoverDirectory(query = "") {
+  const room = S.rooms[PRE_JOINED_ROOM_KEY];
+  return buildDirectory({
+    members: room?.members,
+    peerProfiles: S.peerProfiles,
+    onlinePeers: S.onlinePeers,
+    bans: room?.bans,
+    selfId: S.profile?.id,
+    query,
+  });
+}
+
+function renderDiscoverList() {
+  const list = $("discover-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const found = discoverDirectory($("discover-search")?.value || "");
+  if (found.length === 0) {
+    const query = ($("discover-search")?.value || "").trim();
+    list.innerHTML = `<p class="muted small">${query ? "Nobody by that name." : "Nobody else here yet."}</p>`;
+    return;
+  }
+
+  for (const member of found) {
+    const row = document.createElement("div");
+    row.className = "member-row";
+    row.innerHTML =
+      `<img src="${esc(avatar(member.username, 22, member.avatar))}" />` +
+      `<span>${esc(member.username)}</span>` +
+      `<span class="online-dot ${member.online ? "online" : "offline"}"></span>`;
+    row.style.cursor = "pointer";
+    row.addEventListener("click", () => {
+      closeAllModals();
+      openDM(member.id, member.username);
+    });
+    list.appendChild(row);
+  }
+}
+
+$("discover-btn")?.addEventListener("click", () => {
+  const search = $("discover-search");
+  if (search) search.value = "";
+  renderDiscoverQr();
+  renderDiscoverList();
+  openModal("discover-modal");
+});
+
+$("discover-search")?.addEventListener("input", () => renderDiscoverList());
+$("discover-close")?.addEventListener("click", () => closeAllModals());
 
 $("requests-btn")?.addEventListener("click", () => {
   renderRequestsList();

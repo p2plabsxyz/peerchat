@@ -2,7 +2,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { buildInviteUrl, parseInvite, INVITE_BASE } from "../lib/invite.js";
+import {
+  buildDirectInviteUrl,
+  buildInviteUrl,
+  parseDirectInvite,
+  parseInvite,
+  INVITE_BASE,
+} from "../lib/invite.js";
 
 const roomKey = () => randomBytes(32).toString("hex");
 
@@ -47,5 +53,36 @@ describe("invite links", () => {
     const key = roomKey();
     assert.equal(parseInvite(`#room=${key}&from=bob`), key);
     assert.equal(parseInvite(`#other=1`), "");
+  });
+});
+
+// A personal invite says who to ask, not how to get in. The person on the other
+// end still accepts, declines or blocks, which is what makes it safe to put on
+// a screen for a stranger to scan.
+describe("personal invite links", () => {
+  const PEER = "a1b2c3d4";
+  const ROOM = "ab".repeat(32);
+
+  it("round-trips", () => {
+    const url = buildDirectInviteUrl(PEER);
+    assert.equal(url, `peersky://p2p/peerchat/#dm=${PEER}`);
+    assert.equal(parseDirectInvite(url), PEER);
+    assert.equal(parseDirectInvite(`#dm=${PEER.toUpperCase()}`), PEER);
+    assert.equal(parseDirectInvite(PEER), PEER);
+  });
+
+  it("takes only an 8 character peer id", () => {
+    for (const bad of ["nothex!!", ROOM, "", null]) {
+      assert.equal(buildDirectInviteUrl(bad), "");
+    }
+    assert.equal(parseDirectInvite("#dm=nothex!!"), "");
+    assert.equal(parseDirectInvite(""), "");
+  });
+
+  // A room key is a capability and a peer id is not, so neither may be read as
+  // the other.
+  it("keeps rooms and people apart", () => {
+    assert.equal(parseDirectInvite(buildInviteUrl(ROOM)), "");
+    assert.equal(parseInvite(buildDirectInviteUrl(PEER)), "");
   });
 });
