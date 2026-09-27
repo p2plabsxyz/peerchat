@@ -50,6 +50,9 @@ let reconnectDelay = 1000;
 let lastSseTime = 0;
 let sseHealthTimer = null;
 let ctxTarget = null;
+// Set while the room info modal is open, so a removal that arrives from the
+// creator can redraw its member list. Null the rest of the time.
+let refreshRoomInfoMembers = null;
 let audioCtx;
 let replyTarget = null;
 let mentionIdx = -1;
@@ -2058,6 +2061,8 @@ function connectGlobalSSE() {
               renderModerationInfo(riModSettings, room.moderation);
             }
           }
+
+          refreshRoomInfoMembers?.();
         }
 
         applyDMComposerGate(data.roomKey);
@@ -2501,6 +2506,11 @@ $("chat-header-main")?.addEventListener("click", () => {
   $("ri-date").textContent = formatDate(room.createdAt);
 
   const renderMemberList = (searchQuery = "") => {
+    // Read the room each time rather than closing over it: a removal somebody
+    // else made arrives as a room-update while this modal is open, and that is
+    // exactly the moment the list has to redraw.
+    const room = S.rooms[S.activeRoom];
+    if (!room) return;
     const memberList = $('ri-member-list');
     memberList.innerHTML = "";
     let memberCount = 0;
@@ -2575,6 +2585,9 @@ $("chat-header-main")?.addEventListener("click", () => {
   };
   
   renderMemberList();
+  // So a removal that arrives from the creator redraws the list under the
+  // cursor instead of waiting for the modal to be closed and opened again.
+  refreshRoomInfoMembers = () => renderMemberList($("ri-member-search")?.value || "");
   
   const searchInput = $("ri-member-search");
   if (searchInput) {

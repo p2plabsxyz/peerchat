@@ -8,6 +8,7 @@ import { buildDirectory, collapseMembers } from "../lib/members.js";
 
 const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
 const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
+const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
 
 describe("find people", () => {
   it("draws a real QR code for a personal invite", () => {
@@ -99,6 +100,18 @@ describe("find people", () => {
     ]);
 
     assert.deepEqual(collapsed.map((member) => member.id), ["aaaaaaaa"]);
+  });
+
+  it("stays a card on the page rather than becoming the page", () => {
+    const content = css.slice(css.indexOf(".modal-content {"), css.indexOf(".modal-content > form"));
+
+    // A full directory plus the QR code ran past the top and bottom of the
+    // window, taking the modal's own edges and its Close button with it.
+    assert.match(content, /max-height: 86vh/);
+    assert.match(content, /overflow-y: auto/);
+
+    const list = css.slice(css.indexOf(".discover-list {"), css.indexOf(".discover-list {") + 260);
+    assert.match(list, /max-height: min\(240px, 34vh\)/);
   });
 
   it("treats a personal link as a request, not a room to join", () => {

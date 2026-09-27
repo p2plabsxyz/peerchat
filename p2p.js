@@ -457,13 +457,31 @@ function broadcastRoomBans(roomKey) {
   }
 }
 
-/** Drop anyone in the room who is no longer welcome in it. */
+/**
+ * Drop anyone in the room who is no longer welcome in it.
+ *
+ * Not straight away. Nothing they send is read and nothing is relayed to them
+ * either way, so the drop is tidiness rather than the barrier, and destroying
+ * the connection the same tick threw away the removal notice still queued on
+ * it: the person being removed learned nothing and carried on typing into a
+ * room that had stopped listening.
+ */
+const REMOVED_PEER_DROP_MS = 1000;
+
 function enforceRoomBans(roomKey) {
   for (const peer of [...peers]) {
     if (!peerSharesRoom(peer, roomKey)) continue;
     if (!isPeerRemovedFromRoom(roomKey, peer)) continue;
-    try { peer.conn.destroy(); } catch {}
+    dropRemovedPeer(peer);
   }
+}
+
+function dropRemovedPeer(peer) {
+  if (!peer || peer.removedDropTimer) return;
+  peer.removedDropTimer = setTimeout(() => {
+    try { peer.conn.destroy(); } catch {}
+  }, REMOVED_PEER_DROP_MS);
+  peer.removedDropTimer.unref?.();
 }
 
 function relayToPeer(peerId, payload) {
@@ -1081,7 +1099,7 @@ export function initChat(sdk, options = {}) {
         if (isPeerRemovedFromRoom(rk, activatedPeer)) removedHere = true;
       }
       if (removedHere) {
-        try { conn.destroy(); } catch {}
+        dropRemovedPeer(activatedPeer);
         return;
       }
       shareRoomMeta(conn);
@@ -1763,8 +1781,11 @@ export async function handleChatRequest(req, sdk) {
         if (room.members?.[peerId]) delete room.members[peerId];
 
         appendRemovalNotice(rk, peerId, removedName);
-        enforceRoomBans(rk);
+        // Broadcast first. Enforcing first took the removed peer out of the
+        // loop below, so the one person who most needed to hear it was the one
+        // who never did.
         broadcastRoomBans(rk);
+        enforceRoomBans(rk);
         persistData();
         emitRoomUpdate(rk);
         return respond(200, { bans: room.bans });

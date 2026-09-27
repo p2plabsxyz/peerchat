@@ -141,7 +141,27 @@ describe("room creator moderation, wired up", () => {
     assert.match(p2p, /peerSharesRoom\(peer, roomKey\) && !isPeerRemovedFromRoom\(roomKey, peer\)/);
     const activate = p2p.slice(p2p.indexOf("shareTopics(conn);"), p2p.indexOf("pingTimer = setInterval"));
     assert.ok(activate.indexOf("sendRoomBans(conn, rk)") < activate.indexOf("shareRoomMeta(conn)"));
-    assert.match(activate, /conn\.destroy\(\)/);
+    assert.match(activate, /dropRemovedPeer\(activatedPeer\)/);
+  });
+
+  // Three ways this went wrong, all the same shape: the connection carrying the
+  // news was taken down before the news left.
+  it("tells the person being removed before taking their connection away", async () => {
+    const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
+
+    const action = p2p.slice(
+      p2p.indexOf('if (action === "remove-room-member")'),
+      p2p.indexOf('if (action === "restore-room-member")'),
+    );
+    // Enforcing first dropped them out of the broadcast loop below it.
+    assert.ok(action.indexOf("broadcastRoomBans(rk)") < action.indexOf("enforceRoomBans(rk)"));
+
+    // And the drop itself waits, because a send is not on the wire the moment
+    // it is handed over.
+    assert.match(p2p, /function dropRemovedPeer\(peer\)/);
+    assert.match(p2p, /setTimeout\(\(\) => \{[\s\S]{0,80}peer\.conn\.destroy\(\)[\s\S]{0,40}\}, REMOVED_PEER_DROP_MS\)/);
+    const enforce = p2p.slice(p2p.indexOf("function enforceRoomBans"), p2p.indexOf("function dropRemovedPeer"));
+    assert.doesNotMatch(enforce, /destroy\(\)/, "the drop waits rather than happening here");
   });
 
   it("lets only the creator remove, and never themselves", async () => {
