@@ -501,7 +501,18 @@ function replaceWithNotice(el, text, className) {
 // Screens what arrived, not only what is sent. The sending side can be stripped
 // out by anyone running a modified build, which is why the text filters check
 // inbound messages too.
+// Pictures the reader has chosen to see despite the screen hiding them. Outside
+// the render on purpose: the pane is rebuilt whenever a message arrives, and the
+// decision has to outlive that or the picture comes back hidden every time.
+const revealedMedia = new Set();
+
 async function screenIncomingMedia(el, src) {
+  // Already asked for and answered. Screening it again only hides a picture the
+  // reader is looking at.
+  if (revealedMedia.has(src)) {
+    el.src = src;
+    return;
+  }
   const kind = el.tagName === "VIDEO" ? "video" : "image";
   const verdict = await scanMediaUrl(src, kind);
   if (verdict === MEDIA_BLOCKED) {
@@ -526,6 +537,7 @@ function hideMediaBehindNotice(el, src) {
   reveal.className = "msg-media-reveal";
   reveal.textContent = "Show anyway";
   reveal.addEventListener("click", () => {
+    revealedMedia.add(src);
     el.src = src;
     notice.replaceWith(el);
   });

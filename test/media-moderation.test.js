@@ -205,6 +205,18 @@ describe("media moderation", () => {
     assert.match(app, /const verdict = await scanMediaUrl\(src, kind\);/);
   });
 
+  // Revealing used to have to be done twice: the pane is rebuilt whenever a
+  // message arrives, and the screen ran again over the picture that had just
+  // been opened, so it went straight back to hidden.
+  it("keeps a picture open once the reader has opened it", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+
+    // Outside the render, so a rebuilt pane cannot forget it.
+    assert.match(app, /const revealedMedia = new Set\(\);/);
+    const reveal = app.slice(app.indexOf("function hideMediaBehindNotice"), app.indexOf("// Your own upload was already screened"));
+    assert.match(reveal, /revealedMedia\.add\(src\);/);
+  });
+
   it("refuses a dropped folder instead of uploading an empty entry", async () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
     const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
@@ -263,8 +275,12 @@ describe("media moderation", () => {
     const hydrate = app.slice(app.indexOf("async function screenIncomingMedia"), app.indexOf("function hydrateEncryptedMedia"));
     assert.match(hydrate, /await scanMediaUrl\(src, kind\)/);
 
-    // The picture must not be shown before the verdict is in.
-    assert.ok(hydrate.indexOf("scanMediaUrl") < hydrate.indexOf("el.src = src"));
+    // The picture must not be shown before the verdict is in. The one way past
+    // that is a picture the reader already asked to see, which is checked for
+    // first and returns before anything else happens.
+    assert.match(hydrate, /if \(revealedMedia\.has\(src\)\) \{/);
+    const unrevealed = hydrate.slice(hydrate.indexOf("const kind ="));
+    assert.ok(unrevealed.indexOf("scanMediaUrl") < unrevealed.indexOf("el.src = src"));
     assert.match(hydrate, /MEDIA_BLOCKED/);
 
     // Both the encrypted and the plain path go through it.
