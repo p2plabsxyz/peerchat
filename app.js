@@ -505,10 +505,33 @@ async function screenIncomingMedia(el, src) {
   const kind = el.tagName === "VIDEO" ? "video" : "image";
   const verdict = await scanMediaUrl(src, kind);
   if (verdict === MEDIA_BLOCKED) {
-    replaceWithNotice(el, "Hidden: this looks explicit", "msg-media-blocked");
+    hideMediaBehindNotice(el, src);
     return;
   }
   el.src = src;
+}
+
+// Hiding it is a warning, not a verdict. The classifier is wrong often enough
+// that whoever was sent the picture has to be able to look at it.
+function hideMediaBehindNotice(el, src) {
+  const notice = document.createElement("div");
+  notice.className = "msg-media-blocked";
+
+  const label = document.createElement("span");
+  label.textContent = "Hidden: this looks explicit";
+  notice.appendChild(label);
+
+  const reveal = document.createElement("button");
+  reveal.type = "button";
+  reveal.className = "msg-media-reveal";
+  reveal.textContent = "Show anyway";
+  reveal.addEventListener("click", () => {
+    el.src = src;
+    notice.replaceWith(el);
+  });
+  notice.appendChild(reveal);
+
+  el.replaceWith(notice);
 }
 
 // Your own upload was already screened before it was sent, so re-checking it

@@ -187,6 +187,24 @@ describe("media moderation", () => {
     assert.match(app, /async function refuseIfExplicit\(file\)/);
   });
 
+  // Hiding a picture is a warning, not a verdict. The classifier is wrong often
+  // enough that whoever was sent it has to be able to look.
+  it("lets a reader open a picture the screen hid", async () => {
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+
+    const fn = app.slice(app.indexOf("function hideMediaBehindNotice"), app.indexOf("// Your own upload was already screened"));
+    assert.match(fn, /Hidden: this looks explicit/);
+    assert.match(fn, /Show anyway/);
+    // Opening it puts the original element back with its real source, rather
+    // than leaving a second copy behind.
+    assert.match(fn, /el\.src = src;\s*\n\s*notice\.replaceWith\(el\);/);
+    assert.match(css, /\.msg-media-reveal \{/);
+
+    // The screen itself still runs on everything that arrives.
+    assert.match(app, /const verdict = await scanMediaUrl\(src, kind\);/);
+  });
+
   it("refuses a dropped folder instead of uploading an empty entry", async () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
     const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));

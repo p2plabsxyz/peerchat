@@ -739,11 +739,19 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 }
 
 .msg-media-blocked {
-  display: inline-block; padding: 14px 16px;
+  display: inline-flex; flex-direction: column; align-items: flex-start; gap: 0.5rem;
+  padding: 14px 16px;
   border: 1px solid var(--border); border-radius: 10px;
   background: var(--base01); color: var(--danger);
   font-size: 0.85rem; font-weight: 600;
 }
+
+.msg-media-reveal {
+  padding: 0; border: none; background: none;
+  color: var(--accent); font: inherit; font-weight: 700; cursor: pointer;
+}
+
+.msg-media-reveal:hover { text-decoration: underline; }
 
 /* Blocking and reporting */
 .user-info-safety {
