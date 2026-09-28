@@ -858,6 +858,42 @@ function announceJoins(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   }
 }
 
+/**
+ * Forget a room on this device: its topic, its feed, its readers and its
+ * record. No leave announcement, because callers either send their own or are
+ * dropping a room nobody else ever joined.
+ */
+async function dropRoomLocally(sdk, roomKey) {
+  // The record goes first and the topic after, so a caller that does not wait
+  // still sees the room gone on the very next line.
+  for (const stream of roomSseClients[roomKey] || []) { try { stream.end(); } catch {} }
+  delete roomSseClients[roomKey];
+  delete roomFeeds[roomKey];
+  joinedRooms.delete(roomKey);
+  for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
+    if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
+  }
+  delete savedData.rooms[roomKey];
+  if (activeRoom === roomKey) activeRoom = null;
+  persistData();
+
+  try {
+    await sdk.leave(deriveTopic(roomKey));
+  } catch (error) {
+    console.warn(`[chat] Leave ${roomKey.slice(0, 8)}: ${error.message}`);
+  }
+}
+
+/** The room this device already keeps for a conversation with one person. */
+function findDirectRoomKey(peerId) {
+  const wanted = normPeerId(peerId);
+  if (!wanted) return "";
+  for (const [rk, room] of Object.entries(savedData.rooms)) {
+    if (room.isDM && normPeerId(room.dmWith) === wanted) return rk;
+  }
+  return "";
+}
+
 function shareDMInvites(conn, remoteId) {
   const rnorm = remoteId ? normPeerId(remoteId) : "";
   for (const [rk, room] of Object.entries(savedData.rooms)) {
@@ -1274,7 +1310,11 @@ export function initChat(sdk, options = {}) {
               } catch {}
               continue;
             }
-            if (savedData.rooms[msg.roomKey]) {
+            // A key we already hold as something other than a conversation
+            // with this person is not theirs to name.
+            const claimed = savedData.rooms[msg.roomKey];
+            if (claimed && (!claimed.isDM || normPeerId(claimed.dmWith) !== normPeerId(remoteId))) continue;
+            if (claimed) {
               try {
                 writeToConnection(conn, JSON.stringify({
                   type: "dm-accept", roomKey: msg.roomKey,
@@ -1284,6 +1324,19 @@ export function initChat(sdk, options = {}) {
                 }) + "\n");
               } catch {}
               continue;
+            }
+
+            // Both of us pressed Message before either invite landed, so there
+            // are two keys for one conversation. Keys are random, so the lower
+            // one is an answer both sides reach alone: whoever holds the other
+            // drops it, and an unaccepted room has nothing in it to lose.
+            const ours = findDirectRoomKey(remoteId);
+            if (ours) {
+              if (!savedData.rooms[ours]?.pendingAcceptance || ours < msg.roomKey) {
+                shareDMInvites(conn, remoteId);
+                continue;
+              }
+              dropRoomLocally(sdk, ours).catch(() => {});
             }
             const fromName = clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId;
             const fromAvatar = sanitizeAvatar(msg.fromAvatar);
@@ -1685,14 +1738,18 @@ export async function handleChatRequest(req, sdk) {
 
       if (action === "join-dm") {
         const body = await req.json().catch(() => ({}));
-        const dmRoomKey = body.roomKey;
         const toId = clamp(body.toId, MAX_SENDER_LEN);
         const toUsername = clamp(body.toUsername, MAX_NAME_LEN) || toId;
         const toAvatar = sanitizeAvatar(body.toAvatar);
         const toBio = clamp(body.toBio, MAX_BIO_LEN);
-        if (!dmRoomKey || !isValidRoomKey(dmRoomKey)) return respond(400, { error: "Invalid room key" });
         if (!toId) return respond(400, { error: "toId required" });
         const toIdNorm = normPeerId(toId);
+        // One conversation per person, found by who it is with. The key used to
+        // be sha256 of the two peer ids, and those are public: anybody who knew
+        // both could derive it, join the topic and read the whole conversation
+        // along with its media. A room key is a secret, so it is minted like
+        // any other room's and handed over on the connection instead.
+        const dmRoomKey = findDirectRoomKey(toIdNorm) || randomBytes(32).toString("hex");
         if (isPeerBlocked(toIdNorm)) return respond(403, { error: "Unblock this person before messaging them." });
         // Asking again clears it. A block that could never be retried would
         // make the other side's unblock meaningless, and if they are still
@@ -2097,21 +2154,7 @@ export async function handleChatRequest(req, sdk) {
           id: leaveId, ts: leaveTs,
         }) + "\n";
         relayToRoom(roomKey, leaveMsg);
-        try {
-          await sdk.leave(deriveTopic(roomKey));
-        } catch (e) {
-          console.warn(`[chat] Leave ${roomKey.slice(0, 8)}: ${e.message}`);
-        }
-        for (const s of roomSseClients[roomKey] || []) { try { s.end(); } catch {} }
-        delete roomSseClients[roomKey];
-        delete roomFeeds[roomKey];
-        joinedRooms.delete(roomKey);
-        for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
-          if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
-        }
-        delete savedData.rooms[roomKey];
-        if (activeRoom === roomKey) activeRoom = null;
-        persistData();
+        await dropRoomLocally(sdk, roomKey);
         return respond(200, { ok: true });
       }
 

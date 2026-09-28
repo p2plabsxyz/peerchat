@@ -2764,29 +2764,31 @@ function renderBlockedList() {
   }
 }
 
-async function dmRoomKey(id1, id2) {
-  const sorted = [String(id1 || "").toLowerCase(), String(id2 || "").toLowerCase()].sort().join(":dm:");
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sorted));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+// One conversation per person, found by who it is with. The key used to be
+// sha256 of the two peer ids, and those are public, so anybody who knew both
+// could derive it and read the conversation. The backend mints a random one
+// now and hands it over on the connection.
+function directRoomWith(peerId) {
+  return Object.values(S.rooms).find((room) => room.isDM && room.dmWith === peerId) || null;
 }
 
 async function openDM(peerId, peerUsername) {
   const myId = S.profile?.id;
   if (!myId || !peerId || peerId === myId) return;
   try {
-    const roomKey = await dmRoomKey(myId, peerId);
+    const existing = directRoomWith(peerId);
     closeAllModals();
-    if (S.rooms[roomKey] && !S.rooms[roomKey].blockedByPeer) {
-      await openRoom(roomKey);
+    if (existing && !existing.blockedByPeer) {
+      await openRoom(existing.roomKey);
       return;
     }
     // A room they blocked goes back through join-dm, which clears the flag and
     // re-sends the request. Otherwise their unblock would never reach us.
-    if (S.rooms[roomKey]?.blockedByPeer) {
-      await chat.joinDM({ roomKey, toId: peerId, toUsername: peerUsername });
+    if (existing?.blockedByPeer) {
+      await chat.joinDM({ toId: peerId, toUsername: peerUsername });
       await loadRooms();
       renderRoomList();
-      await openRoom(roomKey);
+      await openRoom(existing.roomKey);
       return;
     }
     const peer = S.peerProfiles[peerId];
@@ -2800,7 +2802,7 @@ async function openDM(peerId, peerUsername) {
     $("message-input").disabled = true;
     $("send-btn").disabled = true;
     const result = await chat.joinDM({
-      roomKey, toId: peerId, toUsername: peerUsername,
+      toId: peerId, toUsername: peerUsername,
       toAvatar: peerAv, toBio: peer?.bio || "",
     });
     if (result.roomKey) {
