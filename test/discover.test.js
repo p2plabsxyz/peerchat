@@ -110,8 +110,11 @@ describe("find people", () => {
     assert.match(content, /max-height: 86vh/);
     assert.match(content, /overflow-y: auto/);
 
-    const list = css.slice(css.indexOf(".discover-list {"), css.indexOf(".discover-list {") + 260);
-    assert.match(list, /max-height: min\(240px, 34vh\)/);
+    // The long list shrinks to whatever the card has left rather than pushing
+    // it past the window, so one scrollbar does the job instead of a scrollbar
+    // inside a scrollbar.
+    const list = css.slice(css.indexOf(".discover-list {"), css.indexOf(".discover-list {") + 320);
+    assert.match(list, /flex: 1 1 auto; min-height: 0; overflow-y: auto/);
   });
 
   it("treats a personal link as a request, not a room to join", () => {

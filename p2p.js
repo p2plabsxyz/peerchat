@@ -420,15 +420,20 @@ function isPeerIdRemovedFromRoom(roomKey, peerId) {
  * somebody who is not the creator.
  */
 function appendRemovalNotice(roomKey, peerId, username) {
+  const room = savedData.rooms?.[roomKey];
   const name = clamp(username, MAX_NAME_LEN) ||
-    savedData.rooms?.[roomKey]?.members?.[peerId]?.username ||
+    room?.members?.[peerId]?.username ||
     savedData.peerProfiles?.[peerId]?.username ||
     peerId;
+  // By name, because "the creator" tells nobody in the room who that was.
+  const by = isRoomCreator(roomKey)
+    ? (savedData.profile?.username || localId)
+    : (room?.createdByName || room?.createdBy || "whoever made the room");
   return appendToFeed(roomKey, {
     id: `removed-${roomKey}-${peerId}-${Date.now()}`,
     type: "system",
     moderationNotice: true,
-    text: `${name} was removed from the room by its creator`,
+    text: `${name} was removed from the room by ${by}`,
     ts: Date.now(),
   }).catch(() => {});
 }
@@ -458,30 +463,18 @@ function broadcastRoomBans(roomKey) {
 }
 
 /**
- * Drop anyone in the room who is no longer welcome in it.
+ * Whether the peer on this connection has been removed from one room.
  *
- * Not straight away. Nothing they send is read and nothing is relayed to them
- * either way, so the drop is tidiness rather than the barrier, and destroying
- * the connection the same tick threw away the removal notice still queued on
- * it: the person being removed learned nothing and carried on typing into a
- * room that had stopped listening.
+ * One connection carries every room two people share, so a removal stops that
+ * room and leaves the rest alone. Destroying the connection instead took them
+ * offline everywhere the two of you met, and it threw away the removal notice
+ * still queued on it, so they never learned why. Nothing of that room is
+ * relayed to them, nothing of theirs is read, and no history is sent, which is
+ * what being out of a room means when there is no server to shut a door.
  */
-const REMOVED_PEER_DROP_MS = 1000;
-
-function enforceRoomBans(roomKey) {
-  for (const peer of [...peers]) {
-    if (!peerSharesRoom(peer, roomKey)) continue;
-    if (!isPeerRemovedFromRoom(roomKey, peer)) continue;
-    dropRemovedPeer(peer);
-  }
-}
-
-function dropRemovedPeer(peer) {
-  if (!peer || peer.removedDropTimer) return;
-  peer.removedDropTimer = setTimeout(() => {
-    try { peer.conn.destroy(); } catch {}
-  }, REMOVED_PEER_DROP_MS);
-  peer.removedDropTimer.unref?.();
+function connectionRemovedFrom(conn, roomKey) {
+  const peer = peerForConnection(conn) || pendingPeers.get(conn);
+  return !!peer && isPeerRemovedFromRoom(roomKey, peer);
 }
 
 function relayToPeer(peerId, payload) {
@@ -630,6 +623,7 @@ function peerJoinedAt(conn, rk) {
 
 async function syncRoomHistoryTo(conn, rk) {
   if (!connectionSharesRoom(conn, rk)) return;
+  if (connectionRemovedFrom(conn, rk)) return;
   const feed = roomFeeds[rk];
   if (!feed || !feed.length) return;
   // Sending history the receiver will discard costs every member bandwidth and
@@ -769,6 +763,7 @@ function shareMembers(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   for (const rk of roomKeys) {
     const room = savedData.rooms[rk];
     if (!room || !room.members || !roomFeeds[rk]) continue;
+    if (connectionRemovedFrom(conn, rk)) continue;
 
     let members = {};
     let bytes = 0;
@@ -1126,19 +1121,14 @@ export function initChat(sdk, options = {}) {
 
       shareTopics(conn);
       shareProfile(conn);
-      // Before anything else they might act on. If they are the one who was
-      // removed, this is how they find out.
-      const activatedPeer = peerForConnection(conn);
-      let removedHere = false;
-      for (const rk of activatedPeer?.rooms || []) {
-        sendRoomBans(conn, rk);
-        if (isPeerRemovedFromRoom(rk, activatedPeer)) removedHere = true;
-      }
-      if (removedHere) {
-        dropRemovedPeer(activatedPeer);
-        return;
-      }
+      // Room metadata before the removals, because it carries the creator key
+      // and a removal is only believed from the connection whose key that is.
+      // Sent first, the list arrived before there was anything to check it
+      // against and was dropped, so somebody who left and rejoined found the
+      // room open again.
       shareRoomMeta(conn);
+      const activatedPeer = peerForConnection(conn);
+      for (const rk of activatedPeer?.rooms || []) sendRoomBans(conn, rk);
       shareMembers(conn);
       announceJoins(conn);
       shareDMInvites(conn, remoteId);
@@ -1267,6 +1257,8 @@ export function initChat(sdk, options = {}) {
             if (moderationIsKicked(joinPeerId, msg.roomKey)) continue;
             const joinName = clamp(msg.username, 50) || joinPeerId;
             const room = savedData.rooms[msg.roomKey];
+            // Announcing a join does not undo a removal.
+            if (room && isPeerBannedFromRoom(room.bans, { peerId: joinPeerId, connectionKey: fullId })) continue;
             const alreadyKnownMember = !!(room?.members?.[joinPeerId]?.joinedAt);
             if (room) {
               if (!room.members) room.members = {};
@@ -1434,7 +1426,6 @@ export function initChat(sdk, options = {}) {
             for (const id of Object.keys(room.members || {})) {
               if (isPeerBannedFromRoom(room.bans, { peerId: id })) delete room.members[id];
             }
-            enforceRoomBans(msg.roomKey);
             persistData();
             emitRoomUpdate(msg.roomKey);
             continue;
@@ -1543,6 +1534,9 @@ export function initChat(sdk, options = {}) {
             const incoming = msg.members || {};
             // Only merge new member profiles, never blindly delete based on incomplete lists
             for (const [peerId, m] of Object.entries(incoming)) {
+              // Somebody removed is not in the room, so a list relayed by
+              // anyone who has not heard yet cannot put them back into it.
+              if (isPeerBannedFromRoom(room.bans, { peerId })) continue;
               if (!room.members[peerId]) room.members[peerId] = m;
             }
             debouncePersist();
@@ -1838,11 +1832,7 @@ export async function handleChatRequest(req, sdk) {
         if (room.members?.[peerId]) delete room.members[peerId];
 
         appendRemovalNotice(rk, peerId, removedName);
-        // Broadcast first. Enforcing first took the removed peer out of the
-        // loop below, so the one person who most needed to hear it was the one
-        // who never did.
         broadcastRoomBans(rk);
-        enforceRoomBans(rk);
         persistData();
         emitRoomUpdate(rk);
         return respond(200, { bans: room.bans });
