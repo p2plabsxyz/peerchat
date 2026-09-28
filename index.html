@@ -37,6 +37,7 @@
             <img id="sidebar-avatar" class="avatar" />
             <span id="sidebar-username"></span>
           </div>
+          <button id="discover-btn" title="Find people">Find</button>
           <button id="settings-btn" title="Settings"><img src="./assets/svg/settings.svg" alt="Settings" /></button>
         </div>
         <div id="sidebar-actions">
@@ -44,6 +45,7 @@
           <button id="join-room-btn">Join Room</button>
         </div>
         <div id="sidebar-body">
+          <button type="button" id="requests-btn" class="requests-btn" hidden></button>
           <input type="text" id="room-search" placeholder="Search rooms…" autocomplete="off" spellcheck="false" />
           <div id="room-list"></div>
           <footer class="chat-footer">
@@ -220,16 +222,37 @@
       </div>
     </div>
 
-    <!-- DM Invite Modal -->
-    <div id="dm-invite-modal" class="modal">
-      <div class="modal-content user-info">
-        <img id="dmi-avatar" class="avatar-lg" />
-        <h3 id="dmi-name"></h3>
-        <p id="dmi-bio" class="muted"></p>
-        <p class="muted small">wants to send you a direct message</p>
+    <!-- Find people -->
+    <div id="discover-modal" class="modal">
+      <div class="modal-content">
+        <h3>Find people</h3>
+        <div id="discover-qr" class="discover-qr"></div>
+        <p class="muted small">
+          Your code. Anyone who scans it sends you a message request, which you can
+          accept, decline or block. It is not a way in: nothing happens until you say so.
+        </p>
+        <h4>Search people</h4>
+        <p class="muted small">
+          Everyone in Peer-to-Peer Republic, which is the room everyone joins, so it
+          doubles as the place to find somebody. No directory is kept anywhere: this is
+          the room's own member list.
+        </p>
+        <input type="text" id="discover-search" placeholder="Search by name" autocomplete="off" spellcheck="false" />
+        <div id="discover-list" class="discover-list"></div>
         <div class="modal-actions">
-          <button type="button" id="dmi-reject" class="btn-secondary">Decline</button>
-          <button type="button" id="dmi-accept">Accept</button>
+          <button type="button" id="discover-close" class="btn-secondary">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Message requests -->
+    <div id="requests-modal" class="modal">
+      <div class="modal-content">
+        <h3>Message requests</h3>
+        <p class="muted small">Somebody has to ask before they can message you. Blocking one stops them asking again.</p>
+        <div id="requests-list" class="requests-list"></div>
+        <div class="modal-actions">
+          <button type="button" id="requests-close" class="btn-secondary">Close</button>
         </div>
       </div>
     </div>

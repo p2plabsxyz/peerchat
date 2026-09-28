@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 
 import { handleChatRequest, initChat, deriveTopic } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
@@ -108,6 +109,10 @@ describe("blocking a peer", () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
+  // Minted by join-dm rather than known up front, and shared by the tests
+  // below the one that opens it.
+  let ourDmRoom = "";
+
   it("refuses to block yourself", async () => {
     const me = await call("get-profile", "GET");
     const res = await request("block-peer", "POST", { peerId: me.id });
@@ -148,7 +153,7 @@ describe("blocking a peer", () => {
   });
 
   it("refuses to open a direct message with a blocked peer", async () => {
-    const res = await request("join-dm", "POST", { roomKey: DM_ROOM, toId: peerId, toUsername: "Blocked Bob" });
+    const res = await request("join-dm", "POST", { toId: peerId, toUsername: "Blocked Bob" });
     assert.equal(res.status, 403);
     assert.match(res.body.error, /Unblock/);
   });
@@ -156,13 +161,24 @@ describe("blocking a peer", () => {
   it("closes an already accepted conversation both ways", async () => {
     // Open the direct room first, the way it would exist before a block.
     await call("unblock-peer", "POST", { peerId });
-    const opened = await request("join-dm", "POST", { roomKey: DM_ROOM, toId: peerId, toUsername: "Blocked Bob" });
+    const opened = await request("join-dm", "POST", { toId: peerId, toUsername: "Blocked Bob" });
     assert.equal(opened.status, 200);
-    const before = await request("send", "POST", { message: "before the block" }, DM_ROOM);
+    ourDmRoom = opened.body.roomKey;
+
+    // Minted here, not computed from the two peer ids. Both of those are
+    // public, so a derived key was one anybody who knew them could work out,
+    // join the topic with, and read the conversation and its media.
+    assert.match(ourDmRoom, /^[a-f0-9]{64}$/);
+    assert.notEqual(ourDmRoom, DM_ROOM);
+    const me = (await call("get-profile", "GET")).id;
+    const derivable = createHash("sha256").update([me, peerId].sort().join(":dm:")).digest("hex");
+    assert.notEqual(ourDmRoom, derivable);
+
+    const before = await request("send", "POST", { message: "before the block" }, ourDmRoom);
     assert.equal(before.status, 200);
 
     await call("block-peer", "POST", { peerId, username: "Blocked Bob" });
-    const after = await request("send", "POST", { message: "after the block" }, DM_ROOM);
+    const after = await request("send", "POST", { message: "after the block" }, ourDmRoom);
     assert.equal(after.status, 403);
     assert.match(after.body.error, /Unblock/);
   });
@@ -171,19 +187,21 @@ describe("blocking a peer", () => {
     await call("unblock-peer", "POST", { peerId });
 
     // This is what our side looks like after they block us.
-    transport.send(JSON.stringify({ type: "dm-blocked", roomKey: DM_ROOM, fromId: peerId }) + "\n");
+    transport.send(JSON.stringify({ type: "dm-blocked", roomKey: ourDmRoom, fromId: peerId }) + "\n");
     let room;
     for (let i = 0; i < 100; i++) {
-      room = await findRoom(DM_ROOM);
+      room = await findRoom(ourDmRoom);
       if (room?.blockedByPeer) break;
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.equal(room?.blockedByPeer, true, "dm-blocked never landed");
 
     // Without this an unblock on their side could never reach us again.
-    const retry = await request("join-dm", "POST", { roomKey: DM_ROOM, toId: peerId, toUsername: "Blocked Bob" });
+    const retry = await request("join-dm", "POST", { toId: peerId, toUsername: "Blocked Bob" });
     assert.equal(retry.status, 200);
-    const reopened = await findRoom(DM_ROOM);
+    // The same conversation, not a second one beside it.
+    assert.equal(retry.body.roomKey, ourDmRoom);
+    const reopened = await findRoom(ourDmRoom);
     assert.equal(reopened.blockedByPeer, false, "asking again clears it");
     assert.equal(reopened.pendingAcceptance, true, "and the request goes back out");
 
@@ -217,13 +235,20 @@ describe("blocking a peer", () => {
       fromUsername: "Blocked Bob", toId: (await call("get-profile", "GET")).id,
     }) + "\n");
 
-    let pending = {};
-    for (let i = 0; i < 100; i++) {
-      pending = (await call("get-rooms", "GET")).pendingDMs || {};
-      if (pending[DM_ROOM_2]) break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.equal(pending[DM_ROOM_2]?.fromUsername, "Blocked Bob");
+    await new Promise((r) => setTimeout(r, 300));
+    // The unblock took effect, so no refusal goes back.
     assert.equal(frames.some((f) => f.type === "dm-blocked"), false);
+
+    // We already had a conversation open with them, so there are two keys for
+    // one conversation. Keys are random, so the lower one is an answer both
+    // sides reach alone, and whoever holds the other gives it up.
+    const rooms = await call("get-rooms", "GET");
+    const mine = rooms.rooms.filter((room) => room.isDM && room.dmWith === peerId);
+    const waiting = Object.values(rooms.pendingDMs || {}).filter((dm) => dm.fromId === peerId);
+    assert.equal(mine.length + waiting.length, 1, "one conversation with them, not two");
+    assert.equal(
+      mine[0]?.roomKey || waiting[0]?.roomKey,
+      DM_ROOM_2 < ourDmRoom ? DM_ROOM_2 : ourDmRoom,
+    );
   });
 });

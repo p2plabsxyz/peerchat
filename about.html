@@ -56,7 +56,7 @@
         <li>Messages encrypted with AES-256-GCM before they’re stored in the feed, using a message key derived from the room key. The swarm topic is derived separately, so the value the room is announced under is not the value the messages are encrypted with.</li>
         <li><strong>Reactions:</strong> emoji reactions on messages are stored in the same Hypercore (as reaction events) and sync across peers.</li>
         <li>Attachments are encrypted with a key derived from the room key and stored in a per-room Hyperdrive (<code>peerchat-…</code> in Settings → Archive); the link alone yields ciphertext. <strong>No app-enforced upload size limit</strong>—only disk, memory while uploading, and the network.</li>
-        <li><strong>Direct Messages (DMs):</strong> click a peer's avatar to send a private message; the recipient gets an accept/decline popup, and the room key is derived from both peer IDs so only those two people share it.</li>
+        <li><strong>Direct Messages (DMs):</strong> click a peer's avatar to send a private message; the recipient gets an accept/decline popup. The conversation gets its own random room key, minted by whoever opens it and handed over inside the request. See below.</li>
         <li><strong>Link previews:</strong> when a message contains a link, the sender fetches that page’s title and description once and ships them inside the encrypted message. Readers see a small text card without ever connecting to the site, so opening a room never tells the linked host who read it. Turn it off in Settings.</li>
         <li><strong>Moderation</strong> runs locally on every peer, with per-room settings chosen by whoever created the room. See below.</li>
         <li><strong>Works with the internet down:</strong> rooms are joined on an isolated LAN swarm as well as the public one (<code>@p2plabs/hyperdht-mdns</code>, no public bootstrap), so peers on the same network keep talking. It needs a network, not an internet connection.</li>
@@ -77,6 +77,23 @@
         directly, so those should be recreated with a fresh key.
       </p>
 
+      <h2>How a direct message is locked</h2>
+      <p class="muted">
+        A conversation with one person gets its own room key, 32 random bytes like any other room's.
+        Whoever opens it mints it and sends it inside the request, which only travels on a connection
+        whose public key the handshake has already proved, so it reaches that person and nobody else.
+        Everything after that is the same as a room: the topic is a separate derivation, the messages
+        are AES-256-GCM, and attachments are sealed with a third derivation of the same key.
+      </p>
+      <p class="muted">
+        Earlier builds worked the key out instead, as <code>sha256</code> of the two 8-character peer IDs.
+        Those IDs are public, they are in every member list and on every personal invite code, so anybody
+        who knew both could work out the key and read the conversation along with its pictures and files.
+        <strong>Conversations started before this keep that key</strong>, so start a new one for a private
+        conversation. Both ends also need a build with this change: older ones check an incoming key
+        against the old formula and drop anything else.
+      </p>
+
       <h2>Moderation</h2>
       <p class="muted">
         Every peer filters independently; there is no admin and no central authority. If someone strips moderation
@@ -95,6 +112,27 @@
         Repeat violations escalate from a warning, to a final warning, to a short block from that room. The block
         lifts by itself after five minutes and the counter resets, so a peer returns with a clean slate instead of
         being blocked again immediately. You are never blocked from your own rooms.
+      </p>
+
+      <h2>Removing somebody from a room</h2>
+      <p class="muted">
+        Whoever made a room can remove anyone in it. Nobody else can, and there is no vote and no report queue.
+        A removal lasts: they cannot come back.
+      </p>
+      <p class="muted">
+        Every copy of PeerChat checks that a removal really came from the person who made the room, against the
+        connection it arrived on rather than against anything written in the message, so it cannot be faked by
+        somebody claiming to be them.
+      </p>
+      <p class="muted">
+        <strong>What it does not do:</strong> take the room key back. Somebody removed still holds it, and could
+        run a changed build and listen. So removal means every ordinary PeerChat stops passing their messages on
+        and refuses their connection. It is not a lock they cannot pick, and a room key that has reached the
+        wrong person is still worth replacing.
+      </p>
+      <p class="muted">
+        The three-strikes spam and abuse limit below is a different thing. That one is decided by a filter rather
+        than a person, filters get things wrong, so it is a five minute pause and not a removal.
       </p>
 
       <h2>What is blocked for everyone</h2>
@@ -158,6 +196,14 @@
         Running both at once is what breaks. Pairing a second phone is refused; use
         <strong>Move to a new phone</strong> in Backup, and remove the identity from the old phone
         first (PeerSky Mobile, Settings) so it stops writing.
+      </p>
+
+      <h2>Checking what you are connected to</h2>
+      <p class="muted">
+        Open <a href="hyper://chat/?action=net-status">hyper://chat/?action=net-status</a> in PeerSky to see
+        every peer PeerChat is talking to right now: the rooms you share with each one, whether they were found
+        on your local network, and whether the handshake finished. A peer with <code>"handshake": false</code>
+        is connected but not yet speaking PeerChat, which is what an empty room with peers on it looks like.
       </p>
 
       <h2>Security</h2>

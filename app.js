@@ -1,5 +1,12 @@
 import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
-import { buildInviteUrl, parseInvite } from "./lib/invite.js";
+import {
+  buildDirectInviteUrl,
+  buildInviteUrl,
+  parseDirectInvite,
+  parseInvite,
+} from "./lib/invite.js";
+import { createQrMatrix } from "./lib/qrcode-matrix.js";
+import { buildDirectory, collapseMembers } from "./lib/members.js";
 
 import { chat } from "./chat-api.js";
 import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
@@ -43,10 +50,12 @@ let reconnectDelay = 1000;
 let lastSseTime = 0;
 let sseHealthTimer = null;
 let ctxTarget = null;
+// Set while the room info modal is open, so a removal that arrives from the
+// creator can redraw its member list. Null the rest of the time.
+let refreshRoomInfoMembers = null;
 let audioCtx;
 let replyTarget = null;
 let mentionIdx = -1;
-let _dmiRoomKey = null;
 const roomDriveUrls = new Map();
 const decryptedUrls = new DecryptedUrlCache();
 const roomRefs = new RoomRefs();
@@ -932,11 +941,25 @@ function hideBoot() {
 // An invite carries the room key, so it is read once and wiped from the URL
 // before the app renders; history and the address bar must not keep it.
 const pendingInvite = parseInvite(location.hash);
-if (pendingInvite) {
+const pendingDirectInvite = parseDirectInvite(location.hash);
+if (pendingInvite || pendingDirectInvite) {
   try { history.replaceState(null, "", location.pathname + location.search); } catch {}
 }
 
 async function consumeInvite() {
+  // A personal link names a person rather than a room, so it asks them.
+  if (pendingDirectInvite) {
+    if (pendingDirectInvite !== S.profile?.id) {
+      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[pendingDirectInvite];
+      const name = S.peerProfiles[pendingDirectInvite]?.username || known?.username || pendingDirectInvite;
+      try {
+        await openDM(pendingDirectInvite, name);
+      } catch (err) {
+        console.error("[chat] personal invite:", err);
+      }
+    }
+    return;
+  }
   if (!pendingInvite) return;
   try {
     if (!S.rooms[pendingInvite]) {
@@ -1095,6 +1118,9 @@ function roomMatchesSidebarQuery(r, q) {
 }
 
 function renderRoomList() {
+  // One place, so the count cannot drift from what is actually waiting: every
+  // path that accepts, declines, blocks or loads rooms ends up here.
+  renderRequestsButton();
   const list = $("room-list");
   list.innerHTML = "";
   const q = ($("room-search")?.value || "").trim().toLowerCase();
@@ -1216,13 +1242,22 @@ function applyDMComposerGate(roomKey) {
     }
   }
 
+  // Nothing sent from here would be passed on, so the composer says so rather
+  // than letting messages go nowhere.
+  const removed = !!room.removedByCreator;
   if (banner) {
-    banner.style.display = blockedByPeer || blockedByMe ? "" : "none";
-    banner.textContent = blockedByMe
-      ? "You blocked this person. Unblock them in Settings to message them again."
-      : "This person blocked your direct messages. Open their profile and press Message to ask again.";
+    banner.style.display = removed || blockedByPeer || blockedByMe ? "" : "none";
+    banner.textContent = removed
+      ? `You were removed from this room by ${room.createdByName || "whoever made it"}.`
+      : blockedByMe
+        ? "You blocked this person. Unblock them in Settings to message them again."
+        : "This person blocked your direct messages. Open their profile and press Message to ask again.";
   }
-  if (blockedByPeer || blockedByMe) {
+  if (removed) {
+    messageInput.disabled = true;
+    messageInput.placeholder = "You were removed from this room.";
+    sendBtn.disabled = true;
+  } else if (blockedByPeer || blockedByMe) {
     messageInput.disabled = true;
     messageInput.placeholder = blockedByMe ? "You blocked this person." : "This person blocked your direct messages.";
     sendBtn.disabled = true;
@@ -2026,6 +2061,8 @@ function connectGlobalSSE() {
               renderModerationInfo(riModSettings, room.moderation);
             }
           }
+
+          refreshRoomInfoMembers?.();
         }
 
         applyDMComposerGate(data.roomKey);
@@ -2123,11 +2160,11 @@ function connectGlobalSSE() {
       if (S.rooms[roomKey]) return;
       if (!S.pendingDMs) S.pendingDMs = {};
       S.pendingDMs[roomKey] = { fromId, fromUsername, fromAvatar, fromBio };
-      $("dmi-avatar").src = avatar(fromUsername, 64, fromAvatar);
-      $("dmi-name").textContent = fromUsername || fromId;
-      $("dmi-bio").textContent = fromBio || "";
-      _dmiRoomKey = roomKey;
-      openModal("dm-invite-modal");
+      // A request used to take the whole screen the moment it arrived, and a
+      // second one replaced the first with no way back to it. They wait behind
+      // a line of text in the sidebar instead.
+      renderRequestsButton();
+      if (document.getElementById("requests-modal")?.classList.contains("open")) renderRequestsList();
     } catch {}
   });
 
@@ -2469,6 +2506,11 @@ $("chat-header-main")?.addEventListener("click", () => {
   $("ri-date").textContent = formatDate(room.createdAt);
 
   const renderMemberList = (searchQuery = "") => {
+    // Read the room each time rather than closing over it: a removal somebody
+    // else made arrives as a room-update while this modal is open, and that is
+    // exactly the moment the list has to redraw.
+    const room = S.rooms[S.activeRoom];
+    if (!room) return;
     const memberList = $('ri-member-list');
     memberList.innerHTML = "";
     let memberCount = 0;
@@ -2491,22 +2533,28 @@ $("chat-header-main")?.addEventListener("click", () => {
       memberCount = 1;
     } else {
       const members = room.members || {};
-      const seen = new Map();
+      const removed = new Set((room.bans || []).map((ban) => ban.id));
+      const rows = [];
       for (const [id, m] of Object.entries(members)) {
-        const isOn = (id === S.profile?.id) || S.onlinePeers.has(id);
-        const memberName = S.peerProfiles[id]?.username || m.username || id;
-        const existing = seen.get(memberName);
-        if (!existing || (isOn && !existing.isOn)) {
-          seen.set(memberName, { id, m, isOn, memberName });
-        }
+        // Removed people are not in the room. Without this they came back:
+        // the list is rebuilt from what peers relay.
+        if (removed.has(id)) continue;
+        const self = id === S.profile?.id;
+        rows.push({
+          id,
+          m,
+          self,
+          online: self || S.onlinePeers.has(id),
+          username: S.peerProfiles[id]?.username || m.username || id,
+        });
       }
-      const memberEntries = [...seen.values()].sort((a, b) => {
-        if (a.isOn === b.isOn) return 0;
-        return a.isOn ? -1 : 1;
+      const memberEntries = collapseMembers(rows).sort((a, b) => {
+        if (a.online === b.online) return 0;
+        return a.online ? -1 : 1;
       });
       memberCount = memberEntries.length;
       
-      for (const { id, m, isOn, memberName } of memberEntries) {
+      for (const { id, m, online: isOn, username: memberName } of memberEntries) {
         if (!query || memberName.toLowerCase().includes(query)) {
           const row = document.createElement("div");
           row.className = "member-row";
@@ -2514,6 +2562,20 @@ $("chat-header-main")?.addEventListener("click", () => {
           row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
           row.style.cursor = "pointer";
           row.addEventListener("click", () => { closeAllModals(); showUserInfo(id, memberName); });
+
+          // Only whoever made the room, and never themselves.
+          if (room.isCreator && id !== S.profile?.id) {
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "member-remove";
+            remove.textContent = "Remove";
+            remove.addEventListener("click", (ev) => {
+              ev.stopPropagation();
+              removeRoomMember(id, memberName);
+            });
+            row.appendChild(remove);
+          }
+
           memberList.appendChild(row);
         }
       }
@@ -2523,6 +2585,9 @@ $("chat-header-main")?.addEventListener("click", () => {
   };
   
   renderMemberList();
+  // So a removal that arrives from the creator redraws the list under the
+  // cursor instead of waiting for the modal to be closed and opened again.
+  refreshRoomInfoMembers = () => renderMemberList($("ri-member-search")?.value || "");
   
   const searchInput = $("ri-member-search");
   if (searchInput) {
@@ -2699,29 +2764,31 @@ function renderBlockedList() {
   }
 }
 
-async function dmRoomKey(id1, id2) {
-  const sorted = [String(id1 || "").toLowerCase(), String(id2 || "").toLowerCase()].sort().join(":dm:");
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sorted));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+// One conversation per person, found by who it is with. The key used to be
+// sha256 of the two peer ids, and those are public, so anybody who knew both
+// could derive it and read the conversation. The backend mints a random one
+// now and hands it over on the connection.
+function directRoomWith(peerId) {
+  return Object.values(S.rooms).find((room) => room.isDM && room.dmWith === peerId) || null;
 }
 
 async function openDM(peerId, peerUsername) {
   const myId = S.profile?.id;
   if (!myId || !peerId || peerId === myId) return;
   try {
-    const roomKey = await dmRoomKey(myId, peerId);
+    const existing = directRoomWith(peerId);
     closeAllModals();
-    if (S.rooms[roomKey] && !S.rooms[roomKey].blockedByPeer) {
-      await openRoom(roomKey);
+    if (existing && !existing.blockedByPeer) {
+      await openRoom(existing.roomKey);
       return;
     }
     // A room they blocked goes back through join-dm, which clears the flag and
     // re-sends the request. Otherwise their unblock would never reach us.
-    if (S.rooms[roomKey]?.blockedByPeer) {
-      await chat.joinDM({ roomKey, toId: peerId, toUsername: peerUsername });
+    if (existing?.blockedByPeer) {
+      await chat.joinDM({ toId: peerId, toUsername: peerUsername });
       await loadRooms();
       renderRoomList();
-      await openRoom(roomKey);
+      await openRoom(existing.roomKey);
       return;
     }
     const peer = S.peerProfiles[peerId];
@@ -2735,7 +2802,7 @@ async function openDM(peerId, peerUsername) {
     $("message-input").disabled = true;
     $("send-btn").disabled = true;
     const result = await chat.joinDM({
-      roomKey, toId: peerId, toUsername: peerUsername,
+      toId: peerId, toUsername: peerUsername,
       toAvatar: peerAv, toBio: peer?.bio || "",
     });
     if (result.roomKey) {
@@ -2749,6 +2816,33 @@ async function openDM(peerId, peerUsername) {
     $("chat-empty").style.display = "";
     $("chat-active").style.display = "none";
     alert("Could not open DM: " + err.message);
+  }
+}
+
+/**
+ * Removing somebody from a room you made.
+ *
+ * Permanent, and it is the room's decision rather than a private one, which is
+ * why it asks first. Blocking is the private version and stays separate.
+ */
+async function removeRoomMember(peerId, memberName) {
+  const roomKey = S.activeRoom;
+  if (!roomKey) return;
+  const confirmed = confirm(
+    `Remove ${memberName} from this room?\n\n` +
+    "They will not be able to come back. Everyone running PeerChat will stop passing their messages on.",
+  );
+  if (!confirmed) return;
+
+  try {
+    await chat.removeRoomMember({ roomKey, peerId });
+    closeAllModals();
+    // Not just the room list: the removal writes a line into the room, and
+    // waiting for the next sync tick to notice it meant nothing appeared to
+    // have happened.
+    await refreshActiveRoom();
+  } catch (err) {
+    alert("Could not remove them: " + err.message);
   }
 }
 
@@ -2796,13 +2890,180 @@ $("ui-report-btn")?.addEventListener("click", () => {
   if (_uiCurrentPeerId) reportPeer(_uiCurrentPeerId, _uiCurrentPeerName);
 });
 
-$("dmi-accept")?.addEventListener("click", () => {
-  if (_dmiRoomKey) acceptDM(_dmiRoomKey);
+/**
+ * The people waiting to message you.
+ *
+ * A request used to open a modal over everything the moment it landed, and a
+ * second one replaced the first with no way back to it. They queue behind a
+ * line in the sidebar now, and the list is where you answer them.
+ */
+function renderRequestsButton() {
+  const button = $("requests-btn");
+  if (!button) return;
+  const count = Object.keys(S.pendingDMs || {}).length;
+  button.hidden = count === 0;
+  button.textContent = `Requests (${count})`;
+}
+
+function renderRequestsList() {
+  const list = $("requests-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const entries = Object.entries(S.pendingDMs || {});
+  if (entries.length === 0) {
+    list.innerHTML = '<p class="muted small">Nobody is waiting.</p>';
+    return;
+  }
+
+  for (const [roomKey, invite] of entries) {
+    const name = invite.fromUsername || invite.fromId;
+    const row = document.createElement("div");
+    row.className = "request-row";
+    row.innerHTML =
+      `<img src="${esc(avatar(name, 32, invite.fromAvatar))}" />` +
+      `<div class="request-copy"><span>${esc(name)}</span>` +
+      `<span class="muted small">wants to message you</span></div>`;
+
+    // Declining answers this one request, so somebody determined asks again.
+    // Blocking drops it and stops the next one.
+    const block = document.createElement("button");
+    block.type = "button";
+    block.className = "request-block";
+    block.textContent = "Block";
+    block.addEventListener("click", () => blockRequest(roomKey, invite));
+
+    const decline = document.createElement("button");
+    decline.type = "button";
+    decline.className = "btn-secondary";
+    decline.textContent = "Decline";
+    decline.addEventListener("click", () => rejectDM(roomKey));
+
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.textContent = "Accept";
+    accept.addEventListener("click", () => acceptDM(roomKey));
+
+    row.append(block, decline, accept);
+    list.appendChild(row);
+  }
+}
+
+async function blockRequest(roomKey, invite) {
+  const name = invite.fromUsername || invite.fromId;
+  if (!confirm(`Block ${name}?\n\nTheir request goes away and they cannot send another. You can unblock them in Settings.`)) return;
+  try {
+    const result = await chat.blockPeer({ peerId: invite.fromId, username: name });
+    S.blockedPeers = result.blockedPeers || [];
+    S.pendingDMs = result.pendingDMs || {};
+    delete S.pendingDMs[roomKey];
+    renderRequestsButton();
+    renderRequestsList();
+  } catch (err) {
+    alert("Could not block them: " + err.message);
+  }
+}
+
+/**
+ * Finding somebody to message.
+ *
+ * Two halves. Your own code, which anyone can scan to ask you for a direct
+ * message, and a search over the welcome room's member list, which is the only
+ * place everyone is and so the nearest thing PeerChat has to a directory. No
+ * list is kept anywhere for this.
+ */
+function renderDiscoverQr() {
+  const holder = $("discover-qr");
+  if (!holder) return;
+  holder.innerHTML = "";
+
+  const url = buildDirectInviteUrl(S.profile?.id || "");
+  if (!url) {
+    holder.innerHTML = '<p class="muted small">Set a display name first and your code appears here.</p>';
+    return;
+  }
+
+  let matrix;
+  try {
+    matrix = createQrMatrix(url, "M");
+  } catch {
+    holder.innerHTML = '<p class="muted small">Could not draw your code.</p>';
+    return;
+  }
+
+  // A grid of divs rather than a canvas: it scales with the modal and needs no
+  // pixel maths to stay sharp.
+  const grid = document.createElement("div");
+  grid.className = "qr-grid";
+  grid.style.gridTemplateColumns = `repeat(${matrix.length}, 1fr)`;
+  for (const row of matrix) {
+    for (const on of row) {
+      const cell = document.createElement("span");
+      if (on) cell.className = "qr-on";
+      grid.appendChild(cell);
+    }
+  }
+  holder.appendChild(grid);
+}
+
+function discoverDirectory(query = "") {
+  const room = S.rooms[PRE_JOINED_ROOM_KEY];
+  return buildDirectory({
+    members: room?.members,
+    peerProfiles: S.peerProfiles,
+    onlinePeers: S.onlinePeers,
+    bans: room?.bans,
+    selfId: S.profile?.id,
+    query,
+  });
+}
+
+function renderDiscoverList() {
+  const list = $("discover-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const found = discoverDirectory($("discover-search")?.value || "");
+  if (found.length === 0) {
+    const query = ($("discover-search")?.value || "").trim();
+    list.innerHTML = `<p class="muted small">${query ? "Nobody by that name." : "Nobody else here yet."}</p>`;
+    return;
+  }
+
+  for (const member of found) {
+    const row = document.createElement("div");
+    row.className = "member-row";
+    row.innerHTML =
+      `<img src="${esc(avatar(member.username, 22, member.avatar))}" />` +
+      `<span>${esc(member.username)}</span>` +
+      `<span class="online-dot ${member.online ? "online" : "offline"}"></span>`;
+    row.style.cursor = "pointer";
+    row.addEventListener("click", () => {
+      closeAllModals();
+      openDM(member.id, member.username);
+    });
+    list.appendChild(row);
+  }
+}
+
+$("discover-btn")?.addEventListener("click", () => {
+  const search = $("discover-search");
+  if (search) search.value = "";
+  renderDiscoverQr();
+  renderDiscoverList();
+  openModal("discover-modal");
 });
 
-$("dmi-reject")?.addEventListener("click", () => {
-  if (_dmiRoomKey) rejectDM(_dmiRoomKey);
+$("discover-search")?.addEventListener("input", () => renderDiscoverList());
+$("discover-close")?.addEventListener("click", () => closeAllModals());
+
+$("requests-btn")?.addEventListener("click", () => {
+  renderRequestsList();
+  openModal("requests-modal");
 });
+
+$("requests-close")?.addEventListener("click", () => closeAllModals());
+
 
 $("settings-btn")?.addEventListener("click", () => {
   $("set-username").value = S.profile?.username || "";

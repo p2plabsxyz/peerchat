@@ -717,6 +717,10 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   border-radius: 12px; padding: 1.5rem;
   max-width: 400px; width: 90%;
   display: flex; flex-direction: column; gap: 0.65rem;
+  /* A modal is a card on the page, not the page. Without a ceiling the taller
+     ones (find people, room info on a short window) grew past the viewport and
+     lost their own edges along with the button at the bottom. */
+  max-height: 86vh; overflow-y: auto;
 }
 .modal-content > form {
   display: flex;
@@ -804,7 +808,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   outline: none;
   border-color: var(--accent);
 }
-#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 200px; overflow-y: auto; }
+#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: min(200px, 30vh); overflow-y: auto; }
 .member-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 0.8rem; padding: 4px 0;
@@ -1172,4 +1176,63 @@ a:hover { text-decoration: none; }
 .mod-setting-item strong {
   color: var(--accent);
   font-weight: 600;
+}
+
+.member-remove {
+  margin-left: auto; padding: 2px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: var(--danger);
+  font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+
+.member-remove:hover { background: var(--base01); }
+
+.requests-btn {
+  width: 100%; margin-bottom: 0.5rem; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--accent);
+  font-size: 0.8rem; font-weight: 700; cursor: pointer; text-align: left;
+}
+
+.requests-btn:hover { background: var(--base01); }
+
+.requests-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 320px; overflow-y: auto; }
+
+.request-row {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 8px; border-radius: 10px; background: var(--base01);
+}
+
+.request-row img { width: 32px; height: 32px; border-radius: 50%; }
+
+.request-copy { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+
+.request-block {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: var(--danger); font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+
+#discover-btn {
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: none; color: var(--accent);
+  font-size: 0.75rem; font-weight: 700; cursor: pointer;
+}
+
+#discover-btn:hover { background: var(--base01); }
+
+.discover-qr { display: flex; justify-content: center; padding: 0.5rem 0; }
+
+.qr-grid {
+  display: grid; width: 190px; aspect-ratio: 1;
+  padding: 8px; background: #ffffff; border-radius: 8px;
+}
+
+.qr-grid span { background: #ffffff; }
+.qr-grid .qr-on { background: #000000; }
+
+.discover-list {
+  display: flex; flex-direction: column; gap: 0.25rem;
+  /* Shorter on a short window, so the card scrolls as one thing instead of
+     nesting a scrollbar inside a scrollbar. */
+  max-height: min(240px, 34vh); overflow-y: auto; margin-top: 0.5rem;
 }
