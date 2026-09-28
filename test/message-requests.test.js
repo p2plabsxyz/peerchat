@@ -38,4 +38,22 @@ describe("message requests", () => {
     assert.match(block, /cannot send another/);
     assert.match(block, /unblock them in Settings/);
   });
+
+  // Answering one request is not finishing with the window: closing it meant
+  // reopening it for the next person waiting.
+  it("leaves the window open and the rest on screen", async () => {
+    for (const action of ["async function acceptDM(", "async function rejectDM("]) {
+      const body = app.slice(app.indexOf(action), app.indexOf("} catch", app.indexOf(action)));
+      assert.doesNotMatch(body, /closeAllModals\(\)/);
+      assert.match(body, /renderRequestsList\(\)/);
+    }
+
+    // A name and three answers shared one row, so a long name squeezed the
+    // buttons until the words wrapped a letter at a time.
+    const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+    const row = css.slice(css.indexOf(".request-row {"), css.indexOf(".request-block"));
+    assert.match(row, /flex-direction: column/);
+    assert.match(row, /\.request-actions \{ display: flex/);
+    assert.match(app, /actions\.className = "request-actions"/);
+  });
 });

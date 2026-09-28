@@ -137,7 +137,8 @@ describe("what the renderer is told about a room's creator", () => {
     const { messages } = await history(roomKey);
     const notice = messages.find((message) => message.moderationNotice);
     assert.ok(notice, "the room has to show what happened");
-    assert.match(notice.text ?? notice.message, /was removed from the room by its creator/);
+    // Named, because "the creator" tells nobody in the room who that was.
+    assert.match(notice.text ?? notice.message, /was removed from the room by Creator$/);
   });
 
   it("refuses a removal that is not the creator's, and refuses removing yourself", async () => {

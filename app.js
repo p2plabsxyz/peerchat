@@ -2846,16 +2846,18 @@ async function removeRoomMember(peerId, memberName) {
   }
 }
 
+// Answering one request is not finishing with the window. Closing it meant
+// reopening it for the next person waiting; the new conversation is in the chat
+// list to open whenever they are done here.
 async function acceptDM(roomKey) {
   try {
-    closeAllModals();
     const result = await chat.acceptDM({ roomKey });
     if (result.roomKey) {
       delete S.pendingDMs?.[result.roomKey];
       await loadRooms();
       renderRoomList();
-      await openRoom(result.roomKey);
-      refreshRoomHeader(result.roomKey);
+      renderRequestsButton();
+      renderRequestsList();
     }
   } catch (err) {
     alert("Error: " + err.message);
@@ -2865,8 +2867,9 @@ async function acceptDM(roomKey) {
 async function rejectDM(roomKey) {
   try {
     await chat.rejectDM({ roomKey });
-    closeAllModals();
     delete S.pendingDMs?.[roomKey];
+    renderRequestsButton();
+    renderRequestsList();
   } catch (err) {
     alert("Error: " + err.message);
   }
@@ -2920,7 +2923,11 @@ function renderRequestsList() {
     const name = invite.fromUsername || invite.fromId;
     const row = document.createElement("div");
     row.className = "request-row";
-    row.innerHTML =
+    // Name above, answers below. On one row a long name squeezed the three
+    // buttons until the words wrapped a letter at a time.
+    const who = document.createElement("div");
+    who.className = "request-who";
+    who.innerHTML =
       `<img src="${esc(avatar(name, 32, invite.fromAvatar))}" />` +
       `<div class="request-copy"><span>${esc(name)}</span>` +
       `<span class="muted small">wants to message you</span></div>`;
@@ -2944,7 +2951,10 @@ function renderRequestsList() {
     accept.textContent = "Accept";
     accept.addEventListener("click", () => acceptDM(roomKey));
 
-    row.append(block, decline, accept);
+    const actions = document.createElement("div");
+    actions.className = "request-actions";
+    actions.append(block, decline, accept);
+    row.append(who, actions);
     list.appendChild(row);
   }
 }

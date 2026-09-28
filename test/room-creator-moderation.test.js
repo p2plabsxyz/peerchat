@@ -136,32 +136,31 @@ describe("room creator moderation, wired up", () => {
     assert.ok(banCheck < banHandler, "the check has to sit above every handler");
   });
 
-  it("stops relaying to somebody removed, and tells them first", async () => {
+  // A removal stops one room, and a connection carries every room two people
+  // share. Destroying it took them offline everywhere the two of you met, and
+  // threw away the removal notice still queued on it, so they never learned why.
+  it("stops the room without stopping the connection", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
+
+    // Nothing of that room reaches them: no relay, no member list, no history.
     assert.match(p2p, /peerSharesRoom\(peer, roomKey\) && !isPeerRemovedFromRoom\(roomKey, peer\)/);
-    const activate = p2p.slice(p2p.indexOf("shareTopics(conn);"), p2p.indexOf("pingTimer = setInterval"));
-    assert.ok(activate.indexOf("sendRoomBans(conn, rk)") < activate.indexOf("shareRoomMeta(conn)"));
-    assert.match(activate, /dropRemovedPeer\(activatedPeer\)/);
+    const share = p2p.slice(p2p.indexOf("function shareMembers"), p2p.indexOf("function announceJoins"));
+    assert.match(share, /if \(connectionRemovedFrom\(conn, rk\)\) continue;/);
+    const sync = p2p.slice(p2p.indexOf("async function syncRoomHistoryTo"), p2p.indexOf("async function syncHistoryTo"));
+    assert.match(sync, /if \(connectionRemovedFrom\(conn, rk\)\) return;/);
+
+    // And nothing anywhere takes the connection down over a room ban.
+    assert.doesNotMatch(p2p, /dropRemovedPeer/);
+    assert.doesNotMatch(p2p, /enforceRoomBans/);
   });
 
-  // Three ways this went wrong, all the same shape: the connection carrying the
-  // news was taken down before the news left.
-  it("tells the person being removed before taking their connection away", async () => {
+  it("gives them the creator key before the list it has to be checked against", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
+    const activate = p2p.slice(p2p.indexOf("shareTopics(conn);"), p2p.indexOf("pingTimer = setInterval"));
 
-    const action = p2p.slice(
-      p2p.indexOf('if (action === "remove-room-member")'),
-      p2p.indexOf('if (action === "restore-room-member")'),
-    );
-    // Enforcing first dropped them out of the broadcast loop below it.
-    assert.ok(action.indexOf("broadcastRoomBans(rk)") < action.indexOf("enforceRoomBans(rk)"));
-
-    // And the drop itself waits, because a send is not on the wire the moment
-    // it is handed over.
-    assert.match(p2p, /function dropRemovedPeer\(peer\)/);
-    assert.match(p2p, /setTimeout\(\(\) => \{[\s\S]{0,80}peer\.conn\.destroy\(\)[\s\S]{0,40}\}, REMOVED_PEER_DROP_MS\)/);
-    const enforce = p2p.slice(p2p.indexOf("function enforceRoomBans"), p2p.indexOf("function dropRemovedPeer"));
-    assert.doesNotMatch(enforce, /destroy\(\)/, "the drop waits rather than happening here");
+    // The other way round, the list arrived with nothing to check it against
+    // and was dropped, so leaving and rejoining reopened the room.
+    assert.ok(activate.indexOf("shareRoomMeta(conn)") < activate.indexOf("sendRoomBans(conn, rk)"));
   });
 
   it("lets only the creator remove, and never themselves", async () => {
@@ -206,7 +205,9 @@ describe("room creator moderation, wired up", () => {
   it("says a removal out loud in the room, on every peer that honours it", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
     assert.match(p2p, /function appendRemovalNotice\(roomKey, peerId, username\)/);
-    assert.match(p2p, /was removed from the room by its creator/);
+    // By name: "the creator" tells nobody in the room who that was.
+    assert.match(p2p, /was removed from the room by \$\{by\}/);
+    assert.match(p2p, /room\?\.createdByName \|\| room\?\.createdBy \|\| "whoever made the room"/);
 
     // The creator says it when they do it.
     const action = p2p.slice(p2p.indexOf('if (action === "remove-room-member")'), p2p.indexOf('if (action === "restore-room-member")'));

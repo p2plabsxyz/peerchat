@@ -225,7 +225,7 @@ html, body {
   flex-shrink: 0; margin-right: 4px;
 }
 .room-item .room-time {
-  font-size: 0.65rem; color: var(--muted);
+  font-size: 0.65rem; line-height: 13px; color: var(--muted);
 }
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -244,7 +244,9 @@ html, body {
 .room-item .room-dots:hover { background: var(--border); color: var(--text); }
 
 .room-item .room-icon {
-  width: 16px; height: 16px;
+  /* Same box height as the time beside it, so centring the row lines the two
+     up exactly instead of centring a tall icon against a short line. */
+  width: 13px; height: 13px;
   flex-shrink: 0;
   filter: invert(50%);
   pointer-events: none;
@@ -719,9 +721,20 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   display: flex; flex-direction: column; gap: 0.65rem;
   /* A modal is a card on the page, not the page. Without a ceiling the taller
      ones (find people, room info on a short window) grew past the viewport and
-     lost their own edges along with the button at the bottom. */
+     lost their own edges along with the button at the bottom. The long list
+     inside shrinks to fit rather than pushing past it, so one scrollbar is
+     enough and this one only appears for a card that has no list to shrink. */
   max-height: 86vh; overflow-y: auto;
 }
+
+.modal-content::-webkit-scrollbar,
+#ri-member-list::-webkit-scrollbar,
+.discover-list::-webkit-scrollbar,
+.requests-list::-webkit-scrollbar { width: 4px; }
+.modal-content::-webkit-scrollbar-thumb,
+#ri-member-list::-webkit-scrollbar-thumb,
+.discover-list::-webkit-scrollbar-thumb,
+.requests-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 .modal-content > form {
   display: flex;
   flex-direction: column;
@@ -808,7 +821,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   outline: none;
   border-color: var(--accent);
 }
-#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: min(200px, 30vh); overflow-y: auto; }
+#ri-member-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .member-row {
   display: flex; align-items: center; gap: 8px;
   font-size: 0.8rem; padding: 4px 0;
@@ -1188,7 +1201,7 @@ a:hover { text-decoration: none; }
 .member-remove:hover { background: var(--base01); }
 
 .requests-btn {
-  width: 100%; margin-bottom: 0.5rem; padding: 6px 10px;
+  width: 100%; margin: 0.85rem 0 0.5rem; padding: 8px 10px;
   border: 1px solid var(--border); border-radius: 8px;
   background: none; color: var(--accent);
   font-size: 0.8rem; font-weight: 700; cursor: pointer; text-align: left;
@@ -1196,12 +1209,18 @@ a:hover { text-decoration: none; }
 
 .requests-btn:hover { background: var(--base01); }
 
-.requests-list { display: flex; flex-direction: column; gap: 0.5rem; max-height: 320px; overflow-y: auto; }
+.requests-list { display: flex; flex-direction: column; gap: 0.5rem; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 .request-row {
-  display: flex; align-items: center; gap: 0.5rem;
-  padding: 8px; border-radius: 10px; background: var(--base01);
+  display: flex; flex-direction: column; gap: 0.5rem;
+  padding: 10px; border-radius: 10px; background: var(--base01);
 }
+
+.request-who { display: flex; align-items: center; gap: 0.5rem; }
+.request-who span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.request-actions { display: flex; gap: 0.5rem; }
+.request-actions > button { flex: 1; white-space: nowrap; }
 
 .request-row img { width: 32px; height: 32px; border-radius: 50%; }
 
@@ -1232,7 +1251,7 @@ a:hover { text-decoration: none; }
 
 .discover-list {
   display: flex; flex-direction: column; gap: 0.25rem;
-  /* Shorter on a short window, so the card scrolls as one thing instead of
-     nesting a scrollbar inside a scrollbar. */
-  max-height: min(240px, 34vh); overflow-y: auto; margin-top: 0.5rem;
+  /* Shrinks to whatever the card has left rather than pushing it past the
+     window, which is what put a scrollbar inside a scrollbar. */
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: 0.5rem;
 }
