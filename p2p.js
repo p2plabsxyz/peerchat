@@ -1255,7 +1255,10 @@ export function initChat(sdk, options = {}) {
             const joinPeerId = remoteId || msg.peerId;
             // Block join using the connection-level peer identity, not the self-reported body.
             if (moderationIsKicked(joinPeerId, msg.roomKey)) continue;
-            const joinName = clamp(msg.username, 50) || joinPeerId;
+            const joinName = clamp(msg.username, 50) ||
+              savedData.rooms[msg.roomKey]?.members?.[joinPeerId]?.username ||
+              savedData.peerProfiles?.[joinPeerId]?.username ||
+              joinPeerId;
             const room = savedData.rooms[msg.roomKey];
             // Announcing a join does not undo a removal.
             if (room && isPeerBannedFromRoom(room.bans, { peerId: joinPeerId, connectionKey: fullId })) continue;
