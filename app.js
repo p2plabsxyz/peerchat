@@ -1085,7 +1085,8 @@ function showApp() {
   $("onboarding")?.setAttribute("hidden", "");
   $("app")?.removeAttribute("hidden");
   $("sidebar-avatar").src = avatar(S.profile.username, 32, S.profile.avatar);
-  $("sidebar-username").textContent = S.profile.username;
+  // With this device's label: what everyone else sees.
+  $("sidebar-username").textContent = S.profile.displayName || S.profile.username;
   renderRoomList();
   initAudio();
   resizeMessageField();
@@ -2145,6 +2146,14 @@ function connectGlobalSSE() {
       refreshActiveChatForPeer(peerId, username, peerAvatar);
       updateRoomPeerCount(S.activeRoom);
       renderRoomList();
+      // Renamed from another of this person's devices.
+      if (peerId === S.profile?.id) {
+        chat.getProfile().then((profile) => {
+          S.profile = profile;
+          $("sidebar-username").textContent = profile.displayName || profile.username;
+          $("sidebar-avatar").src = avatar(profile.username, 32, profile.avatar);
+        }).catch(() => {});
+      }
     } catch {}
   });
 
@@ -3077,6 +3086,11 @@ $("requests-close")?.addEventListener("click", () => closeAllModals());
 
 $("settings-btn")?.addEventListener("click", () => {
   $("set-username").value = S.profile?.username || "";
+  // The label is fixed to this device. The name is shared with the person's
+  // other devices and can be changed on any of them.
+  const device = S.profile?.device || "";
+  $("set-username-device").textContent = device ? `@${device}` : "";
+  $("set-username-device").hidden = !device;
   $("set-bio").value = S.profile?.bio || "";
   $("set-sounds").checked = S.settings.sounds;
   $("set-notifications").checked = S.settings.notifications;
@@ -3138,7 +3152,7 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     }
     cleanupStaleSelfEntries();
     $("sidebar-avatar").src = avatar(username, 32, profile.avatar);
-    $("sidebar-username").textContent = username;
+    $("sidebar-username").textContent = profile.displayName || username;
     pendingAvatar = null;
     closeAllModals();
   } catch (err) { alert(err.message); }
