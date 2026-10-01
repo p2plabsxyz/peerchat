@@ -71,6 +71,7 @@ import {
   nextLabel,
   normalizeLabel,
   normalizeLink,
+  normalizeSharedRooms,
   normalizeTransfer,
 } from "./lib/device-link.js";
 
@@ -124,7 +125,11 @@ let chatSdk = null;
 // device.label: this device's fixed label after the name ("mobile",
 // "desktop1"), empty on the device the name was made on. link: the secret the
 // person's devices share. See lib/device-link.js.
-let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {}, device: { label: "" }, link: null };
+// leftRooms: rooms this device left or was removed from, by when. Another of
+// the person's devices offering one back is ignored until it is joined again
+// here, so leaving a room on one device sticks.
+let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {}, device: { label: "" }, link: null, leftRooms: {} };
+const MAX_LEFT_ROOMS = 1000;
 
 function isValidRoomKey(k) {
   return typeof k === "string" && /^[a-f0-9]{64}$/i.test(k);
@@ -309,6 +314,7 @@ function loadData() {
       savedData.link = raw.link && typeof raw.link.key === "string"
         ? normalizeLink({ ...raw.link, key: dec4disk(raw.link.key) })
         : null;
+      savedData.leftRooms = sanitizeLeftRooms(raw.leftRooms);
       for (const [id, r] of Object.entries(raw.rooms)) {
         savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
       }
@@ -333,6 +339,24 @@ function loadData() {
   }
 }
 
+function sanitizeLeftRooms(raw) {
+  const out = {};
+  const entries = Object.entries(raw && typeof raw === "object" ? raw : {})
+    .filter(([roomKey, at]) => isValidRoomKey(roomKey) && Number.isSafeInteger(at) && at > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_LEFT_ROOMS);
+  for (const [roomKey, at] of entries) out[roomKey.toLowerCase()] = at;
+  return out;
+}
+
+function markRoomLeft(roomKey) {
+  savedData.leftRooms = sanitizeLeftRooms({ ...(savedData.leftRooms || {}), [roomKey]: Date.now() });
+}
+
+function clearRoomLeft(roomKey) {
+  if (savedData.leftRooms?.[roomKey]) delete savedData.leftRooms[roomKey];
+}
+
 function persistData() {
   if (!dataPath) return;
   try {
@@ -344,6 +368,7 @@ function persistData() {
       blockedPeers: savedData.blockedPeers || {},
       device: { label: savedData.device?.label || "" },
       link: savedData.link ? { ...savedData.link, key: enc4disk(savedData.link.key) } : null,
+      leftRooms: savedData.leftRooms || {},
       rooms: {},
     };
     for (const [id, r] of Object.entries(savedData.rooms)) {
@@ -758,7 +783,7 @@ function shareProfile(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   if (!sharedRooms.length) return;
   // The proof lets the person's other devices take a new name from this one.
   // Anyone else just sees the name with its label.
-  const proof = savedData.link ? makeProfileProof(savedData.link, savedData.profile) : null;
+  const proof = savedData.link ? makeProfileProof(savedData.link, savedData.profile, localKey) : null;
   try {
     writeToConnection(conn, JSON.stringify({
       type: "profile", peerId: localId,
@@ -960,6 +985,7 @@ async function dropRoomLocally(sdk, roomKey) {
   }
   delete savedData.rooms[roomKey];
   if (activeRoom === roomKey) activeRoom = null;
+  markRoomLeft(roomKey);
   persistData();
 
   try {
@@ -1152,6 +1178,33 @@ async function joinRoom(sdk, roomKey) {
 
 }
 
+// A room as another of this person's devices takes it, with its key. Null for
+// one not worth having there: one this device was removed from, and a direct
+// conversation the other person has not accepted or has blocked, which would
+// only send them a second request.
+function sharedRoomEntry(roomKey) {
+  const room = savedData.rooms[roomKey];
+  if (!room || !isValidRoomKey(roomKey) || isRemovedFromRoom(roomKey)) return null;
+  if (room.isDM && (room.pendingAcceptance || room.blockedByPeer || !room.dmWith)) return null;
+  return {
+    roomKey,
+    name: room.name,
+    bio: room.bio,
+    link: room.link,
+    isDM: !!room.isDM,
+    dmWith: room.dmWith || "",
+    createdAt: room.createdAt,
+    joinedAt: room.joinedAt || 0,
+    createdBy: room.createdBy || (room.isHost ? localId : ""),
+    createdByName: room.createdByName || "",
+    creatorKey: room.creatorKey || (room.isHost ? localKey : ""),
+  };
+}
+
+function sharedRoomEntries() {
+  return Object.keys(savedData.rooms).map(sharedRoomEntry).filter(Boolean);
+}
+
 // For a transfer to another of this person's devices: the link, the label
 // the other device takes, the profile and every room with its key. The link is
 // made here the first time, which makes this the device the name was made on.
@@ -1159,23 +1212,7 @@ async function joinRoom(sdk, roomKey) {
 export function exportChatTransfer({ targetType = "desktop" } = {}) {
   if (!savedData.profile?.username) return null;
   if (!savedData.link) savedData.link = createLink("desktop");
-  const rooms = [];
-  for (const [roomKey, room] of Object.entries(savedData.rooms)) {
-    if (!room || !isValidRoomKey(roomKey) || isRemovedFromRoom(roomKey)) continue;
-    rooms.push({
-      roomKey,
-      name: room.name,
-      bio: room.bio,
-      link: room.link,
-      isDM: !!room.isDM,
-      dmWith: room.dmWith || "",
-      createdAt: room.createdAt,
-      joinedAt: room.joinedAt || 0,
-      createdBy: room.createdBy || (room.isHost ? localId : ""),
-      createdByName: room.createdByName || "",
-      creatorKey: room.creatorKey || (room.isHost ? localKey : ""),
-    });
-  }
+  const rooms = sharedRoomEntries();
   // Kept as given, so the next desktop is not given the same label.
   const label = nextLabel(savedData.link, targetType === "mobile" ? "mobile" : "desktop");
   savedData.link = { ...savedData.link, labels: mergeLabels(savedData.link.labels, [label]) };
@@ -1208,8 +1245,16 @@ function applyChatTransfer(transfer, { adopt = false } = {}) {
     if (transfer.profile && transfer.profile.at > ourAt) savedData.profile = { ...savedData.profile, ...transfer.profile };
   }
 
+  const added = addRooms(transfer.rooms);
+  persistData();
+  return added;
+}
+
+// Adds rooms from another of this person's devices and returns the new ones.
+// A room left here stays left.
+function addRooms(rooms) {
   const added = [];
-  for (const room of transfer.rooms) {
+  for (const room of rooms) {
     const existing = savedData.rooms[room.roomKey];
     if (existing) {
       // A copied chat file carries keys the keychain here cannot open.
@@ -1217,6 +1262,7 @@ function applyChatTransfer(transfer, { adopt = false } = {}) {
       if (room.creatorKey && !existing.creatorKey) existing.creatorKey = room.creatorKey;
       continue;
     }
+    if (savedData.leftRooms?.[room.roomKey]) continue;
     savedData.rooms[room.roomKey] = {
       roomKey: room.roomKey,
       isHost: !!room.creatorKey && room.creatorKey === localKey,
@@ -1237,8 +1283,47 @@ function applyChatTransfer(transfer, { adopt = false } = {}) {
     };
     added.push(room.roomKey);
   }
-  persistData();
   return added;
+}
+
+async function joinAddedRooms(added, why) {
+  if (!chatSdk) return;
+  for (const roomKey of added) {
+    await joinRoom(chatSdk, roomKey).catch((error) => {
+      console.error(`[chat] Join from ${why} ${roomKey.slice(0, 8)}: ${error.message}`);
+    });
+    announceRoomJoin(roomKey);
+    emitRoomUpdate(roomKey);
+  }
+}
+
+// Rooms are offered only to a peer whose profile proved, on its own
+// connection, that it is another of this person's devices.
+function siblingFor(conn) {
+  const entry = peerForConnection(conn) || pendingPeers.get(conn);
+  return entry?.sibling ? entry : null;
+}
+
+function sendRoomsToSibling(conn, rooms) {
+  if (!rooms.length || !siblingFor(conn)) return;
+  try { writeToConnection(conn, JSON.stringify({ type: "link-rooms", rooms }) + "\n"); } catch {}
+}
+
+// A room joined here goes to this person's other devices that are online.
+// The rest get it with every room the next time they connect.
+function offerRoomToSiblings(roomKey) {
+  const entry = sharedRoomEntry(roomKey);
+  if (!entry) return;
+  for (const peer of peers) {
+    if (peer.sibling && !peer.conn.destroyed) sendRoomsToSibling(peer.conn, [entry]);
+  }
+}
+
+async function takeSiblingRooms(list) {
+  const added = addRooms(normalizeSharedRooms(list));
+  if (!added.length) return;
+  persistData();
+  await joinAddedRooms(added, "your other device");
 }
 
 // A transfer taken while PeerChat runs, as when a phone sends its rooms to
@@ -1247,15 +1332,7 @@ export async function importChatTransfer(raw, options = {}) {
   const transfer = normalizeTransfer(raw);
   if (!transfer) return { ok: false, added: 0 };
   const added = applyChatTransfer(transfer, options);
-  if (chatSdk) {
-    for (const roomKey of added) {
-      await joinRoom(chatSdk, roomKey).catch((error) => {
-        console.error(`[chat] Join from transfer ${roomKey.slice(0, 8)}: ${error.message}`);
-      });
-      announceRoomJoin(roomKey);
-      emitRoomUpdate(roomKey);
-    }
-  }
+  await joinAddedRooms(added, "transfer");
   reshareProfile();
   return { ok: true, added: added.length, label: savedData.device?.label || "" };
 }
@@ -1492,6 +1569,10 @@ export function initChat(sdk, options = {}) {
                 const rk = discoveryKeys.get(t.toLowerCase());
                 if (rk && !peerSharesRoom(peerEntry, rk)) { peerEntry.rooms.push(rk); added.push(rk); }
               }
+              // A connection this side accepted names no rooms until now, so
+              // the profile, which only goes out for a shared room, goes now.
+              // Without it the person's other device never sees the proof.
+              if (added.length) shareProfile(conn, added);
               for (const rk of added) {
                 sendRoomMeta(conn, rk);
                 announceJoins(conn, [rk]);
@@ -1508,9 +1589,14 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "profile") {
             if (msg.link && savedData.link && savedData.profile?.username &&
-                checkProfileProof(savedData.link, msg.link, msg.avatar || null)) {
+                checkProfileProof(savedData.link, msg.link, msg.avatar || null, fullId)) {
               siblingIds.add(remoteId);
+              const entry = peerForConnection(conn) || pendingPeers.get(conn);
+              const first = entry && !entry.sibling;
+              if (entry) entry.sibling = true;
               takeSiblingProfile(msg.link, msg.avatar || null);
+              // Every room this device is in, once per connection.
+              if (first) sendRoomsToSibling(conn, sharedRoomEntries());
             }
             if (msg.username) {
               const uname = clamp(msg.username, 50);
@@ -1657,6 +1743,17 @@ export function initChat(sdk, options = {}) {
             continue;
           }
 
+          // Rooms another of this person's devices is in. Only from a peer that
+          // proved it is one on this connection; anything else is dropped.
+          if (msg.type === "link-rooms") {
+            if (siblingFor(conn) && savedData.link && Array.isArray(msg.rooms)) {
+              takeSiblingRooms(msg.rooms).catch((error) => {
+                console.error(`[chat] Rooms from your other device: ${error.message}`);
+              });
+            }
+            continue;
+          }
+
           if (msg.type === "dm-accept") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
@@ -1673,6 +1770,7 @@ export function initChat(sdk, options = {}) {
               room.blockedByPeer = false;
               room.dmWith = fromPeer;
               debouncePersist();
+              offerRoomToSiblings(msg.roomKey);
             }
             broadcastGlobal("dm-accepted", {
               roomKey: msg.roomKey, fromId: remoteId, fromUsername: acceptName,
@@ -2195,8 +2293,10 @@ export async function handleChatRequest(req, sdk) {
           pendingAcceptance: false,
         };
         delete savedData.pendingDMs[dmRoomKey];
+        clearRoomLeft(dmRoomKey);
         persistData();
         await joinRoom(sdk, dmRoomKey).catch(() => {});
+        offerRoomToSiblings(dmRoomKey);
         const acceptMsg = JSON.stringify({
           type: "dm-accept", roomKey: dmRoomKey,
           fromId: localId, fromUsername: myName() || localId,
@@ -2247,11 +2347,13 @@ export async function handleChatRequest(req, sdk) {
           };
           persistData();
         }
+        clearRoomLeft(roomKey);
         await joinRoom(sdk, roomKey);
 
         const room = savedData.rooms[roomKey];
         if (room && !room.joinedAt) { room.joinedAt = Date.now(); debouncePersist(); }
         announceRoomJoin(roomKey);
+        offerRoomToSiblings(roomKey);
 
         if (isNew) {
           for (let i = 0; i < 20; i++) {

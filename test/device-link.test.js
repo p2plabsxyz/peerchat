@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 
 import {
   checkProfileProof,
+  normalizeSharedRooms,
   createLink,
   displayName,
   linkId,
@@ -47,36 +48,60 @@ describe("profile proof", () => {
   it("is the same bytes PeerSky Mobile makes", () => {
     // The same vector is in PeerSky Mobile's test/protocol/peerchat-devices.test.mjs.
     const fixed = { key: "0f".repeat(32), origin: "desktop", labels: ["mobile", "desktop1"] };
-    const proof = makeProfileProof(fixed, { username: "ada", bio: "hi there", avatar: "data:image/png;base64,AAAA", at: 1750000000000 });
+    const proof = makeProfileProof(fixed, { username: "ada", bio: "hi there", avatar: "data:image/png;base64,AAAA", at: 1750000000000 }, "0e".repeat(32));
     assert.equal(proof.id, "148e442780792da6ee08d733108a2207");
     assert.deepEqual(proof.labels, ["desktop1", "mobile"]);
-    assert.equal(proof.mac, "5d3454c2ce05fa2be61a73cc473ce1e2ae10f6a6099ab57cea95d38b3615ee64");
+    assert.equal(proof.mac, "d2c1d5265a5081255f224d5038103acd07098501a6035733cb243d3ff68e96fe");
   });
 
   const link = { ...createLink("desktop"), labels: ["mobile"] };
   const profile = { username: "ada", bio: "hi", avatar: "data:image/png;base64,AAAA", at: 1234 };
+  const device = "0a".repeat(32);
 
-  it("is accepted with the same link and picture", () => {
-    const proof = makeProfileProof(link, profile);
+  it("is accepted with the same link and picture, from the device that made it", () => {
+    const proof = makeProfileProof(link, profile, device);
     assert.equal(proof.id, linkId(link));
     assert.equal(proof.name, "ada");
-    assert.equal(checkProfileProof(link, proof, profile.avatar), true);
+    assert.equal(checkProfileProof(link, proof, profile.avatar, device), true);
+    assert.equal(checkProfileProof(link, proof, profile.avatar, device.toUpperCase()), true);
+  });
+
+  it("is refused from any other device, so nobody can pass it on as theirs", () => {
+    const proof = makeProfileProof(link, profile, device);
+    assert.equal(checkProfileProof(link, proof, profile.avatar, "0b".repeat(32)), false);
+    assert.equal(checkProfileProof(link, proof, profile.avatar, ""), false);
+    assert.equal(checkProfileProof(link, proof, profile.avatar), false);
   });
 
   it("is refused with another link, another picture, or any field changed", () => {
-    const proof = makeProfileProof(link, profile);
-    assert.equal(checkProfileProof(createLink("desktop"), proof, profile.avatar), false);
-    assert.equal(checkProfileProof(link, proof, "data:image/png;base64,BBBB"), false);
-    assert.equal(checkProfileProof(link, { ...proof, name: "mallory" }, profile.avatar), false);
-    assert.equal(checkProfileProof(link, { ...proof, at: proof.at + 1 }, profile.avatar), false);
-    assert.equal(checkProfileProof(link, { ...proof, labels: ["desktop9"] }, profile.avatar), false);
-    assert.equal(checkProfileProof(link, { ...proof, mac: "00".repeat(32) }, profile.avatar), false);
-    assert.equal(checkProfileProof(link, null, profile.avatar), false);
+    const proof = makeProfileProof(link, profile, device);
+    assert.equal(checkProfileProof(createLink("desktop"), proof, profile.avatar, device), false);
+    assert.equal(checkProfileProof(link, proof, "data:image/png;base64,BBBB", device), false);
+    assert.equal(checkProfileProof(link, { ...proof, name: "mallory" }, profile.avatar, device), false);
+    assert.equal(checkProfileProof(link, { ...proof, at: proof.at + 1 }, profile.avatar, device), false);
+    assert.equal(checkProfileProof(link, { ...proof, labels: ["desktop9"] }, profile.avatar, device), false);
+    assert.equal(checkProfileProof(link, { ...proof, mac: "00".repeat(32) }, profile.avatar, device), false);
+    assert.equal(checkProfileProof(link, null, profile.avatar, device), false);
   });
 
-  it("is never made for a name the profile rules refuse", () => {
-    assert.equal(makeProfileProof(link, { ...profile, username: "ada@mobile" }), null);
-    assert.equal(makeProfileProof(null, profile), null);
+  it("is never made for a name the profile rules refuse, or without the device", () => {
+    assert.equal(makeProfileProof(link, { ...profile, username: "ada@mobile" }, device), null);
+    assert.equal(makeProfileProof(null, profile, device), null);
+    assert.equal(makeProfileProof(link, profile), null);
+  });
+});
+
+describe("rooms shared between devices", () => {
+  it("keeps good rooms once each, with their keys, and drops the rest", () => {
+    const rooms = normalizeSharedRooms([
+      { roomKey: "AA".repeat(32), name: "Room", joinedAt: 5 },
+      { roomKey: "aa".repeat(32), name: "Again" },
+      { roomKey: "zz" },
+      { roomKey: "bb".repeat(32), isDM: true, dmWith: "nope" },
+      null,
+    ]);
+    assert.deepEqual(rooms.map((room) => [room.roomKey, room.name, room.joinedAt]), [["aa".repeat(32), "Room", 5]]);
+    assert.deepEqual(normalizeSharedRooms("not a list"), []);
   });
 });
 
