@@ -9,7 +9,16 @@ import { createQrMatrix } from "./lib/qrcode-matrix.js";
 import { buildDirectory, collapseMembers } from "./lib/members.js";
 
 import { chat } from "./chat-api.js";
-import { attachmentDriveName, encryptAttachment, decryptAttachment, opaqueAttachmentPath } from "./lib/attachment-crypto.js";
+import {
+  attachmentDriveName,
+  encryptAttachment,
+  MAX_ATTACHMENT_BYTES,
+  opaqueAttachmentPath,
+  openAttachmentStream,
+  sealAttachmentStream,
+  sealedAttachmentLength,
+  sealsInFrames,
+} from "./lib/attachment-crypto.js";
 import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { createPresenceHold } from "./lib/presence.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
@@ -43,6 +52,9 @@ const REPORT_EMAIL = "contact@p2plabs.xyz";
 
 const REACT_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 const AUTO_INLINE_PREVIEW_MAX_BYTES = 100 * 1024 * 1024;
+// How much of an opened file this page holds before handing it to the
+// browser's blob storage, which can move a big file out to disk.
+const DECRYPTED_BATCH_BYTES = 16 * 1024 * 1024;
 
 let globalES = null;
 let reconnectTimer = null;
@@ -186,6 +198,8 @@ function shouldAutoInline(fileSize) {
 function expandLargeMedia(wrap) {
   const url = wrap.getAttribute("data-file-url");
   if (!url) return;
+  // Read before the label is replaced: the type a video plays as comes from it.
+  const fileName = wrap.querySelector(".msg-file-attach-name")?.textContent;
   const openZone = wrap.querySelector(".msg-file-attach-open");
   if (openZone) openZone.innerHTML = '<span class="muted small">Loading…</span>';
   const mediaType = wrap.getAttribute("data-large-type") || 'image';
@@ -201,10 +215,25 @@ function expandLargeMedia(wrap) {
     el.loading = 'lazy';
   }
   const src = wrap.getAttribute("data-file-enc") === "1"
-    ? resolveDecryptedUrl(url, roomRefs.key(wrap.getAttribute("data-file-room")), wrap.querySelector(".msg-file-attach-name")?.textContent)
+    ? resolveDecryptedUrl(url, roomRefs.key(wrap.getAttribute("data-file-room")), fileName)
     : Promise.resolve(url);
   src.then((s) => { el.src = s; wrap.replaceWith(el); el.focus(); })
     .catch(() => { if (openZone) openZone.innerHTML = '<span class="muted small">Attachment could not be decrypted</span>'; });
+}
+
+// Open, by click or by key. An encrypted file opens decrypted: its address on
+// the drive only holds the sealed bytes.
+function openFileAttachment(wrap) {
+  const url = wrap?.getAttribute("data-file-url");
+  if (!url) return;
+  if (wrap.classList.contains("large-media-placeholder")) {
+    expandLargeMedia(wrap);
+  } else if (wrap.getAttribute("data-file-enc") === "1") {
+    resolveDecryptedUrl(url, roomRefs.key(wrap.getAttribute("data-file-room")), wrap.querySelector(".msg-file-attach-name")?.textContent)
+      .then((src) => window.open(src)).catch(() => alert("Could not decrypt this attachment."));
+  } else {
+    window.open(url);
+  }
 }
 
 function isHyperFileUrl(url) {
@@ -221,23 +250,30 @@ function sanitizeDownloadFilename(name) {
 async function downloadHyperFile(url, filename, roomKey = null) {
   const safe = sanitizeDownloadFilename(filename || displayNameFromHyperPath(url));
   try {
+    // Asked before anything downloads: the file is written as it arrives, and
+    // a big one takes longer than the click that opened the dialog stays valid.
+    const handle = await pickSaveFile(safe);
+    if (handle === false) return;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const blob = roomKey
-      ? new Blob([await decryptAttachment(new Uint8Array(await resp.arrayBuffer()), roomKey)], { type: mimeFromName(filename) })
-      : await resp.blob();
-    if (typeof window.showSaveFilePicker === "function") {
+    if (handle) {
+      const writable = await handle.createWritable();
       try {
-        const handle = await window.showSaveFilePicker({ suggestedName: safe });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        return;
-      } catch (pickErr) {
-        if (pickErr?.name === "AbortError") return;
-        console.warn("[chat] Save dialog unavailable, using download link:", pickErr);
+        if (roomKey) {
+          for await (const piece of openAttachmentStream(resp.body, roomKey)) await writable.write(piece);
+          await writable.close();
+        } else if (resp.body) {
+          await resp.body.pipeTo(writable);
+        } else {
+          await writable.close();
+        }
+      } catch (err) {
+        await writable.abort().catch(() => {});
+        throw err;
       }
+      return;
     }
+    const blob = roomKey ? await decryptedBlob(resp, roomKey, mimeFromName(filename)) : await resp.blob();
     const obj = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = obj;
@@ -250,6 +286,37 @@ async function downloadHyperFile(url, filename, roomKey = null) {
     console.error("[chat] Download:", err);
     alert("Could not download this file. Use Open (name or icon) to open it in a new tab.");
   }
+}
+
+// The save dialog where there is one: a file to write to, false when it was
+// cancelled, or null to fall back to a download link.
+async function pickSaveFile(suggestedName) {
+  if (typeof window.showSaveFilePicker !== "function") return null;
+  try {
+    return await window.showSaveFilePicker({ suggestedName });
+  } catch (err) {
+    if (err?.name === "AbortError") return false;
+    console.warn("[chat] Save dialog unavailable, using download link:", err);
+    return null;
+  }
+}
+
+// Opened as it arrives and handed to the browser a batch at a time, so a big
+// file is never all in this page's memory.
+async function decryptedBlob(resp, roomKey, type) {
+  let blob = new Blob([], { type });
+  let batch = [];
+  let batchBytes = 0;
+  for await (const piece of openAttachmentStream(resp.body, roomKey)) {
+    batch.push(piece);
+    batchBytes += piece.byteLength;
+    if (batchBytes >= DECRYPTED_BATCH_BYTES) {
+      blob = new Blob([blob, ...batch], { type });
+      batch = [];
+      batchBytes = 0;
+    }
+  }
+  return new Blob([blob, ...batch], { type });
 }
 
 function fileAttachHtml(url, fileNameOpt, fileSizeOpt, extraAttrs = "") {
@@ -482,8 +549,7 @@ function resolveDecryptedUrl(url, roomKey, fileName) {
   return decryptedUrls.get(url, roomKey, async () => {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const plain = await decryptAttachment(new Uint8Array(await resp.arrayBuffer()), roomKey);
-    return URL.createObjectURL(new Blob([plain], { type: mimeFromName(fileName) }));
+    return URL.createObjectURL(await decryptedBlob(resp, roomKey, mimeFromName(fileName)));
   });
 }
 
@@ -3289,14 +3355,7 @@ document.addEventListener("click", (ev) => {
   if (openZone) {
     ev.preventDefault();
     ev.stopPropagation();
-    const wrap = openZone.closest(".msg-file-attach");
-    const url = wrap?.getAttribute("data-file-url");
-    if (!url) return;
-    if (wrap?.classList.contains("large-media-placeholder")) {
-      expandLargeMedia(wrap);
-    } else {
-      window.open(url);
-    }
+    openFileAttachment(openZone.closest(".msg-file-attach"));
     return;
   }
   const a = ev.target.closest("a[href]");
@@ -3336,6 +3395,13 @@ async function screenAndUploadFiles(selected) {
 
   if (isTooManyFiles(files.length)) {
     alert(describeTooManyFiles(files.length));
+    return;
+  }
+
+  // Mobile takes no more than this either, so nobody is sent a file they cannot open.
+  const tooBig = files.find((file) => file.size > MAX_ATTACHMENT_BYTES);
+  if (tooBig) {
+    alert(`${tooBig.name} is too big to send. PeerChat attachments must be 2 GB or smaller.`);
     return;
   }
 
@@ -3381,10 +3447,17 @@ async function uploadAndSendFile(file) {
   if (!base) { alert("Could not initialize file storage."); return; }
   const path = opaqueAttachmentPath();
   try {
-    const sealed = await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
-    const uploadResp = await fetch(base + path, { method: "PUT", body: sealed });
+    // A big file goes up as a stream, sealed a frame at a time as it is read.
+    // Handed over whole, the browser would hold all of it first.
+    const framed = sealsInFrames(file.size);
+    const body = framed
+      ? sealAttachmentStream(file, roomKey)
+      : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
+    const uploadResp = await fetch(base + path, { method: "PUT", body, ...(framed && { duplex: "half" }) });
     if (!uploadResp.ok) throw new Error("Upload failed");
     const fileUrl = base + path;
+    const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
+    if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
     const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
     if (resp.sent) appendMessage(S.activeRoom, resp.sent);
     playSound("send");
@@ -3406,17 +3479,7 @@ if (msgArea) {
     const openZone = e.target.closest(".msg-file-attach-open");
     if (openZone && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
-      const wrap = openZone.closest(".msg-file-attach");
-      const url = wrap?.getAttribute("data-file-url");
-      if (!url) return;
-      if (wrap?.classList.contains("large-media-placeholder")) {
-        expandLargeMedia(wrap);
-      } else if (wrap?.getAttribute("data-file-enc") === "1") {
-        resolveDecryptedUrl(url, roomRefs.key(wrap.getAttribute("data-file-room")), wrap.querySelector(".msg-file-attach-name")?.textContent)
-          .then((src) => window.open(src)).catch(() => alert("Could not decrypt this attachment."));
-      } else {
-        window.open(url);
-      }
+      openFileAttachment(openZone.closest(".msg-file-attach"));
     }
   });
   msgArea.addEventListener("dragover", (e) => { e.preventDefault(); $("dropzone").style.display = "flex"; });
