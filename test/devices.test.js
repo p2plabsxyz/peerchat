@@ -11,7 +11,7 @@ import { EventEmitter } from "node:events";
 import { deriveTopic, exportChatTransfer, handleChatRequest, importChatTransfer, initChat } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
 import { createLink, linkId, makeProfileProof, makeTransfer, checkProfileProof } from "../lib/device-link.js";
-import { securePair } from "./helpers.mjs";
+import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
 
 const ROOM = "aa".repeat(32);
 const PHONE_ROOM = "cc".repeat(32);
@@ -122,8 +122,8 @@ describe("one person on two devices", () => {
         }
       }, { onopen: opened });
     });
-    // The other side says which rooms it shares, as a peer does.
-    transport.send(JSON.stringify({ type: "topics", topics: [deriveTopic(ROOM).toString("hex")] }) + "\n");
+    // The other side proves which rooms it shares, as a peer does.
+    transport.send(topicsFrame(pair.clientStream, [ROOM]));
 
     const profile = await eventually(() => frames.find((f) => f.type === "profile"), "a profile");
     assert.equal(profile.username, "ada");
@@ -137,7 +137,7 @@ describe("one person on two devices", () => {
     frames.length = 0;
     const at = Date.now();
     transport.send(JSON.stringify({
-      type: "profile", peerId: "0b0b0b0b", username: "adele@mobile", bio: "new bio", avatar: null, rooms: [ROOM],
+      type: "profile", peerId: "0b0b0b0b", username: "adele@mobile", bio: "new bio", avatar: null, rooms: [wireRoom(ROOM)],
       device: "mobile", link: makeProfileProof(link, { username: "adele", bio: "new bio", avatar: null, at }, phoneKey),
     }) + "\n");
 
@@ -153,11 +153,11 @@ describe("one person on two devices", () => {
 
   it("ignores a rename from anyone without the link, and an older one from the phone", async () => {
     transport.send(JSON.stringify({
-      type: "profile", peerId: "0b0b0b0b", username: "mallory", bio: "", avatar: null, rooms: [ROOM],
+      type: "profile", peerId: "0b0b0b0b", username: "mallory", bio: "", avatar: null, rooms: [wireRoom(ROOM)],
       link: makeProfileProof(createLink("desktop"), { username: "mallory", bio: "", avatar: null, at: Date.now() + 60_000 }, phoneKey),
     }) + "\n");
     transport.send(JSON.stringify({
-      type: "profile", peerId: "0b0b0b0b", username: "ada@mobile", bio: "", avatar: null, rooms: [ROOM],
+      type: "profile", peerId: "0b0b0b0b", username: "ada@mobile", bio: "", avatar: null, rooms: [wireRoom(ROOM)],
       link: makeProfileProof(link, { username: "ada", bio: "", avatar: null, at: 5 }, phoneKey),
     }) + "\n");
     await new Promise((r) => setTimeout(r, 400));
@@ -165,14 +165,17 @@ describe("one person on two devices", () => {
   });
 
   it("sends the phone the room's history since the person joined, not since it connected", async () => {
-    const room = (await call("get-rooms", "GET")).rooms.find((r) => r.roomKey === ROOM);
-    const [phoneId] = Object.keys(room.members || {});
-    assert.ok(room.members[phoneId].joinedAt > 1000);
-    transport.send(JSON.stringify({ type: "join", roomKey: ROOM, peerId: "0b0b0b0b", username: "adele@mobile", ts: 1000, id: "join-1" }) + "\n");
-    await eventually(async () => {
-      const r = (await call("get-rooms", "GET")).rooms.find((x) => x.roomKey === ROOM);
-      return r.members[phoneId]?.joinedAt === 1000;
-    }, "the earlier join time");
+    const phoneId = phoneKey.slice(0, 8);
+    const joinedAt = async () => (await call("get-rooms", "GET")).rooms.find((r) => r.roomKey === ROOM).members?.[phoneId]?.joinedAt;
+    // A profile says who someone is, never when they joined.
+    assert.equal(await joinedAt(), undefined);
+    // Its join as it connected, then the person's own earlier one, which a
+    // proven device of theirs is believed about.
+    const now = Date.now();
+    transport.send(JSON.stringify({ type: "join", room: wireRoom(ROOM), peerId: "0b0b0b0b", username: "adele@mobile", ts: now, id: "join-0" }) + "\n");
+    await eventually(async () => (await joinedAt()) === now, "the join as it connected");
+    transport.send(JSON.stringify({ type: "join", room: wireRoom(ROOM), peerId: "0b0b0b0b", username: "adele@mobile", ts: 1000, id: "join-1" }) + "\n");
+    await eventually(async () => (await joinedAt()) === 1000, "the earlier join time");
   });
 
   it("sends its profile on a connection it accepted, once a shared room is named", async () => {
@@ -199,7 +202,7 @@ describe("one person on two devices", () => {
       // its own topics, so the rooms are learned afterwards.
       await eventually(() => seen.find((f) => f.type === "topics"), "the desktop's topics");
       assert.equal(seen.some((f) => f.type === "profile"), false);
-      acceptedTransport.send(JSON.stringify({ type: "topics", topics: [deriveTopic(ROOM).toString("hex")] }) + "\n");
+      acceptedTransport.send(topicsFrame(accepted.clientStream, [ROOM]));
       const profile = await eventually(() => seen.find((f) => f.type === "profile"), "a profile");
       assert.equal(checkProfileProof(link, profile.link, profile.avatar, DESKTOP_KEY), true);
     } finally {
@@ -210,7 +213,7 @@ describe("one person on two devices", () => {
 
   it("ignores a newer name in a proof made by another device and passed on", async () => {
     transport.send(JSON.stringify({
-      type: "profile", peerId: "0b0b0b0b", username: "eve", bio: "", avatar: null, rooms: [ROOM],
+      type: "profile", peerId: "0b0b0b0b", username: "eve", bio: "", avatar: null, rooms: [wireRoom(ROOM)],
       link: makeProfileProof(link, { username: "eve", bio: "", avatar: null, at: Date.now() + 60_000 }, "0b".repeat(32)),
     }) + "\n");
     await new Promise((r) => setTimeout(r, 400));
@@ -254,10 +257,10 @@ describe("one person on two devices", () => {
     await new Promise((opened) => {
       strangerTransport = attachChatTransport(strangerPair.clientStream, () => {}, { onopen: opened });
     });
-    strangerTransport.send(JSON.stringify({ type: "topics", topics: [deriveTopic(ROOM).toString("hex")] }) + "\n");
+    strangerTransport.send(topicsFrame(strangerPair.clientStream, [ROOM]));
     // The phone's own proof, seen in a shared room and passed on.
     strangerTransport.send(JSON.stringify({
-      type: "profile", peerId: "0c0c0c0c", username: "adele@mobile", bio: "", avatar: null, rooms: [ROOM],
+      type: "profile", peerId: "0c0c0c0c", username: "adele@mobile", bio: "", avatar: null, rooms: [wireRoom(ROOM)],
       link: makeProfileProof(link, { username: "adele", bio: "new bio", avatar: null, at: Date.now() }, phoneKey),
     }) + "\n");
     strangerTransport.send(JSON.stringify({ type: "link-rooms", rooms: [{ roomKey: STRANGER_ROOM, name: "Not yours" }] }) + "\n");

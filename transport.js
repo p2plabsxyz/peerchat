@@ -1,7 +1,10 @@
 import c from "compact-encoding";
 import Protomux from "protomux";
 
-const CHAT_PROTOCOL = "peersky-chat/1";
+// Version 2 names rooms by topic and opens one to a peer only with a proof it
+// holds the key (lib/room-proof.js). Version 1 sent the key itself to anyone
+// who turned up under a room's topic, so the two do not talk at all.
+const CHAT_PROTOCOL = "peersky-chat/2";
 
 export function attachChatTransport(conn, ondata, options = {}) {
   const mux = Protomux.from(conn);

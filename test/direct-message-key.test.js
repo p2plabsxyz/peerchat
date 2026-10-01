@@ -45,8 +45,10 @@ describe("direct message keys", () => {
     );
 
     // The handshake already proved who they are; a key we hold as something
-    // else is not theirs to name.
-    assert.match(invite, /!claimed\.isDM \|\| normPeerId\(claimed\.dmWith\) !== normPeerId\(remoteId\)/);
+    // else, or as a conversation bound to another key, is not theirs to name.
+    assert.match(invite, /if \(claimed && !dmFromThem\(claimed, remoteId, fullId\)\) continue;/);
+    // A request remembers the key it came from, so the answer goes back there.
+    assert.match(invite, /fromKey: fullId/);
     // Both sides opening one at once converge without another round trip.
     assert.match(invite, /ours < msg\.roomKey/);
     assert.match(invite, /dropRoomLocally\(sdk, ours\)/);

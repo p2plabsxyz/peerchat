@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 
 import { handleChatRequest, initChat, deriveTopic } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
-import { securePair } from "./helpers.mjs";
+import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
 
 const ROOM = "aa".repeat(32);
 const DM_ROOM = "bb".repeat(32);
@@ -94,10 +94,12 @@ describe("blocking a peer", () => {
       }, { onopen: r });
     });
     await opened;
+    // In the room they share, the way a peer holding its key gets in.
+    transport.send(topicsFrame(pair.clientStream, [ROOM]));
 
     for (let i = 0; i < 100 && !peerId; i++) {
       const status = await call("net-status", "GET");
-      peerId = status.peers[0]?.id;
+      if (status.peers[0]?.rooms.length) peerId = status.peers[0].id;
       if (!peerId) await new Promise((r) => setTimeout(r, 50));
     }
     assert.ok(peerId, "peer never activated");
@@ -148,7 +150,9 @@ describe("blocking a peer", () => {
     }) + "\n");
 
     const notice = await nextFrame((f) => f.type === "dm-blocked", "dm-blocked");
-    assert.equal(notice.roomKey, DM_ROOM);
+    // Named by topic like every room, not by the key they sent.
+    assert.equal(notice.room, wireRoom(DM_ROOM));
+    assert.equal(notice.roomKey, undefined);
     assert.deepEqual((await call("get-rooms", "GET")).pendingDMs, {});
   });
 
@@ -187,7 +191,7 @@ describe("blocking a peer", () => {
     await call("unblock-peer", "POST", { peerId });
 
     // This is what our side looks like after they block us.
-    transport.send(JSON.stringify({ type: "dm-blocked", roomKey: ourDmRoom, fromId: peerId }) + "\n");
+    transport.send(JSON.stringify({ type: "dm-blocked", room: wireRoom(ourDmRoom), fromId: peerId }) + "\n");
     let room;
     for (let i = 0; i < 100; i++) {
       room = await findRoom(ourDmRoom);

@@ -9,8 +9,7 @@ import { EventEmitter } from "node:events";
 
 import { handleChatRequest, initChat, deriveTopic, decryptMsg } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
-import { topicHex } from "../routing.js";
-import { securePair } from "./helpers.mjs";
+import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
 
 const ROOM_X = "aa".repeat(32);
 const ROOM_Y = "bb".repeat(32);
@@ -75,12 +74,12 @@ describe("offline delivery", () => {
   // Real clients call announceJoins on activation. History is scoped to the
   // time reported here, so the harness has to send it like a real peer.
   const announceJoin = (roomKey, ts) => transport.send(JSON.stringify({
-    type: "join", roomKey, peerId: "beefbeef", username: "away-peer",
-    id: `${roomKey}-beefbeef-join-${ts}`, ts,
+    type: "join", room: wireRoom(roomKey), peerId: "beefbeef", username: "away-peer",
+    id: `${wireRoom(roomKey)}-beefbeef-join-${ts}`, ts,
   }) + "\n");
 
   const encryptedFor = (roomKey, plaintext) => (f) => {
-    if (f.roomKey !== roomKey || !f.ct || !f.iv || !f.tag) return false;
+    if (f.room !== wireRoom(roomKey) || !f.ct || !f.iv || !f.tag) return false;
     try { return decryptMsg(f.ct, f.iv, f.tag, roomKey) === plaintext; } catch { return false; }
   };
 
@@ -121,15 +120,14 @@ describe("offline delivery", () => {
     }, {});
     await transport.ready();
 
+    // Found under room X's topic, but in it only once it proves the key.
+    transport.send(topicsFrame(pair.clientStream, [ROOM_X]));
     announceJoin(ROOM_X, JOINED_LONG_AGO);
     await nextFrame(encryptedFor(ROOM_X, M1), "missed message in the connection-forming room");
   });
 
   it("delivers missed messages in rooms opened by the topics handshake", async () => {
-    transport.send(JSON.stringify({
-      type: "topics",
-      topics: [topicHex(deriveTopic(ROOM_X)), topicHex(deriveTopic(ROOM_Y))],
-    }) + "\n");
+    transport.send(topicsFrame(pair.clientStream, [ROOM_X, ROOM_Y]));
 
     announceJoin(ROOM_Y, JOINED_LONG_AGO);
     await nextFrame(encryptedFor(ROOM_Y, M2), "missed message in the handshake-opened room");
@@ -155,13 +153,16 @@ describe("offline delivery", () => {
     swarm.emit("connection", fresh.serverStream, { topics: [deriveTopic(ROOM_X)] });
     await new Promise((r) => setTimeout(r, 400));
 
+    freshTransport.send(topicsFrame(fresh.clientStream, [ROOM_X]));
     freshTransport.send(JSON.stringify({
-      type: "join", roomKey: ROOM_X, peerId: "cafecafe", username: "newcomer",
-      id: `${ROOM_X}-cafecafe-join-${Date.now()}`, ts: Date.now(),
+      type: "join", room: wireRoom(ROOM_X), peerId: "cafecafe", username: "newcomer",
+      id: `${wireRoom(ROOM_X)}-cafecafe-join-${Date.now()}`, ts: Date.now(),
     }) + "\n");
     await new Promise((r) => setTimeout(r, 600));
 
-    const history = seen.filter((f) => f.type === "sync" && f.roomKey === ROOM_X);
+    // In the room, so it would get history if any were going.
+    assert.ok(seen.some((f) => f.type === "room-meta" && f.room === wireRoom(ROOM_X)), "the newcomer never got into the room");
+    const history = seen.filter((f) => f.type === "sync" && f.room === wireRoom(ROOM_X));
     assert.equal(history.length, 0, `expected no history, got ${history.length} messages`);
 
     try { freshTransport.close(); } catch {}
