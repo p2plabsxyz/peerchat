@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 
 import { handleChatRequest, initChat, deriveTopic } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
-import { securePair } from "./helpers.mjs";
+import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
 
 const ROOM = "ad".repeat(32);
 const OTHER_ROOM = "ae".repeat(32);
@@ -91,11 +91,8 @@ describe("removing somebody over a real connection", () => {
     });
     await opened;
 
-    // Announce both rooms, and a join so the room knows them as a member.
-    transport.send(JSON.stringify({
-      type: "topics",
-      topics: [ROOM, OTHER_ROOM, THEIR_ROOM].map((rk) => deriveTopic(rk).toString("hex")),
-    }) + "\n");
+    // Prove the rooms, and a join so the room knows them as a member.
+    transport.send(topicsFrame(pair.clientStream, [ROOM, OTHER_ROOM, THEIR_ROOM]));
     for (let i = 0; i < 100 && !peerId; i++) {
       peerId = (await call("net-status", "GET")).peers[0]?.id;
       if (!peerId) await new Promise((r) => setTimeout(r, 50));
@@ -103,8 +100,8 @@ describe("removing somebody over a real connection", () => {
     assert.ok(peerId, "peer never activated");
     for (const roomKey of [ROOM, OTHER_ROOM]) {
       transport.send(JSON.stringify({
-        type: "join", roomKey, peerId, username: "Bob",
-        id: `${roomKey}-${peerId}-join`, ts: Date.now(),
+        type: "join", room: wireRoom(roomKey), peerId, username: "Bob",
+        id: `${wireRoom(roomKey)}-${peerId}-join`, ts: Date.now(),
       }) + "\n");
     }
     await settle();
@@ -130,14 +127,14 @@ describe("removing somebody over a real connection", () => {
 
     // And it stays gone when the room hears about them again.
     transport.send(JSON.stringify({
-      type: "members-list", roomKey: ROOM, members: { [peerId]: { username: "Bob", joinedAt: Date.now() } },
+      type: "members-list", room: wireRoom(ROOM), members: { [peerId]: { username: "Bob", joinedAt: Date.now() } },
     }) + "\n");
     await settle();
     assert.equal((await roomOf(ROOM)).members[peerId], undefined);
   });
 
   it("tells them, by name, and leaves their other rooms alone", async () => {
-    const bans = frames.filter((f) => f.type === "room-bans" && f.roomKey === ROOM);
+    const bans = frames.filter((f) => f.type === "room-bans" && f.room === wireRoom(ROOM));
     assert.ok(bans.length, "the removal never reached them");
     assert.deepEqual(bans.at(-1).bans.map((ban) => ban.id), [peerId]);
 
@@ -153,7 +150,7 @@ describe("removing somebody over a real connection", () => {
   it("stops reading anything they send to that room", async () => {
     const before = (await call("get-history", "GET", null, ROOM)).messages.length;
     transport.send(JSON.stringify({
-      type: "message", roomKey: ROOM, id: "after-removal", sender: peerId,
+      room: wireRoom(ROOM), id: "after-removal", sender: peerId,
       sn: "Bob", ts: Date.now(), ct: "00", iv: "00", tag: "00",
     }) + "\n");
     await settle();
@@ -165,7 +162,7 @@ describe("removing somebody over a real connection", () => {
     assert.deepEqual((await roomOf(ROOM)).bans, []);
 
     transport.send(JSON.stringify({
-      type: "members-list", roomKey: ROOM, members: { [peerId]: { username: "Bob", joinedAt: Date.now() } },
+      type: "members-list", room: wireRoom(ROOM), members: { [peerId]: { username: "Bob", joinedAt: Date.now() } },
     }) + "\n");
     await settle();
     assert.ok((await roomOf(ROOM)).members[peerId], "back in the list");
@@ -179,11 +176,11 @@ describe("removing somebody over a real connection", () => {
     const theirKey = pair.clientStream.publicKey.toString("hex").toLowerCase();
     const me = (await call("get-profile", "GET")).id;
     const bans = () => JSON.stringify({
-      type: "room-bans", roomKey: THEIR_ROOM,
+      type: "room-bans", room: wireRoom(THEIR_ROOM),
       bans: [{ id: me, key: "09".repeat(32), at: Date.now() }],
     }) + "\n";
     const meta = () => JSON.stringify({
-      type: "room-meta", roomKey: THEIR_ROOM, name: "Theirs", bio: "", link: "",
+      type: "room-meta", room: wireRoom(THEIR_ROOM), name: "Theirs", bio: "", link: "",
       createdAt: Date.now(), createdBy: peerId, creatorKey: theirKey, createdByName: "Bob",
     }) + "\n";
 

@@ -156,11 +156,14 @@ describe("room creator moderation, wired up", () => {
 
   it("gives them the creator key before the list it has to be checked against", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
-    const activate = p2p.slice(p2p.indexOf("shareTopics(conn);"), p2p.indexOf("pingTimer = setInterval"));
+    // Everything about a room goes out in one place, once the peer proves it
+    // holds the key.
+    const opening = p2p.slice(p2p.indexOf("function shareRoomsWith("), p2p.indexOf("function shareProfile("));
+    assert.ok(opening.includes("sendRoomBans(conn, rk)"));
 
     // The other way round, the list arrived with nothing to check it against
     // and was dropped, so leaving and rejoining reopened the room.
-    assert.ok(activate.indexOf("shareRoomMeta(conn)") < activate.indexOf("sendRoomBans(conn, rk)"));
+    assert.ok(opening.indexOf("sendRoomMeta(conn, rk)") < opening.indexOf("sendRoomBans(conn, rk)"));
   });
 
   it("lets only the creator remove, and never themselves", async () => {
@@ -232,7 +235,7 @@ describe("room creator moderation, wired up", () => {
 
   it("fills a creator key in on the device that made the room", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
-    const init = p2p.slice(p2p.indexOf("export function initChat("), p2p.indexOf("const handleTopicsChange ="));
+    const init = p2p.slice(p2p.indexOf("export function initChat("), p2p.indexOf('sdk.swarm.on("connection"'));
 
     assert.match(init, /if \(room\.isHost && !room\.creatorKey\) \{\n\s+room\.creatorKey = localKey;/);
     // And after the file has been read, or there are no rooms to walk yet.

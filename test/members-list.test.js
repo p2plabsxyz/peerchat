@@ -11,7 +11,7 @@ import { EventEmitter } from "node:events";
 
 import { handleChatRequest, initChat, deriveTopic } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
-import { securePair } from "./helpers.mjs";
+import { securePair, topicsFrame } from "./helpers.mjs";
 
 const ROOM = "aa".repeat(32);
 const MEMBER_COUNT = 64;
@@ -81,6 +81,8 @@ describe("member list propagation", () => {
       }, { onopen: r });
     });
     await opened;
+    // A member of the room, the way a peer holding its key becomes one.
+    transport.send(topicsFrame(pair.clientStream, [ROOM]));
   });
 
   after(async () => {

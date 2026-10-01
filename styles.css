@@ -120,12 +120,15 @@ html, body {
 }
 
 #sidebar-header {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: 0.5rem;
   padding: 0.75rem 1rem;
   border-bottom: 1px solid var(--border);
 }
+/* Takes the free space, so Find sits beside the settings button and a long
+   name is cut short rather than pushing them apart. */
 #sidebar-profile {
   display: flex; align-items: center; gap: 0.5rem;
+  flex: 1; min-width: 0;
   cursor: pointer; overflow: hidden;
 }
 #sidebar-username {
@@ -136,6 +139,7 @@ html, body {
   all: unset; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   padding: 4px; border-radius: 50%;
+  flex-shrink: 0;
 }
 #settings-btn img {
   width: 18px; height: 18px; filter: invert(50%);
@@ -831,6 +835,10 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 /* Settings */
 .field { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; margin-bottom: 6px; }
 .field label { font-size: 0.8rem; color: var(--muted); }
+.username-row { display: flex; align-items: center; gap: 6px; }
+.username-row input { flex: 1; min-width: 0; }
+.username-device { color: var(--muted); font-size: 0.9rem; white-space: nowrap; }
+.username-device[hidden] { display: none; }
 .toggle-row { flex-direction: row; align-items: center; justify-content: space-between; }
 .toggle { position: relative; width: 42px; height: 22px; }
 .toggle input { opacity: 0; width: 0; height: 0; }
@@ -1235,6 +1243,7 @@ a:hover { text-decoration: none; }
   padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px;
   background: none; color: var(--accent);
   font-size: 0.75rem; font-weight: 700; cursor: pointer;
+  flex-shrink: 0;
 }
 
 #discover-btn:hover { background: var(--base01); }

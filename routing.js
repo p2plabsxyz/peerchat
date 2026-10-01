@@ -64,6 +64,22 @@ export function peerMatchesIdentity(peer, identity) {
     .some((candidate) => String(candidate).toLowerCase() === wanted);
 }
 
+// The one full key behind a short id among connected peers, or "" when there
+// is none or more than one. A short id is 32 bits, so a key can be ground to
+// match someone's. Where two keys share one, neither gets anything meant for
+// that person.
+export function soleKeyFor(peers, shortId) {
+  const wanted = String(shortId || "").toLowerCase();
+  if (!wanted) return "";
+  const keys = new Set();
+  for (const peer of peers || []) {
+    if (!peer || peer.conn?.destroyed) continue;
+    if (String(peer.id || "").toLowerCase() !== wanted || !peer.fullId) continue;
+    keys.add(String(peer.fullId).toLowerCase());
+  }
+  return keys.size === 1 ? [...keys][0] : "";
+}
+
 export function addedRooms(previousRooms, nextRooms) {
   const previous = new Set(
     (previousRooms || []).map(normalizeRoomKey).filter(Boolean)

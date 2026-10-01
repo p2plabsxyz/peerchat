@@ -10,7 +10,8 @@ import { EventEmitter } from "node:events";
 import { handleChatRequest, initChat, deriveTopic } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
 import { topicHex } from "../routing.js";
-import { securePair } from "./helpers.mjs";
+import { checkRoomProof } from "../lib/room-proof.js";
+import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
 
 const ROOM_X = "aa".repeat(32);
 const ROOM_Y = "bb".repeat(32);
@@ -81,7 +82,8 @@ describe("room handshake over a live connection", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     pair = await securePair();
-    // The chat side sees an inbound connection whose topics name ONLY room X.
+    // The chat side sees a connection found under room X's topic, which
+    // anyone watching the DHT could also have announced.
     swarm.emit("connection", pair.serverStream, { topics: [deriveTopic(ROOM_X)] });
 
     let buffer = "";
@@ -105,7 +107,7 @@ describe("room handshake over a live connection", () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("starts with only the connection-forming room shared", async () => {
+  it("starts in no room, whatever topic it was found under", async () => {
     // Sync on net-status, not the announce frame (re-sent on ping cadence).
     let status;
     for (let i = 0; i < 100; i++) {
@@ -114,15 +116,12 @@ describe("room handshake over a live connection", () => {
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.equal(status.peers.length, 1, "peer never activated");
-    assert.deepEqual(status.peers[0].rooms, [ROOM_X]);
+    assert.deepEqual(status.peers[0].rooms, []);
     assert.equal(status.peers[0].handshake, false, "no topics received from us yet");
   });
 
-  it("opens every mutually held room when the peer's topics arrive", async () => {
-    transport.send(JSON.stringify({
-      type: "topics",
-      topics: [topicHex(deriveTopic(ROOM_X)), topicHex(deriveTopic(ROOM_Y))],
-    }) + "\n");
+  it("opens every mutually held room when the peer's proofs arrive", async () => {
+    transport.send(topicsFrame(pair.clientStream, [ROOM_X, ROOM_Y]));
 
     for (let i = 0; i < 40; i++) {
       const status = await call("net-status", "GET");
@@ -133,7 +132,7 @@ describe("room handshake over a live connection", () => {
     assert.deepEqual([...status.peers[0].rooms].sort(), [ROOM_X, ROOM_Y]);
     assert.equal(status.peers[0].handshake, true);
 
-    await nextFrame((f) => f.type === "room-meta" && f.roomKey === ROOM_Y, "room-meta backfill for Y");
+    await nextFrame((f) => f.type === "room-meta" && f.room === wireRoom(ROOM_Y), "room-meta backfill for Y");
   });
 
   it("never widens to rooms the peer did not announce and we both hold", async () => {
@@ -141,15 +140,18 @@ describe("room handshake over a live connection", () => {
     assert.ok(!status.peers[0].rooms.includes(ROOM_Z));
   });
 
-  it("announces the full topic set when a new room is joined", async () => {
+  it("announces the full topic set when a new room is joined, each with its proof", async () => {
     const joining = call("join", "POST", {}, ROOM_Z);
     const announce = await nextFrame(
-      (f) => f.type === "topics" && f.topics.includes(topicHex(deriveTopic(ROOM_Z))),
+      (f) => f.type === "topics" && f.rooms.some((entry) => entry.topic === topicHex(deriveTopic(ROOM_Z))),
       "topics re-announce including room Z",
     );
-    // Full set, never a delta.
-    assert.ok(announce.topics.includes(topicHex(deriveTopic(ROOM_X))));
-    assert.ok(announce.topics.includes(topicHex(deriveTopic(ROOM_Y))));
+    // Full set, never a delta, and every proof made for this connection.
+    for (const roomKey of [ROOM_X, ROOM_Y, ROOM_Z]) {
+      const entry = announce.rooms.find((candidate) => candidate.topic === wireRoom(roomKey));
+      assert.ok(entry, `no entry for ${roomKey.slice(0, 4)}`);
+      assert.equal(checkRoomProof(roomKey, pair.clientStream.handshakeHash, pair.serverStream.publicKey, entry.proof), true);
+    }
     await joining;
   });
 });

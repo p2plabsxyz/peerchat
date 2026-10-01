@@ -45,8 +45,9 @@
 
       <p class="lead">
         Small-group chat inside PeerSky Browser. You create a room, share a key, and everyone who has that key joins the same swarm; no chat server in the middle. <br>
-        <strong>No account.</strong> <strong>Everything stays local on your machine</strong> (room list, profile, keys file); except what you explicitly sync over the peer network.<br>
-        <strong>You own your chats:</strong> there’s no company holding logs or resetting your password; the room key is the shared secret.        
+        <strong>No accounts. No servers. Works without internet. End to end encrypted.</strong> Messages go straight between the people in a room, locked on the sender’s device with a key only the room holds.<br>
+        <strong>Everything stays local on your machine</strong> (room list, profile, keys file); except what you explicitly sync over the peer network.<br>
+        <strong>You own your chats:</strong> there’s no company holding logs or resetting your password; the room key is the shared secret.
       </p>
 
       <h2>What it does (technical)</h2>
@@ -71,17 +72,28 @@
         <a href="peersky://settings/archive">Settings → Archive</a>.
       </p>
       <p class="muted">
-        The key itself is never broadcast. Peers find each other through a <strong>swarm topic</strong>, a separate
+        The key itself is never sent. Peers find each other through a <strong>swarm topic</strong>, a separate
         SHA-256 derivation of the key, so the DHT nodes that route your lookups see the topic and cannot work back
         to the key or to the key your messages are encrypted with. Rooms created before this split announced the key
         directly, so those should be recreated with a fresh key.
+      </p>
+      <p class="muted">
+        Knowing the topic gets nobody in. Before PeerChat tells a peer anything about a room, that peer has to
+        <strong>prove it holds the key</strong>: an HMAC made with the room key over this one connection’s
+        handshake and its own public key. It is good on that connection only, so it cannot be copied or bounced
+        back, and the key itself never crosses the wire. Builds before this (chat channel
+        <code>peersky-chat/1</code>) handed the key to anyone who turned up under a room’s topic, so a room used
+        with one of them that has to stay private is worth recreating. Old and new builds do not talk to each
+        other, so update every device together.
       </p>
 
       <h2>How a direct message is locked</h2>
       <p class="muted">
         A conversation with one person gets its own room key, 32 random bytes like any other room's.
         Whoever opens it mints it and sends it inside the request, which only travels on a connection
-        whose public key the handshake has already proved, so it reaches that person and nobody else.
+        whose public key the handshake has already proved, so it reaches that person and nobody else. It is
+        sent to their full public key, never to the 8-character peer ID, which is short enough that someone
+        could make a key with the same one; while two connected keys share an ID, the request waits.
         Everything after that is the same as a room: the topic is a separate derivation, the messages
         are AES-256-GCM, and attachments are sealed with a third derivation of the same key.
       </p>
@@ -179,23 +191,22 @@
           theirs still waiting. They keep appearing in rooms you both belong to, the same as in any other
           messenger, and they are told their direct messages are blocked rather than left waiting on a reply that
           never comes. The list of people you have blocked, with unblock, is in Settings.</li>
-        <li><strong>Report</strong> opens an email to the maintainers with the person's name, peer ID and room
-          filled in. Nobody runs PeerChat, so no one can delete a message for you; blocking is what actually stops
+        <li><strong>Report</strong> opens an email to the maintainers with the person's name, peer ID, the room
+          and its key filled in, so they can look at what happened. Nobody runs PeerChat, so no one can delete a message for you; blocking is what actually stops
           contact.</li>
       </ul>
 
       <h2>Using more than one device</h2>
       <p class="muted">
-        A profile lives on <strong>one phone and one computer, and only one of them at a time</strong>.
-        Your devices share an identity rather than syncing through a server, and a PeerChat
-        feed has a single writer, so two devices writing the same conversation split it in two
-        with no way back. Messages also arrive on whichever device is running, not on both.
+        One person can be on <strong>one phone and any number of computers, all at the same time</strong>.
+        Link them with Backup &amp; Restore here and Link Device on the phone. Each device is its own member
+        of your rooms, so every message reaches all of them, and each shows your name with a fixed label:
+        <code>ada</code> where the name was made, then <code>ada@mobile</code>, <code>ada@desktop1</code>.
+        Rename yourself on one and the others follow. Join a room on one and it appears on the others.
       </p>
       <p class="muted">
-        This is why the usual pattern works: you move to a new machine and your chats continue.
-        Running both at once is what breaks. Pairing a second phone is refused; use
-        <strong>Move to a new phone</strong> in Backup, and remove the identity from the old phone
-        first (PeerSky Mobile, Settings) so it stops writing.
+        Moving to a new phone is a deliberate step: use <strong>Move to a new phone</strong> in Backup, and
+        remove the identity from the old phone first (PeerSky Mobile, Settings).
       </p>
 
       <h2>Checking what you are connected to</h2>
