@@ -4,7 +4,7 @@
     <img src="./demo.png" width="639" alt="Screenshot of PeerChat in light mode: browser tab with peersky://p2p/peerchat URL, sidebar with rooms and a selected chat with “Capt Jack Sparrow,” conversation bubbles, an embedded video, and the emoji picker above the input field.">
 </div>
 
-Small-group chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser). You create a room, share a key, and everyone who has that key joins the same swarm, with no chat server in the middle. History starts at the moment you join; nobody backfills what came before.
+Small-group chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser) on desktop and [PeerSky Mobile](https://github.com/p2plabsxyz/peersky-mobile) on iOS and Android. Phones and desktops talk in the same rooms: the phone has its own implementation of the same protocol, described in [docs/peerchat.md](https://github.com/p2plabsxyz/peersky-mobile/blob/main/docs/peerchat.md). You create a room, share a key, and everyone who has that key joins the same swarm, with no chat server in the middle. History starts at the moment you join; nobody backfills what came before.
 
 **No accounts. No servers. Works without internet. End to end encrypted.** Messages go straight between the people in a room, encrypted on the sender's device with a key only the room holds, and a peer gets nothing about a room until it proves it holds that key. On a local network, rooms keep talking with the internet down.
 
@@ -37,9 +37,44 @@ Small teams or group of friends who already trust each other and want something 
 
 ## How it works
 
-**Room key** — A random 32-byte value shown as hex. It is the room's shared secret and never goes on the wire: frames name a room by its topic, and the only frames that carry a key are a direct-message invite, to the one person it is for, and the rooms one person's devices pass between themselves. Sharing the key means sharing read access to that room’s history (with peers who actually have the blocks).
+Every device runs the whole chat by itself. There is no server to sign up with, so the full picture is you, the people in your rooms, and the network that helps you find each other:
 
-**Topic and message key** — Two separate values are derived from the room key, both `SHA-256` over a distinct context string:
+```mermaid
+flowchart LR
+  subgraph you["Your device: PeerSky on a desktop or a phone"]
+    UI["Chat screen"] -->|"send, read, live updates"| BE["Chat backend<br>p2p.js on desktop"]
+    BE --> LOG[("Room log<br>one Hypercore per room,<br>messages encrypted")]
+    BE --> FILES[("Attachments<br>one Hyperdrive per room,<br>files sealed")]
+  end
+  BE <-->|"encrypted connection:<br>room proofs first, then messages"| PEERS["Everyone else in the room"]
+  BE -.->|"find peers by topic,<br>a hash of the room key"| DHT{{"HyperDHT<br>or the local network"}}
+  PEERS -.-> DHT
+```
+
+And this is what happens between two people in a room when one of them says something:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant You as Your device
+  participant Net as HyperDHT or local network
+  participant Ann as Ann's device
+  You->>Net: look up the room's topic
+  Net-->>You: where Ann is
+  You->>Ann: open a Noise-encrypted connection
+  You->>Ann: proof that you hold the room key
+  Ann->>You: proof that Ann holds it too
+  Note over You,Ann: the room opens on this connection only when both proofs check out
+  You->>You: encrypt the message with the room's message key, keep it in your room log
+  You->>Ann: the encrypted message
+  Ann->>Ann: decrypt it, run the filters, keep it, show it
+```
+
+Nobody in the middle sees a room key or a message. The DHT only ever sees topics, and a topic opens nothing on its own. The details:
+
+**Room key.** A random 32-byte value shown as hex. It is the room's shared secret and never goes on the wire: frames name a room by its topic, and the only frames that carry a key are a direct-message invite, to the one person it is for, and the rooms one person's devices pass between themselves. Sharing the key means sharing read access to that room’s history (with peers who actually have the blocks).
+
+**Topic and message key.** Two separate values are derived from the room key, both `SHA-256` over a distinct context string:
 
 | Derived value | Context | Where it goes |
 | --- | --- | --- |
@@ -58,19 +93,19 @@ Earlier builds joined the swarm on the raw room key and derived the message key 
 
 **Version 2.** The chat channel is `peersky-chat/2`. Builds before it handed the room key to anyone who turned up under a room's topic, and DHT nodes see topics go by, so a room used with one of those builds that has to stay private is worth recreating with a fresh key. The two versions do not open a channel with each other, so update every device together.
 
-**Data path** — Outgoing messages are encrypted with **AES-256-GCM** using the message key. The feed stores ciphertext + IV + tag; peers decrypt after sync. The wire between peers is already encrypted by the swarm.
+**Data path.** Outgoing messages are encrypted with **AES-256-GCM** using the message key. The feed stores ciphertext + IV + tag; peers decrypt after sync. The wire between peers is already encrypted by the swarm.
 
-**Process split** — The UI (`app.js`, static HTML/CSS) talks to `hyper://chat?action=…` over `fetch` and `EventSource`. The handler in `p2p.js` runs in the main process with the shared Hyper SDK instance: it joins swarms for each saved room, relays JSON lines between peers (newline-delimited), and broadcasts events to all connected SSE clients.
+**Process split.** The UI (`app.js`, static HTML/CSS) talks to `hyper://chat?action=…` over `fetch` and `EventSource`. The handler in `p2p.js` runs in the main process with the shared Hyper SDK instance: it joins swarms for each saved room, relays JSON lines between peers (newline-delimited), and broadcasts events to all connected SSE clients.
 
-**Storage** — Room metadata, your profile, and encrypted room keys (when available) live in a JSON file under Electron user data (`CHAT_STORAGE` in `p2p.js`, wired from `hyper-handler.js`). Optional **safeStorage** encrypts that blob when the OS supports it.
+**Storage.** Room metadata, your profile, and encrypted room keys (when available) live in a JSON file under Electron user data (`CHAT_STORAGE` in `p2p.js`, wired from `hyper-handler.js`). Optional **safeStorage** encrypts that blob when the OS supports it.
 
-**Joining again** — Use **Join room** with the 64-character key. For room metadata or keys stored in your archive, open **Settings -> Archive** in PeerSky and look under Hyperdrives for **peerchat-rooms**.
+**Joining again.** Use **Join room** with the 64-character key. For room metadata or keys stored in your archive, open **Settings -> Archive** in PeerSky and look under Hyperdrives for **peerchat-rooms**.
 
-**Room removal path** — The room records its creator's full public key, not the 8-character peer id, which is only 32 bits and can be ground for. New rooms record it at creation; the device that created an older room fills it in from its own key. A creator announces it in room metadata and a peer accepts it only when the announcing connection's public key is the key being announced, so it can only be learned from the creator. Removals travel as `{ type: "room-bans", roomKey, bans }` carrying no message id and no encrypted body, so builds predating this drop them at their first check. A peer accepts a removal list only from a connection whose key matches the room's creator key, and that list replaces its own. Pinned creator keys in `lib/room-moderation.js` override anything announced.
+**Room removal path.** The room records its creator's full public key, not the 8-character peer id, which is only 32 bits and can be ground for. New rooms record it at creation; the device that created an older room fills it in from its own key. A creator announces it in room metadata and a peer accepts it only when the announcing connection's public key is the key being announced, so it can only be learned from the creator. Removals travel as `{ type: "room-bans", roomKey, bans }` carrying no message id and no encrypted body, so builds predating this drop them at their first check. A peer accepts a removal list only from a connection whose key matches the room's creator key, and that list replaces its own. Pinned creator keys in `lib/room-moderation.js` override anything announced.
 
 **One person on several devices.** Each device keeps its own network key, so each is its own member of a room: it receives every message and sends its own. PeerSky's transfers between a person's devices carry the profile, every room with its key, a label for the new device, and a link, a 32-byte secret the person's devices share (`lib/device-link.js`; PeerSky Mobile keeps the same rules). A device shows the name with its fixed label after it: `ada` on the device the name was made on, then `ada@mobile` and `ada@desktop1`, `ada@desktop2` for more desktops. The label cannot be edited. The `profile` frame carries `link: { id, name, bio, at, labels, mac }`, where `id` is public (`SHA-256("peerchat-device-link\n" + key)`, first 32 hex) and `mac` is HMAC-SHA256 under the link key over the name, bio, a hash of the picture, when they were set, the labels and the sending device's network key, so a proof passed on by anyone else fails on their connection. A device takes a name, bio and picture only from a profile whose proof checks against its own link and was set later than its own, so renaming on any device renames all of them, and nobody without the link can. Builds before this show the name with its label and ignore the rest. Once a peer has proved it is another of your devices on its own connection, the two send each other the rooms they are in (`link-rooms`, with the room keys), and a room joined on one device appears on the others that are online, or the next time they connect. A room left on a device stays left there: it is not taken back from your other devices until you join it again. A direct conversation goes along once the other person has accepted it. A desktop restored from another desktop has a copy of its store, so it keeps its room feeds under its own network key, starting from the copy: two devices appending to one feed would fork it, and hypercore freezes a forked feed for good.
 
-**Moderation path** — Outgoing messages are checked locally before encryption. Live incoming messages are decrypted, checked, and either appended or replaced with a local system notice. History sync uses a content-only check so old filtered messages are not reintroduced when a new peer joins, while the syncing peer is not punished for replaying past history. Kick/rejoin checks use the connection-level peer identity instead of a self-reported message field.
+**Moderation path.** Outgoing messages are checked locally before encryption. Live incoming messages are decrypted, checked, and either appended or replaced with a local system notice. History sync uses a content-only check so old filtered messages are not reintroduced when a new peer joins, while the syncing peer is not punished for replaying past history. Kick/rejoin checks use the connection-level peer identity instead of a self-reported message field.
 
 ### Blocking details
 
@@ -87,9 +122,9 @@ it applies to.
 
 ### Moderation details
 
-All moderation runs **locally on each peer**—there is no central authority. Even if a remote peer strips moderation from their build, your node still filters their messages independently.
+All moderation runs **locally on each peer**, with no central authority. Even if a remote peer strips moderation from their build, your node still filters their messages independently.
 
-**Per-room moderation settings** — Room creators configure moderation at creation time in the create-room modal. Settings are immutable after creation (there is no admin role), and peers verify/sanitize them when syncing room metadata:
+**Per-room moderation settings.** Room creators configure moderation at creation time in the create-room modal. Settings are immutable after creation (there is no admin role), and peers verify/sanitize them when syncing room metadata:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -145,7 +180,7 @@ These apps solve different problems; the table is to set expectations, not to pi
 uses the default `bonjour-service` LAN adapter; mobile can inject a system
 Bonjour or Android NSD adapter through the same two-method interface. Noise
 protects the bytes on the wire; the **room key** protects message content on
-disk. That’s simpler than Signal’s ratchet—it’s also **weaker** if the key is
+disk. That’s simpler than Signal’s ratchet, and also **weaker** if the key is
 stolen or shared carelessly.
 
 ### PeerChat specifics
@@ -210,25 +245,25 @@ es.addEventListener("message", (ev) => {
 ```
 
 **Available methods:**
-- `chat.getProfile()` — Get current user profile
-- `chat.getRooms()` — Get all rooms, peer profiles, online status
-- `chat.saveProfile(body)` — Update username, bio, avatar, notifications
-- `chat.createRoom(body)` — Create new room with name, bio, link, avatar
-- `chat.joinRoom(roomKey)` — Join room by key
-- `chat.getHistory(roomKey)` — Get message history for room
-- `chat.setActive(roomKey)` — Mark room as active
-- `chat.markRead(roomKey)` — Mark room as read
-- `chat.sendMessage(roomKey, body)` — Send message with optional reply, file
-- `chat.react(roomKey, body)` — React to message with emoji
-- `chat.joinDM(body)` — Initiate DM with peer
-- `chat.acceptDM(body)` — Accept incoming DM request
-- `chat.rejectDM(body)` — Reject incoming DM request
-- `chat.blockPeer(body)` — Block a peer's direct messages (`{ peerId, username }`); returns the updated block list and pending requests
-- `chat.unblockPeer(body)` — Unblock a peer (`{ peerId }`); returns the updated block list
-- `chat.updateRoom(roomKey, body)` — Update room settings (pin, mute)
-- `chat.deleteRoom(roomKey)` — Leave room
-- `chat.requestMeta(roomKey)` — Broadcast a request to connected peers to re-send room metadata (name, bio, avatar, creator)
-- `chat.receiveAllUrl()` — Get SSE endpoint URL for live updates
+- `chat.getProfile()`: Get current user profile
+- `chat.getRooms()`: Get all rooms, peer profiles, online status
+- `chat.saveProfile(body)`: Update username, bio, avatar, notifications
+- `chat.createRoom(body)`: Create new room with name, bio, link, avatar
+- `chat.joinRoom(roomKey)`: Join room by key
+- `chat.getHistory(roomKey)`: Get message history for room
+- `chat.setActive(roomKey)`: Mark room as active
+- `chat.markRead(roomKey)`: Mark room as read
+- `chat.sendMessage(roomKey, body)`: Send message with optional reply, file
+- `chat.react(roomKey, body)`: React to message with emoji
+- `chat.joinDM(body)`: Initiate DM with peer
+- `chat.acceptDM(body)`: Accept incoming DM request
+- `chat.rejectDM(body)`: Reject incoming DM request
+- `chat.blockPeer(body)`: Block a peer's direct messages (`{ peerId, username }`); returns the updated block list and pending requests
+- `chat.unblockPeer(body)`: Unblock a peer (`{ peerId }`); returns the updated block list
+- `chat.updateRoom(roomKey, body)`: Update room settings (pin, mute)
+- `chat.deleteRoom(roomKey)`: Leave room
+- `chat.requestMeta(roomKey)`: Broadcast a request to connected peers to re-send room metadata (name, bio, avatar, creator)
+- `chat.receiveAllUrl()`: Get SSE endpoint URL for live updates
 
 ### Porting to another Hyper browser
 
