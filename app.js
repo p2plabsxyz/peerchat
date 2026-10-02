@@ -2363,10 +2363,17 @@ $("create-room-form")?.addEventListener("submit", async (e) => {
 });
 
 $('join-room-btn')?.addEventListener('click', () => { openModal('join-room-modal'); queueMicrotask(() => $('join-room-key')?.focus()); });
+let joiningRoom = false;
 $("join-room-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (joiningRoom) return;
   const key = $("join-room-key").value.trim();
   if (!/^[a-f0-9]{64}$/i.test(key)) { alert("Invalid room key."); return; }
+  // Finding the room can take a few seconds, and a button that does nothing
+  // in the meantime gets pressed again.
+  const confirmBtn = $("join-room-confirm");
+  joiningRoom = true;
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = "Joining…"; }
   try {
     await chat.joinRoom(key);
     await loadRooms();
@@ -2377,6 +2384,10 @@ $("join-room-form")?.addEventListener("submit", async (e) => {
     refreshRoomHeader(key);
     saveDrafts().catch(() => {});
   } catch (err) { alert(err.message); }
+  finally {
+    joiningRoom = false;
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = "Join"; }
+  }
 });
 
 $("message-input")?.addEventListener("focus", initAudio, { once: true });
@@ -2391,24 +2402,28 @@ $("message-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const input = $("message-input");
   const msg = input.value.trim();
-  if (!msg || !S.activeRoom) return;
+  // The room it was typed in. Switching rooms while it sends must not move it.
+  const roomKey = S.activeRoom;
+  if (!msg || !roomKey) return;
   const savedMsg = msg;
   input.value = "";
   resizeMessageField();
-  saveDraft(S.activeRoom, "");
+  saveDraft(roomKey, "");
   const body = { message: msg };
   if (replyTarget) { body.replyTo = replyTarget; replyTarget = null; $("reply-bar").style.display = "none"; }
   try {
-    const resp = await chat.sendMessage(S.activeRoom, body);
-    if (resp.sent) appendMessage(S.activeRoom, resp.sent);
+    const resp = await chat.sendMessage(roomKey, body);
+    if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
   } catch (err) {
     console.error("Send failed:", err);
     // Check for moderation block (403)
     if (err?.status === 403 && err?.moderation === true) {
-      input.value = savedMsg;
-      resizeMessageField();
-      saveDraft(S.activeRoom, savedMsg);
+      saveDraft(roomKey, savedMsg);
+      if (S.activeRoom === roomKey) {
+        input.value = savedMsg;
+        resizeMessageField();
+      }
       let toastMsg;
       if (err.action === "warn") {
         toastMsg = "Message blocked - please rephrase.";
@@ -2418,6 +2433,14 @@ $("message-form")?.addEventListener("submit", async (e) => {
         toastMsg = err.message;
       }
       showModerationToast(toastMsg, err);
+    } else {
+      // Anything else went nowhere, so the words come back and the reason shows.
+      saveDraft(roomKey, savedMsg);
+      if (S.activeRoom === roomKey) {
+        input.value = savedMsg;
+        resizeMessageField();
+      }
+      showModerationToast(err?.message ? `Not sent: ${err.message}` : "Not sent. Try again.");
     }
   }
 });
@@ -2793,16 +2816,23 @@ async function unblockPeer(peerId) {
   }
 }
 
-// Nobody runs PeerChat, so a report goes to the maintainers by email with
-// enough context to act on.
-function reportPeer(peerId, username) {
-  const room = S.rooms[S.activeRoom];
+// Nobody runs PeerChat, so a report goes to the maintainers by email. The
+// room is named by a hash of its key, never the key itself, which would let
+// whoever reads the email into the room and all of its history.
+async function reportPeer(peerId, username) {
+  const roomKey = S.activeRoom;
+  const room = S.rooms[roomKey];
+  let roomId = "unknown";
+  if (roomKey) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(roomKey));
+    roomId = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
+  }
   const subject = `PeerChat report: ${username || peerId}`;
   const body = [
     `Reported user: ${username || peerId}`,
     `Peer ID: ${peerId}`,
     `Room: ${room?.name || "unknown"}`,
-    `Room key: ${S.activeRoom || "unknown"}`,
+    `Room ID: ${roomId}`,
     `Reported at: ${new Date().toISOString()}`,
     "",
     "What happened?",
@@ -3459,7 +3489,7 @@ async function uploadAndSendFile(file) {
     const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
     if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
     const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
-    if (resp.sent) appendMessage(S.activeRoom, resp.sent);
+    if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
   } catch (err) { alert("Upload failed: " + err.message); }
 }
