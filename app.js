@@ -12,7 +12,6 @@ import { chat } from "./chat-api.js";
 import {
   attachmentDriveName,
   encryptAttachment,
-  MAX_ATTACHMENT_BYTES,
   opaqueAttachmentPath,
   openAttachmentStream,
   sealAttachmentStream,
@@ -33,6 +32,7 @@ import {
   screenUploadBatch,
 } from "./lib/media-moderation.js";
 import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
+import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 
 const S = {
@@ -3496,13 +3496,6 @@ async function screenAndUploadFiles(selected) {
     return;
   }
 
-  // Mobile takes no more than this either, so nobody is sent a file they cannot open.
-  const tooBig = files.find((file) => file.size > MAX_ATTACHMENT_BYTES);
-  if (tooBig) {
-    alert(`${tooBig.name} is too big to send. PeerChat attachments must be 2 GB or smaller.`);
-    return;
-  }
-
   const sendBtn = $("send-btn");
   const attachBtn = $("attach-btn");
   if (attachBtn) attachBtn.disabled = true;
@@ -3552,14 +3545,14 @@ async function uploadAndSendFile(file) {
       ? sealAttachmentStream(file, roomKey)
       : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
     const uploadResp = await fetch(base + path, { method: "PUT", body, ...(framed && { duplex: "half" }) });
-    if (!uploadResp.ok) throw new Error("Upload failed");
+    if (!uploadResp.ok) throw new Error(await uploadResp.text().catch(() => "") || "the drive did not take it");
     const fileUrl = base + path;
     const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
     if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
     const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
     if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
-  } catch (err) { alert("Upload failed: " + err.message); }
+  } catch (err) { alert(describeUploadFailure(file.name, err.message)); }
 }
 
 const msgArea = $("messages");
