@@ -17,14 +17,19 @@ describe("the PeerChat welcome", () => {
     assert.ok(PEERCHAT_WELCOME.points.every((point) => !point.icon), "numbered, as on the phone");
   });
 
-  it("asks about the phone from a computer, as the phone asks about the computer", () => {
+  it("asks about the phone from a computer, as the phone asks about desktop", () => {
     const questions = WELCOME_QUESTIONS.map(({ q }) => q);
     assert.ok(questions.includes("Is it on my phone too?"));
     assert.ok(questions.includes("How does it work without internet?"));
-    assert.ok(!questions.some((q) => /iPhone and Android|computer too/.test(q)));
+    assert.ok(questions.includes("How does it compare with WhatsApp, Telegram or Signal?"));
+    assert.ok(questions.includes("Can I use it on my phone and my computer?"));
+    // In PeerChat's own words, not another chat app's FAQ word for word.
+    assert.ok(!questions.some((q) => /iPhone and Android|computer too|available on desktop|different from|really free|why does it matter|multiple devices/i.test(q)));
     const answer = (q) => WELCOME_QUESTIONS.find((item) => item.q === q).a;
     assert.match(answer("Is it on my phone too?"), /iPhone, iPad and Android/);
-    assert.match(answer("How big a file can I send?"), /Any size your computer has room for/);
+    assert.match(answer("Can I send big files?"), /any size your computer has room for/);
+    assert.match(answer("How does it work without internet?"), /Any local network will do/);
+    assert.match(answer("Can I use it on my phone and my computer?"), /ada@mobile or ada@desktop1/);
     for (const { q, a } of WELCOME_QUESTIONS) {
       assert.match(q, /\?$/);
       assert.doesNotMatch(`${q} ${a}`, /—|honestly/i);
