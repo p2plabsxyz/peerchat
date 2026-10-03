@@ -1306,10 +1306,12 @@ function makeRoomEl(r) {
       <span class="room-preview">${esc(preview.slice(0, 60))}</span>
     </div>
     <div class="room-meta">
-      ${r.isMuted ? '<img src="./assets/svg/mute.svg" class="room-icon" alt="Muted" title="Muted" />' : ""}
-      ${r.isPinned ? '<img src="./assets/svg/pin.svg" class="room-icon" alt="Pinned" title="Pinned" />' : ""}
-      ${r.lastMessage ? `<span class="room-time">${formatTime(r.lastMessage.timestamp)}</span>` : ""}
-      ${r.unreadCount > 0 ? `<span class="badge">${r.unreadMentions > 0 ? "@" : ""}${r.unreadCount}</span>` : ""}
+      <span class="room-time">${r.lastMessage ? formatTime(r.lastMessage.timestamp) : ""}</span>
+      <span class="room-state">
+        ${r.unreadCount > 0 ? `<span class="badge">${r.unreadMentions > 0 ? "@" : ""}${r.unreadCount}</span>` : ""}
+        ${r.isMuted ? '<img src="./assets/svg/mute.svg" class="room-icon" alt="Muted" title="Muted" />' : ""}
+        ${r.isPinned ? '<img src="./assets/svg/pin.svg" class="room-icon" alt="Pinned" title="Pinned" />' : ""}
+      </span>
     </div>
     <button class="room-dots" title="Options">&#8942;</button>
   `;

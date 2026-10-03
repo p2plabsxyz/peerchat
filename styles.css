@@ -224,12 +224,18 @@ html, body {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   display: block; margin-top: 2px; text-align: left;
 }
+/* The time on top, and under it the unread count, then the mute and pin icons.
+   Both lines keep their height when empty and end at the same right edge, pin
+   last, so pins line up down the list whatever the time or count beside them. */
 .room-item .room-meta {
-  display: flex; flex-direction: row; align-items: center; gap: 6px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
   flex-shrink: 0; margin-right: 4px;
 }
 .room-item .room-time {
-  font-size: 0.65rem; line-height: 13px; color: var(--muted);
+  font-size: 0.65rem; line-height: 13px; min-height: 13px; color: var(--muted);
+}
+.room-item .room-state {
+  display: flex; align-items: center; gap: 6px; min-height: 18px;
 }
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -248,8 +254,7 @@ html, body {
 .room-item .room-dots:hover { background: var(--border); color: var(--text); }
 
 .room-item .room-icon {
-  /* Same box height as the time beside it, so centring the row lines the two
-     up exactly instead of centring a tall icon against a short line. */
+  /* Centred on the line under the time, beside the unread count. */
   width: 13px; height: 13px;
   flex-shrink: 0;
   filter: invert(50%);
