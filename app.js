@@ -34,6 +34,7 @@ import {
 import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
+import { menuPosition } from "./lib/menu-position.js";
 
 const S = {
   profile: null,
@@ -1776,26 +1777,8 @@ function scrollToMsg(id) {
 
 function showMsgMenu(e, msg) {
   const menu = $("msg-menu");
-  menu.classList.add("open");
   menu._msg = msg;
-  
-  const menuRect = menu.getBoundingClientRect();
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  
-  let top = e.clientY;
-  let left = e.clientX;
-  
-  if (left + menuRect.width > viewportWidth) {
-    left = viewportWidth - menuRect.width - 10;
-  }
-  
-  if (top + menuRect.height > viewportHeight) {
-    top = viewportHeight - menuRect.height - 10;
-  }
-  
-  menu.style.top = top + "px";
-  menu.style.left = left + "px";
+  openMenuAt(menu, e.clientX, e.clientY);
 }
 
 $("msg-menu")?.addEventListener("click", (e) => {
@@ -3336,9 +3319,21 @@ function showCtxMenu(e, roomKey) {
     const isPreJoined = PRE_JOINED_ROOM_KEY && roomKey === PRE_JOINED_ROOM_KEY;
     copyBtn.style.display = (isDM || isPreJoined) ? "none" : "";
   }
-  menu.style.top = e.clientY + "px";
-  menu.style.left = e.clientX + "px";
+  openMenuAt(menu, e.clientX, e.clientY);
+}
+
+// Opens a menu at the pointer, above or to the left of it where it would run
+// past the window, so the chats at the bottom of the list show every option.
+function openMenuAt(menu, x, y) {
   menu.classList.add("open");
+  const { width, height } = menu.getBoundingClientRect();
+  const { left, top } = menuPosition({
+    x, y, width, height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
 }
 
 document.addEventListener("click", () => {
