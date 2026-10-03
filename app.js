@@ -3138,10 +3138,13 @@ function renderDiscoverList() {
   if (!list) return;
   list.innerHTML = "";
 
-  const found = discoverDirectory($("discover-search")?.value || "");
+  // Nobody is listed until a name is typed: finding one person needs no list
+  // of everyone in the public room.
+  const query = ($("discover-search")?.value || "").trim();
+  if (!query) return;
+  const found = discoverDirectory(query);
   if (found.length === 0) {
-    const query = ($("discover-search")?.value || "").trim();
-    list.innerHTML = `<p class="muted small">${query ? "Nobody by that name." : "Nobody else here yet."}</p>`;
+    list.innerHTML = '<p class="muted small">Nobody by that name.</p>';
     return;
   }
 

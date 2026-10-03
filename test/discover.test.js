@@ -45,6 +45,13 @@ describe("find people", () => {
     assert.match(memberList, /collapseMembers\(rows\)/);
   });
 
+  it("lists nobody until a name is typed", () => {
+    const list = app.slice(app.indexOf("function renderDiscoverList("), app.indexOf('$("discover-btn")'));
+    assert.match(list, /if \(!query\) return;/);
+    assert.ok(list.indexOf("if (!query) return;") < list.indexOf("discoverDirectory(query)"));
+    assert.match(html, /Type a name to find someone in Peer-to-Peer Republic/);
+  });
+
   it("shows one row per person, not one per device", () => {
     // The same name from two devices is one person. Whichever is online is the
     // one worth offering, because that is the one who can be reached.
