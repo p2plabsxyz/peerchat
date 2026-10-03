@@ -127,6 +127,13 @@ function applyMarkdownFormatting(escapedText) {
   return applyInlineFormatting(escapedText);
 }
 
+// This device, or another of this person's own: what they send is theirs.
+function isOwnId(id) {
+  if (!id) return false;
+  if (peerIdEq(id, S.profile?.id)) return true;
+  return (S.profile?.siblings || []).some((sibling) => peerIdEq(sibling, String(id).slice(0, 8)));
+}
+
 function peerIdEq(a, b) {
   return String(a || "").toLowerCase() === String(b || "").toLowerCase();
 }
@@ -1676,7 +1683,7 @@ function makeLinkWarningNote(text) {
 }
 
 function makeMsgEl(msg) {
-  const self = msg.sender === S.profile?.id;
+  const self = isOwnId(msg.sender);
   const el = document.createElement("div");
   el.className = `message ${self ? "msg-right" : "msg-left"}`;
   el.dataset.msgId = msg.id || "";
@@ -1814,7 +1821,7 @@ function showMsgInfo(e, msg) {
     document.body.appendChild(popup);
   }
   const d = new Date(msg.timestamp);
-  const sender = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
+  const sender = isOwnId(msg.sender) ? "You" : (msg.senderName || msg.sender);
   popup.innerHTML = `<strong>${esc(sender)}</strong><br>Sent: ${d.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })} at ${d.toLocaleTimeString()}`;
   popup.style.top = e.clientY + "px";
   popup.style.left = e.clientX + "px";
@@ -1825,7 +1832,7 @@ function showMsgInfo(e, msg) {
 }
 
 function setReply(msg) {
-  const displayName = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
+  const displayName = isOwnId(msg.sender) ? "You" : (msg.senderName || msg.sender);
   const actualName = msg.senderName || msg.sender;
   const replyText = replyDisplayText(msg);
   replyTarget = { id: msg.id, sender: msg.sender, sn: actualName, text: replyText };
@@ -1946,7 +1953,7 @@ function patchRoomsForPeer(peerId, username, bio, peerAvatar, restrictKeys) {
     };
   };
   const fillDM = (room) => {
-    room.name = username;
+    room.name = isOwnId(peerId) ? "You" : username;
     room.bio = bio || "";
     room.avatar = peerAvatar;
   };
@@ -2086,7 +2093,8 @@ function connectGlobalSSE() {
         };
       }
 
-      if (!isSystem && msg.sender !== S.profile?.id) {
+      // What you wrote on another of your devices is not news to you.
+      if (!isSystem && !isOwnId(msg.sender)) {
         if (rk !== S.activeRoom) {
           room.unreadCount = (room.unreadCount || 0) + 1;
           if (msgText && isMentioned(msgText)) {
@@ -2266,6 +2274,15 @@ function connectGlobalSSE() {
           S.profile = profile;
           $("sidebar-username").textContent = profile.displayName || profile.username;
           $("sidebar-avatar").src = avatar(profile.username, 32, profile.avatar);
+        }).catch(() => {});
+      } else if (!isOwnId(peerId)) {
+        // It may be another of this person's devices, proven just now.
+        chat.getProfile().then((profile) => {
+          S.profile = profile;
+          if (isOwnId(peerId)) {
+            patchRoomsForPeer(peerId, username, bio, peerAvatar, null);
+            renderRoomList();
+          }
         }).catch(() => {});
       }
     } catch {}
