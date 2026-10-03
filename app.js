@@ -23,6 +23,7 @@ import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { createPresenceHold } from "./lib/presence.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { attachmentKind } from "./lib/render-rules.js";
+import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
 import {
   describeTooManyFiles,
@@ -123,11 +124,7 @@ function mentionizeEscapedPlain(escapedPlain) {
 }
 
 function applyMarkdownFormatting(escapedText) {
-  return escapedText
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/~(.+?)~/g, '<del>$1</del>')
-    .replace(/`(.+?)`/g, '<code>$1</code>');
+  return applyInlineFormatting(escapedText);
 }
 
 function peerIdEq(a, b) {
@@ -668,12 +665,35 @@ function linkify(text, msg) {
   const kind = attachmentKind(text, msg);
   if (kind === "encrypted") return encryptedAttachmentHtml(trimmed, msg);
   if (kind === "upload") return legacyAttachmentHtml(trimmed, msg);
+  return splitCodeFences(text)
+    .map((part) => (part.code ? codeBlockHtml(part.text) : proseHtml(part.text)))
+    .join("");
+}
+
+// A heading is a block of its own, so the line breaks either side of it are
+// already there and a <br> would add a blank line.
+function proseHtml(text) {
+  const lines = text.split("\n").map((line) => {
+    const heading = readHeading(line);
+    return heading.level
+      ? { heading: true, html: `<span class="msg-h msg-h${heading.level}">${linkifyLine(heading.text)}</span>` }
+      : { heading: false, html: linkifyLine(line) };
+  });
+  return lines.map((line, index) => (
+    (index > 0 && !line.heading && !lines[index - 1].heading ? "<br>" : "") + line.html
+  )).join("");
+}
+
+function linkifyLine(text) {
   const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) parts.push(mentionizeEscapedPlain(esc(text.slice(last, m.index))));
-    const url = m[0];
+    // A full stop, comma or closing mark after a link ends the sentence or
+    // the **bold** around it, not the address.
+    const url = m[0].replace(/[.,;:!?'"*~]+$/, "") || m[0];
+    re.lastIndex = m.index + url.length;
     if (url.includes('@') && !url.includes('://')) {
       parts.push(`<a href="mailto:${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
     } else {
@@ -682,8 +702,35 @@ function linkify(text, msg) {
     last = re.lastIndex;
   }
   if (last < text.length) parts.push(mentionizeEscapedPlain(esc(text.slice(last))));
-  const html = parts.join("");
-  return html.replace(/\n/g, "<br>");
+  return parts.join("");
+}
+
+function codeBlockHtml(code) {
+  return `<div class="msg-code-block"><div class="msg-code-head"><span>Code</span>` +
+    `<button type="button" class="msg-code-copy">Copy</button></div><pre><code>${esc(code)}</code></pre></div>`;
+}
+
+// Code copies with a click: a block from its button, inline code from itself.
+function wireCodeCopy(container) {
+  container.querySelectorAll(".msg-code-copy").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const code = button.closest(".msg-code-block")?.querySelector("code")?.textContent || "";
+      copyText(code).then(() => {
+        button.textContent = "Copied!";
+        setTimeout(() => { button.textContent = "Copy"; }, 1500);
+      });
+    });
+  });
+  container.querySelectorAll("code.msg-inline-code").forEach((code) => {
+    code.addEventListener("click", (event) => {
+      event.stopPropagation();
+      copyText(code.textContent || "").then(() => {
+        code.classList.add("copied");
+        setTimeout(() => code.classList.remove("copied"), 1200);
+      });
+    });
+  });
 }
 
 const MAX_DATA_IMAGE_URL_LEN = 1_500_000;
@@ -1657,9 +1704,10 @@ function makeMsgEl(msg) {
     bubble.appendChild(quote);
   }
 
-  const textNode = document.createElement("span");
+  const textNode = document.createElement("div");
   textNode.className = "msg-bubble-body";
   textNode.innerHTML = linkify(msg.message, msg);
+  wireCodeCopy(textNode);
   bubble.appendChild(textNode);
 
   const previewCard = makePreviewCard(msg.preview);
