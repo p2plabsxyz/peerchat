@@ -30,6 +30,7 @@ describe("the PeerChat welcome", () => {
     assert.match(answer("Can I send big files?"), /any size your computer has room for/);
     assert.match(answer("How does it work without internet?"), /Any local network will do/);
     assert.match(answer("Can I use it on my phone and my computer?"), /ada@mobile or ada@desktop1/);
+    assert.match(answer("Who can see my IP address?"), /even Signal’s servers see your IP address\. To keep it from all of them, turn on a VPN/);
     for (const { q, a } of WELCOME_QUESTIONS) {
       assert.match(q, /\?$/);
       assert.doesNotMatch(`${q} ${a}`, /—|honestly/i);
