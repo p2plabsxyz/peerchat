@@ -3646,16 +3646,16 @@ $("media-viewer-dl")?.addEventListener("click", async () => {
     const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg";
     const rawHint = (overlay?.dataset.mediaFilename || "").trim().replace(/[/\\?%*:|"<>]/g, "_").slice(0, 60);
     const fname = rawHint ? `peerchat-${rawHint}.${ext}` : `peerchat-image.${ext}`;
-    if (typeof window.showSaveFilePicker === "function") {
-      try {
-        const handle = await window.showSaveFilePicker({ suggestedName: fname });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        return;
-      } catch (pickErr) {
-        if (pickErr?.name === "AbortError") return;
-      }
+    // One save dialog, ever. The download link below is only for when no dialog
+    // could open; once one has, writing there either works or says why. Falling
+    // back after a failed write asked where to save a second time.
+    const handle = await pickSaveFile(fname);
+    if (handle === false) return;
+    if (handle) {
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
     }
     const obj = URL.createObjectURL(blob);
     const a = document.createElement("a");
