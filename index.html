@@ -89,6 +89,12 @@
           <button type="button" id="scroll-to-bottom" class="scroll-to-bottom" style="display:none" title="Scroll to bottom">
             <img src="./assets/svg/arrow-down.svg" alt="Scroll down" width="20" height="20" />
           </button>
+          <!-- Shown in place of the message box while picking messages to forward -->
+          <div id="select-bar" class="select-bar">
+            <button type="button" id="select-cancel" class="btn-secondary btn-sm">Cancel</button>
+            <span id="select-count" class="select-count" aria-live="polite">0 selected</span>
+            <button type="button" id="select-forward" class="btn-sm" disabled>Forward</button>
+          </div>
           <form id="message-form">
             <div id="mention-popup" class="mention-popup"></div>
             <div id="emoji-panel" class="emoji-panel" aria-hidden="true"></div>
@@ -110,6 +116,7 @@
             <button data-action="react">React</button>
             <button data-action="reply">Reply</button>
             <button data-action="copy-msg">Copy Text</button>
+            <button data-action="select">Select</button>
             <button data-action="info">Info</button>
           </div>
         </div>
@@ -158,6 +165,18 @@
             <button type="submit" id="create-room-confirm">Create</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- Forward Modal -->
+    <div id="forward-modal" class="modal">
+      <div class="modal-content">
+        <h3>Forward to</h3>
+        <input type="search" id="forward-search" placeholder="Search chats" autocomplete="off" />
+        <div id="forward-list" class="forward-list" role="list"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-close>Cancel</button>
+        </div>
       </div>
     </div>
 
@@ -233,9 +252,8 @@
         </p>
         <h4>Search people</h4>
         <p class="muted small">
-          Everyone in Peer-to-Peer Republic, which is the room everyone joins, so it
-          doubles as the place to find somebody. No directory is kept anywhere: this is
-          the room's own member list.
+          Type a name to find someone in Peer-to-Peer Republic, the room everyone joins.
+          No directory is kept anywhere: this searches the room's own member list.
         </p>
         <input type="text" id="discover-search" placeholder="Search by name" autocomplete="off" spellcheck="false" />
         <div id="discover-list" class="discover-list"></div>
@@ -309,6 +327,7 @@
     </div>
 
     <script src="./lib/avatar.min.js"></script>
+    <script type="module" src="./app-welcome.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

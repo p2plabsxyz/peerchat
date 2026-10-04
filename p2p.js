@@ -102,8 +102,10 @@ const roomSseClients = {};
 const globalSseClients = [];
 const joinedRooms = new Set();
 // Peers whose profile carried a proof made with the link: this person's other
-// devices.
+// devices. Saved, so their messages are still this person's after a restart,
+// before they have been seen again.
 const siblingIds = new Set();
+const MAX_SIBLINGS = 16;
 const discoveryKeys = new Map();
 const seenIds = new Set();
 const rateCounters = new Map();
@@ -315,6 +317,11 @@ function loadData() {
         ? normalizeLink({ ...raw.link, key: dec4disk(raw.link.key) })
         : null;
       savedData.leftRooms = sanitizeLeftRooms(raw.leftRooms);
+      if (savedData.link && Array.isArray(raw.siblings)) {
+        for (const id of raw.siblings.slice(0, MAX_SIBLINGS)) {
+          if (typeof id === "string" && /^[0-9a-f]{8,64}$/i.test(id)) siblingIds.add(id.toLowerCase());
+        }
+      }
       for (const [id, r] of Object.entries(raw.rooms)) {
         savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
       }
@@ -369,6 +376,7 @@ function persistData() {
       device: { label: savedData.device?.label || "" },
       link: savedData.link ? { ...savedData.link, key: enc4disk(savedData.link.key) } : null,
       leftRooms: savedData.leftRooms || {},
+      siblings: [...siblingIds].slice(0, MAX_SIBLINGS),
       rooms: {},
     };
     for (const [id, r] of Object.entries(savedData.rooms)) {
@@ -730,6 +738,7 @@ function feedEntryToMsg(entry, roomKey) {
     if (entry.fileName) out.fileName = entry.fileName;
     if (entry.fileSize != null) out.fileSize = entry.fileSize;
     if (entry.fileEnc === true) out.fileEnc = true;
+    if (entry.fwd === true) out.forwarded = true;
     return out;
   }
   return {
@@ -1341,6 +1350,8 @@ export function exportChatTransfer({ targetType = "desktop" } = {}) {
 // another desktop), so it takes its label even though it has the link.
 function applyChatTransfer(transfer, { adopt = false } = {}) {
   const sameLink = !!savedData.link && linkId(savedData.link) === linkId(transfer.link);
+  // Devices proven with another link are not this person's.
+  if (!sameLink) siblingIds.clear();
   if (!sameLink || adopt) {
     savedData.link = { ...transfer.link, labels: mergeLabels(transfer.link.labels, [transfer.label]) };
     savedData.device = { label: transfer.label };
@@ -1669,7 +1680,10 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "profile") {
             if (msg.link && savedData.link && savedData.profile?.username &&
                 checkProfileProof(savedData.link, msg.link, msg.avatar || null, fullId)) {
-              siblingIds.add(remoteId);
+              if (!siblingIds.has(remoteId) && siblingIds.size < MAX_SIBLINGS) {
+                siblingIds.add(remoteId);
+                persistData();
+              }
               const entry = peerForConnection(conn) || pendingPeers.get(conn);
               const first = entry && !entry.sibling;
               if (entry) entry.sibling = true;
@@ -2100,6 +2114,7 @@ export function initChat(sdk, options = {}) {
               ...(msg.replyTo && { replyTo: msg.replyTo }),
               ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
               ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
+              ...(msg.fwd === true && { fwd: true }),
             }).catch(() => {});
             continue;
           }
@@ -2146,6 +2161,7 @@ export function initChat(sdk, options = {}) {
             ...(msg.replyTo && { replyTo: msg.replyTo }),
             ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
             ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
+            ...(msg.fwd === true && { fwd: true }),
           }).catch((e) => console.error("[chat] Peer msg error:", e.message));
 
           const room = savedData.rooms[msg.roomKey];
@@ -2546,12 +2562,16 @@ export async function handleChatRequest(req, sdk) {
           fileSize = Math.floor(body.fileSize);
         }
         const fileEnc = body.fileEnc === true && !!fileName;
+        // Sent on from another chat: shown as forwarded on every side. A build
+        // without this shows it as an ordinary message.
+        const forwarded = body.forwarded === true;
         const entry = {
           id, sender: localId, sn, ct, iv, tag, ts,
           ...(replyTo && { replyTo }),
           ...(fileName && { fileName }),
           ...(fileSize != null && fileName && { fileSize }),
           ...(fileEnc && { fileEnc: true }),
+          ...(forwarded && { fwd: true }),
         };
 
         cacheDecryptedMessage(roomKey, id, payload);
@@ -2565,6 +2585,7 @@ export async function handleChatRequest(req, sdk) {
             ...(fileName && { fileName }),
             ...(fileSize != null && { fileSize }),
             ...(fileEnc && { fileEnc: true }),
+            ...(forwarded && { forwarded: true }),
           },
         });
       }
@@ -2707,6 +2728,8 @@ export async function handleChatRequest(req, sdk) {
           notifications: savedData.profile?.notifications ?? true,
           linkPreview: savedData.profile?.linkPreview ?? true,
           blockedPeers: listBlockedPeers(),
+          // This person's other devices, whose messages are theirs too.
+          siblings: [...siblingIds],
         });
       }
 
@@ -2722,7 +2745,11 @@ export async function handleChatRequest(req, sdk) {
         for (const [k, r] of Object.entries(savedData.rooms)) {
           rooms.push({
             roomKey: k,
-            name: r.name || k.slice(0, 8) + "...",
+            // A direct chat with another of this person's devices is a chat
+            // with themselves.
+            name: r.isDM && r.dmWith && siblingIds.has(String(r.dmWith).slice(0, 8).toLowerCase())
+              ? "You"
+              : r.name || k.slice(0, 8) + "...",
             bio: r.bio || "",
             link: r.link || "",
             avatar: r.avatar || null,

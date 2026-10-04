@@ -12,7 +12,6 @@ import { chat } from "./chat-api.js";
 import {
   attachmentDriveName,
   encryptAttachment,
-  MAX_ATTACHMENT_BYTES,
   opaqueAttachmentPath,
   openAttachmentStream,
   sealAttachmentStream,
@@ -23,6 +22,7 @@ import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { createPresenceHold } from "./lib/presence.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { attachmentKind } from "./lib/render-rules.js";
+import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
 import {
   describeTooManyFiles,
@@ -32,7 +32,10 @@ import {
   screenUploadBatch,
 } from "./lib/media-moderation.js";
 import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
+import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
+import { menuPosition } from "./lib/menu-position.js";
+import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
 const S = {
   profile: null,
@@ -123,11 +126,14 @@ function mentionizeEscapedPlain(escapedPlain) {
 }
 
 function applyMarkdownFormatting(escapedText) {
-  return escapedText
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/~(.+?)~/g, '<del>$1</del>')
-    .replace(/`(.+?)`/g, '<code>$1</code>');
+  return applyInlineFormatting(escapedText);
+}
+
+// This device, or another of this person's own: what they send is theirs.
+function isOwnId(id) {
+  if (!id) return false;
+  if (peerIdEq(id, S.profile?.id)) return true;
+  return (S.profile?.siblings || []).some((sibling) => peerIdEq(sibling, String(id).slice(0, 8)));
 }
 
 function peerIdEq(a, b) {
@@ -668,12 +674,35 @@ function linkify(text, msg) {
   const kind = attachmentKind(text, msg);
   if (kind === "encrypted") return encryptedAttachmentHtml(trimmed, msg);
   if (kind === "upload") return legacyAttachmentHtml(trimmed, msg);
+  return splitCodeFences(text)
+    .map((part) => (part.code ? codeBlockHtml(part.text) : proseHtml(part.text)))
+    .join("");
+}
+
+// A heading is a block of its own, so the line breaks either side of it are
+// already there and a <br> would add a blank line.
+function proseHtml(text) {
+  const lines = text.split("\n").map((line) => {
+    const heading = readHeading(line);
+    return heading.level
+      ? { heading: true, html: `<span class="msg-h msg-h${heading.level}">${linkifyLine(heading.text)}</span>` }
+      : { heading: false, html: linkifyLine(line) };
+  });
+  return lines.map((line, index) => (
+    (index > 0 && !line.heading && !lines[index - 1].heading ? "<br>" : "") + line.html
+  )).join("");
+}
+
+function linkifyLine(text) {
   const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) parts.push(mentionizeEscapedPlain(esc(text.slice(last, m.index))));
-    const url = m[0];
+    // A full stop, comma or closing mark after a link ends the sentence or
+    // the **bold** around it, not the address.
+    const url = m[0].replace(/[.,;:!?'"*~]+$/, "") || m[0];
+    re.lastIndex = m.index + url.length;
     if (url.includes('@') && !url.includes('://')) {
       parts.push(`<a href="mailto:${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`);
     } else {
@@ -682,8 +711,35 @@ function linkify(text, msg) {
     last = re.lastIndex;
   }
   if (last < text.length) parts.push(mentionizeEscapedPlain(esc(text.slice(last))));
-  const html = parts.join("");
-  return html.replace(/\n/g, "<br>");
+  return parts.join("");
+}
+
+function codeBlockHtml(code) {
+  return `<div class="msg-code-block"><div class="msg-code-head"><span>Code</span>` +
+    `<button type="button" class="msg-code-copy">Copy</button></div><pre><code>${esc(code)}</code></pre></div>`;
+}
+
+// Code copies with a click: a block from its button, inline code from itself.
+function wireCodeCopy(container) {
+  container.querySelectorAll(".msg-code-copy").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const code = button.closest(".msg-code-block")?.querySelector("code")?.textContent || "";
+      copyText(code).then(() => {
+        button.textContent = "Copied!";
+        setTimeout(() => { button.textContent = "Copy"; }, 1500);
+      });
+    });
+  });
+  container.querySelectorAll("code.msg-inline-code").forEach((code) => {
+    code.addEventListener("click", (event) => {
+      event.stopPropagation();
+      copyText(code.textContent || "").then(() => {
+        code.classList.add("copied");
+        setTimeout(() => code.classList.remove("copied"), 1200);
+      });
+    });
+  });
 }
 
 const MAX_DATA_IMAGE_URL_LEN = 1_500_000;
@@ -1252,10 +1308,12 @@ function makeRoomEl(r) {
       <span class="room-preview">${esc(preview.slice(0, 60))}</span>
     </div>
     <div class="room-meta">
-      ${r.isMuted ? '<img src="./assets/svg/mute.svg" class="room-icon" alt="Muted" title="Muted" />' : ""}
-      ${r.isPinned ? '<img src="./assets/svg/pin.svg" class="room-icon" alt="Pinned" title="Pinned" />' : ""}
-      ${r.lastMessage ? `<span class="room-time">${formatTime(r.lastMessage.timestamp)}</span>` : ""}
-      ${r.unreadCount > 0 ? `<span class="badge">${r.unreadMentions > 0 ? "@" : ""}${r.unreadCount}</span>` : ""}
+      <span class="room-time">${r.lastMessage ? formatTime(r.lastMessage.timestamp) : ""}</span>
+      <span class="room-state">
+        ${r.unreadCount > 0 ? `<span class="badge">${r.unreadMentions > 0 ? "@" : ""}${r.unreadCount}</span>` : ""}
+        ${r.isMuted ? '<img src="./assets/svg/mute.svg" class="room-icon" alt="Muted" title="Muted" />' : ""}
+        ${r.isPinned ? '<img src="./assets/svg/pin.svg" class="room-icon" alt="Pinned" title="Pinned" />' : ""}
+      </span>
     </div>
     <button class="room-dots" title="Options">&#8942;</button>
   `;
@@ -1352,6 +1410,8 @@ let roomSyncTimer = null;
 async function openRoom(roomKey) {
   const ticket = ++openRoomTicket;
   if (roomSyncTimer) { clearInterval(roomSyncTimer); roomSyncTimer = null; }
+  // Picking belongs to the room it started in.
+  stopSelecting({ render: false });
   const prevRoom = S.activeRoom;
   if (prevRoom && prevRoom !== roomKey) {
     decryptedUrls.revokeRoom(prevRoom);
@@ -1629,7 +1689,7 @@ function makeLinkWarningNote(text) {
 }
 
 function makeMsgEl(msg) {
-  const self = msg.sender === S.profile?.id;
+  const self = isOwnId(msg.sender);
   const el = document.createElement("div");
   el.className = `message ${self ? "msg-right" : "msg-left"}`;
   el.dataset.msgId = msg.id || "";
@@ -1648,6 +1708,13 @@ function makeMsgEl(msg) {
   const bubble = document.createElement("div");
   bubble.className = "msg-bubble";
 
+  if (msg.forwarded) {
+    const forwarded = document.createElement("div");
+    forwarded.className = "msg-forwarded";
+    forwarded.textContent = "Forwarded";
+    bubble.appendChild(forwarded);
+  }
+
   if (msg.replyTo) {
     const quote = document.createElement("div");
     quote.className = "msg-reply-quote";
@@ -1657,9 +1724,10 @@ function makeMsgEl(msg) {
     bubble.appendChild(quote);
   }
 
-  const textNode = document.createElement("span");
+  const textNode = document.createElement("div");
   textNode.className = "msg-bubble-body";
   textNode.innerHTML = linkify(msg.message, msg);
+  wireCodeCopy(textNode);
   bubble.appendChild(textNode);
 
   const previewCard = makePreviewCard(msg.preview);
@@ -1681,9 +1749,21 @@ function makeMsgEl(msg) {
   
   bubble.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    if (selectMode) return;
     showMsgMenu(e, msg);
   });
-  
+
+  // While picking messages to forward, a click picks or drops the message, and
+  // nothing in it opens: links, pictures and files wait until picking ends.
+  if (selectMode) {
+    el.classList.toggle("selected", selectedMsgIds.has(msg.id));
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSelectedMsg(msg, el);
+    }, true);
+  }
+
   el.appendChild(bubble);
 
   const rk = S.activeRoom;
@@ -1719,26 +1799,8 @@ function scrollToMsg(id) {
 
 function showMsgMenu(e, msg) {
   const menu = $("msg-menu");
-  menu.classList.add("open");
   menu._msg = msg;
-  
-  const menuRect = menu.getBoundingClientRect();
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  
-  let top = e.clientY;
-  let left = e.clientX;
-  
-  if (left + menuRect.width > viewportWidth) {
-    left = viewportWidth - menuRect.width - 10;
-  }
-  
-  if (top + menuRect.height > viewportHeight) {
-    top = viewportHeight - menuRect.height - 10;
-  }
-  
-  menu.style.top = top + "px";
-  menu.style.left = left + "px";
+  openMenuAt(menu, e.clientX, e.clientY);
 }
 
 $("msg-menu")?.addEventListener("click", (e) => {
@@ -1754,8 +1816,119 @@ $("msg-menu")?.addEventListener("click", (e) => {
   }
   if (action === "reply") setReply(msg);
   if (action === "copy-msg") copyText(msg.message);
+  if (action === "select") startSelecting(msg);
   if (action === "info") showMsgInfo(e, msg);
 });
+
+// Forwarding. Messages are picked in the open room, then sent on to another
+// chat as new messages of yours, each marked as forwarded. Picked by id, so a
+// message stays picked when the list redraws.
+let selectMode = false;
+const selectedMsgIds = new Set();
+
+function startSelecting(msg) {
+  if (!S.activeRoom) return;
+  selectMode = true;
+  selectedMsgIds.clear();
+  if (msg?.id && forwardableText(msg)) selectedMsgIds.add(msg.id);
+  $("chat-active")?.classList.add("selecting");
+  updateSelectBar();
+  renderMessages(S.activeRoom, false);
+}
+
+function stopSelecting({ render = true } = {}) {
+  if (!selectMode) return;
+  selectMode = false;
+  selectedMsgIds.clear();
+  $("chat-active")?.classList.remove("selecting");
+  updateSelectBar();
+  if (render && S.activeRoom) renderMessages(S.activeRoom, false);
+}
+
+function toggleSelectedMsg(msg, el) {
+  if (!msg?.id) return;
+  if (selectedMsgIds.has(msg.id)) {
+    selectedMsgIds.delete(msg.id);
+  } else if (forwardableText(msg)) {
+    selectedMsgIds.add(msg.id);
+  } else {
+    showForwardNote("Files and pictures stay in the chat they were sent to. Only text can be forwarded.");
+    return;
+  }
+  el.classList.toggle("selected", selectedMsgIds.has(msg.id));
+  updateSelectBar();
+}
+
+function updateSelectBar() {
+  const count = selectedMsgIds.size;
+  const label = $("select-count");
+  if (label) label.textContent = `${count} selected`;
+  const forward = $("select-forward");
+  if (forward) forward.disabled = count === 0;
+}
+
+function showForwardNote(text) {
+  showModerationToast(text, { action: "note" });
+}
+
+function renderForwardList(query = "") {
+  const list = $("forward-list");
+  if (!list) return;
+  const q = query.trim().toLowerCase();
+  const rooms = Object.entries(S.rooms)
+    .filter(([, room]) => !q || String(room.name || "").toLowerCase().includes(q))
+    .sort(([, a], [, b]) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+  list.innerHTML = "";
+  if (!rooms.length) {
+    const empty = document.createElement("p");
+    empty.className = "forward-empty";
+    empty.textContent = q ? "No chats match." : "No chats yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const [roomKey, room] of rooms) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "forward-row";
+    row.setAttribute("role", "listitem");
+    const name = room.name || `${roomKey.slice(0, 8)}...`;
+    row.innerHTML = `<img src="${esc(avatar(name, 28, room.avatar))}" alt="" /><span>${esc(name)}</span>`;
+    row.addEventListener("click", () => { void forwardSelected(roomKey); });
+    list.appendChild(row);
+  }
+}
+
+async function forwardSelected(targetRoomKey) {
+  const fromRoom = S.activeRoom;
+  const texts = forwardTexts(S.messages[fromRoom], selectedMsgIds);
+  closeAllModals();
+  stopSelecting({ render: false });
+  if (!texts.length || !S.rooms[targetRoomKey]) return;
+  await openRoom(targetRoomKey);
+  for (const text of texts) {
+    try {
+      const resp = await chat.sendMessage(targetRoomKey, { message: text, forwarded: true });
+      if (resp.sent) appendMessage(targetRoomKey, resp.sent);
+    } catch (err) {
+      // A room's filters apply to what is forwarded into it, as to anything
+      // typed there. The rest wait rather than go out of order.
+      showModerationToast(err?.message || "That message could not be forwarded.", err || {});
+      return;
+    }
+  }
+  playSound("send");
+}
+
+$("select-cancel")?.addEventListener("click", () => stopSelecting());
+$("select-forward")?.addEventListener("click", () => {
+  if (!selectedMsgIds.size) return;
+  const search = $("forward-search");
+  if (search) search.value = "";
+  renderForwardList("");
+  openModal("forward-modal");
+  search?.focus();
+});
+$("forward-search")?.addEventListener("input", (e) => renderForwardList(e.target.value || ""));
 
 function showMsgInfo(e, msg) {
   let popup = $("msg-info-popup");
@@ -1766,7 +1939,7 @@ function showMsgInfo(e, msg) {
     document.body.appendChild(popup);
   }
   const d = new Date(msg.timestamp);
-  const sender = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
+  const sender = isOwnId(msg.sender) ? "You" : (msg.senderName || msg.sender);
   popup.innerHTML = `<strong>${esc(sender)}</strong><br>Sent: ${d.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })} at ${d.toLocaleTimeString()}`;
   popup.style.top = e.clientY + "px";
   popup.style.left = e.clientX + "px";
@@ -1777,7 +1950,7 @@ function showMsgInfo(e, msg) {
 }
 
 function setReply(msg) {
-  const displayName = msg.sender === S.profile?.id ? "You" : (msg.senderName || msg.sender);
+  const displayName = isOwnId(msg.sender) ? "You" : (msg.senderName || msg.sender);
   const actualName = msg.senderName || msg.sender;
   const replyText = replyDisplayText(msg);
   replyTarget = { id: msg.id, sender: msg.sender, sn: actualName, text: replyText };
@@ -1898,7 +2071,7 @@ function patchRoomsForPeer(peerId, username, bio, peerAvatar, restrictKeys) {
     };
   };
   const fillDM = (room) => {
-    room.name = username;
+    room.name = isOwnId(peerId) ? "You" : username;
     room.bio = bio || "";
     room.avatar = peerAvatar;
   };
@@ -2038,7 +2211,8 @@ function connectGlobalSSE() {
         };
       }
 
-      if (!isSystem && msg.sender !== S.profile?.id) {
+      // What you wrote on another of your devices is not news to you.
+      if (!isSystem && !isOwnId(msg.sender)) {
         if (rk !== S.activeRoom) {
           room.unreadCount = (room.unreadCount || 0) + 1;
           if (msgText && isMentioned(msgText)) {
@@ -2219,6 +2393,15 @@ function connectGlobalSSE() {
           $("sidebar-username").textContent = profile.displayName || profile.username;
           $("sidebar-avatar").src = avatar(profile.username, 32, profile.avatar);
         }).catch(() => {});
+      } else if (!isOwnId(peerId)) {
+        // It may be another of this person's devices, proven just now.
+        chat.getProfile().then((profile) => {
+          S.profile = profile;
+          if (isOwnId(peerId)) {
+            patchRoomsForPeer(peerId, username, bio, peerAvatar, null);
+            renderRoomList();
+          }
+        }).catch(() => {});
       }
     } catch {}
   });
@@ -2363,10 +2546,17 @@ $("create-room-form")?.addEventListener("submit", async (e) => {
 });
 
 $('join-room-btn')?.addEventListener('click', () => { openModal('join-room-modal'); queueMicrotask(() => $('join-room-key')?.focus()); });
+let joiningRoom = false;
 $("join-room-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (joiningRoom) return;
   const key = $("join-room-key").value.trim();
   if (!/^[a-f0-9]{64}$/i.test(key)) { alert("Invalid room key."); return; }
+  // Finding the room can take a few seconds, and a button that does nothing
+  // in the meantime gets pressed again.
+  const confirmBtn = $("join-room-confirm");
+  joiningRoom = true;
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = "Joining…"; }
   try {
     await chat.joinRoom(key);
     await loadRooms();
@@ -2377,6 +2567,10 @@ $("join-room-form")?.addEventListener("submit", async (e) => {
     refreshRoomHeader(key);
     saveDrafts().catch(() => {});
   } catch (err) { alert(err.message); }
+  finally {
+    joiningRoom = false;
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = "Join"; }
+  }
 });
 
 $("message-input")?.addEventListener("focus", initAudio, { once: true });
@@ -2391,24 +2585,28 @@ $("message-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const input = $("message-input");
   const msg = input.value.trim();
-  if (!msg || !S.activeRoom) return;
+  // The room it was typed in. Switching rooms while it sends must not move it.
+  const roomKey = S.activeRoom;
+  if (!msg || !roomKey) return;
   const savedMsg = msg;
   input.value = "";
   resizeMessageField();
-  saveDraft(S.activeRoom, "");
+  saveDraft(roomKey, "");
   const body = { message: msg };
   if (replyTarget) { body.replyTo = replyTarget; replyTarget = null; $("reply-bar").style.display = "none"; }
   try {
-    const resp = await chat.sendMessage(S.activeRoom, body);
-    if (resp.sent) appendMessage(S.activeRoom, resp.sent);
+    const resp = await chat.sendMessage(roomKey, body);
+    if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
   } catch (err) {
     console.error("Send failed:", err);
     // Check for moderation block (403)
     if (err?.status === 403 && err?.moderation === true) {
-      input.value = savedMsg;
-      resizeMessageField();
-      saveDraft(S.activeRoom, savedMsg);
+      saveDraft(roomKey, savedMsg);
+      if (S.activeRoom === roomKey) {
+        input.value = savedMsg;
+        resizeMessageField();
+      }
       let toastMsg;
       if (err.action === "warn") {
         toastMsg = "Message blocked - please rephrase.";
@@ -2418,6 +2616,14 @@ $("message-form")?.addEventListener("submit", async (e) => {
         toastMsg = err.message;
       }
       showModerationToast(toastMsg, err);
+    } else {
+      // Anything else went nowhere, so the words come back and the reason shows.
+      saveDraft(roomKey, savedMsg);
+      if (S.activeRoom === roomKey) {
+        input.value = savedMsg;
+        resizeMessageField();
+      }
+      showModerationToast(err?.message ? `Not sent: ${err.message}` : "Not sent. Try again.");
     }
   }
 });
@@ -2793,16 +2999,23 @@ async function unblockPeer(peerId) {
   }
 }
 
-// Nobody runs PeerChat, so a report goes to the maintainers by email with
-// enough context to act on.
-function reportPeer(peerId, username) {
-  const room = S.rooms[S.activeRoom];
+// Nobody runs PeerChat, so a report goes to the maintainers by email. The
+// room is named by a hash of its key, never the key itself, which would let
+// whoever reads the email into the room and all of its history.
+async function reportPeer(peerId, username) {
+  const roomKey = S.activeRoom;
+  const room = S.rooms[roomKey];
+  let roomId = "unknown";
+  if (roomKey) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(roomKey));
+    roomId = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
+  }
   const subject = `PeerChat report: ${username || peerId}`;
   const body = [
     `Reported user: ${username || peerId}`,
     `Peer ID: ${peerId}`,
     `Room: ${room?.name || "unknown"}`,
-    `Room key: ${S.activeRoom || "unknown"}`,
+    `Room ID: ${roomId}`,
     `Reported at: ${new Date().toISOString()}`,
     "",
     "What happened?",
@@ -3108,10 +3321,13 @@ function renderDiscoverList() {
   if (!list) return;
   list.innerHTML = "";
 
-  const found = discoverDirectory($("discover-search")?.value || "");
+  // Nobody is listed until a name is typed: finding one person needs no list
+  // of everyone in the public room.
+  const query = ($("discover-search")?.value || "").trim();
+  if (!query) return;
+  const found = discoverDirectory(query);
   if (found.length === 0) {
-    const query = ($("discover-search")?.value || "").trim();
-    list.innerHTML = `<p class="muted small">${query ? "Nobody by that name." : "Nobody else here yet."}</p>`;
+    list.innerHTML = '<p class="muted small">Nobody by that name.</p>';
     return;
   }
 
@@ -3236,9 +3452,21 @@ function showCtxMenu(e, roomKey) {
     const isPreJoined = PRE_JOINED_ROOM_KEY && roomKey === PRE_JOINED_ROOM_KEY;
     copyBtn.style.display = (isDM || isPreJoined) ? "none" : "";
   }
-  menu.style.top = e.clientY + "px";
-  menu.style.left = e.clientX + "px";
+  openMenuAt(menu, e.clientX, e.clientY);
+}
+
+// Opens a menu at the pointer, above or to the left of it where it would run
+// past the window, so the chats at the bottom of the list show every option.
+function openMenuAt(menu, x, y) {
   menu.classList.add("open");
+  const { width, height } = menu.getBoundingClientRect();
+  const { left, top } = menuPosition({
+    x, y, width, height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
 }
 
 document.addEventListener("click", () => {
@@ -3319,6 +3547,11 @@ $("message-search")?.addEventListener("input", () => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    if (selectMode && !document.querySelector(".modal.open")) {
+      stopSelecting();
+      e.preventDefault();
+      return;
+    }
     const msp = $("chat-message-search-panel");
     if (msp && !msp.hidden) {
       closeMessageSearchPanel();
@@ -3398,13 +3631,6 @@ async function screenAndUploadFiles(selected) {
     return;
   }
 
-  // Mobile takes no more than this either, so nobody is sent a file they cannot open.
-  const tooBig = files.find((file) => file.size > MAX_ATTACHMENT_BYTES);
-  if (tooBig) {
-    alert(`${tooBig.name} is too big to send. PeerChat attachments must be 2 GB or smaller.`);
-    return;
-  }
-
   const sendBtn = $("send-btn");
   const attachBtn = $("attach-btn");
   if (attachBtn) attachBtn.disabled = true;
@@ -3454,14 +3680,14 @@ async function uploadAndSendFile(file) {
       ? sealAttachmentStream(file, roomKey)
       : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
     const uploadResp = await fetch(base + path, { method: "PUT", body, ...(framed && { duplex: "half" }) });
-    if (!uploadResp.ok) throw new Error("Upload failed");
+    if (!uploadResp.ok) throw new Error(await uploadResp.text().catch(() => "") || "the drive did not take it");
     const fileUrl = base + path;
     const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
     if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
     const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
-    if (resp.sent) appendMessage(S.activeRoom, resp.sent);
+    if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
-  } catch (err) { alert("Upload failed: " + err.message); }
+  } catch (err) { alert(describeUploadFailure(file.name, err.message)); }
 }
 
 const msgArea = $("messages");
@@ -3558,16 +3784,16 @@ $("media-viewer-dl")?.addEventListener("click", async () => {
     const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg";
     const rawHint = (overlay?.dataset.mediaFilename || "").trim().replace(/[/\\?%*:|"<>]/g, "_").slice(0, 60);
     const fname = rawHint ? `peerchat-${rawHint}.${ext}` : `peerchat-image.${ext}`;
-    if (typeof window.showSaveFilePicker === "function") {
-      try {
-        const handle = await window.showSaveFilePicker({ suggestedName: fname });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        return;
-      } catch (pickErr) {
-        if (pickErr?.name === "AbortError") return;
-      }
+    // One save dialog, ever. The download link below is only for when no dialog
+    // could open; once one has, writing there either works or says why. Falling
+    // back after a failed write asked where to save a second time.
+    const handle = await pickSaveFile(fname);
+    if (handle === false) return;
+    if (handle) {
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
     }
     const obj = URL.createObjectURL(blob);
     const a = document.createElement("a");
