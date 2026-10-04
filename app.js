@@ -35,6 +35,7 @@ import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 import { menuPosition } from "./lib/menu-position.js";
+import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
 const S = {
   profile: null,
@@ -1409,6 +1410,8 @@ let roomSyncTimer = null;
 async function openRoom(roomKey) {
   const ticket = ++openRoomTicket;
   if (roomSyncTimer) { clearInterval(roomSyncTimer); roomSyncTimer = null; }
+  // Picking belongs to the room it started in.
+  stopSelecting({ render: false });
   const prevRoom = S.activeRoom;
   if (prevRoom && prevRoom !== roomKey) {
     decryptedUrls.revokeRoom(prevRoom);
@@ -1705,6 +1708,13 @@ function makeMsgEl(msg) {
   const bubble = document.createElement("div");
   bubble.className = "msg-bubble";
 
+  if (msg.forwarded) {
+    const forwarded = document.createElement("div");
+    forwarded.className = "msg-forwarded";
+    forwarded.textContent = "Forwarded";
+    bubble.appendChild(forwarded);
+  }
+
   if (msg.replyTo) {
     const quote = document.createElement("div");
     quote.className = "msg-reply-quote";
@@ -1739,9 +1749,21 @@ function makeMsgEl(msg) {
   
   bubble.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    if (selectMode) return;
     showMsgMenu(e, msg);
   });
-  
+
+  // While picking messages to forward, a click picks or drops the message, and
+  // nothing in it opens: links, pictures and files wait until picking ends.
+  if (selectMode) {
+    el.classList.toggle("selected", selectedMsgIds.has(msg.id));
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSelectedMsg(msg, el);
+    }, true);
+  }
+
   el.appendChild(bubble);
 
   const rk = S.activeRoom;
@@ -1794,8 +1816,119 @@ $("msg-menu")?.addEventListener("click", (e) => {
   }
   if (action === "reply") setReply(msg);
   if (action === "copy-msg") copyText(msg.message);
+  if (action === "select") startSelecting(msg);
   if (action === "info") showMsgInfo(e, msg);
 });
+
+// Forwarding. Messages are picked in the open room, then sent on to another
+// chat as new messages of yours, each marked as forwarded. Picked by id, so a
+// message stays picked when the list redraws.
+let selectMode = false;
+const selectedMsgIds = new Set();
+
+function startSelecting(msg) {
+  if (!S.activeRoom) return;
+  selectMode = true;
+  selectedMsgIds.clear();
+  if (msg?.id && forwardableText(msg)) selectedMsgIds.add(msg.id);
+  $("chat-active")?.classList.add("selecting");
+  updateSelectBar();
+  renderMessages(S.activeRoom, false);
+}
+
+function stopSelecting({ render = true } = {}) {
+  if (!selectMode) return;
+  selectMode = false;
+  selectedMsgIds.clear();
+  $("chat-active")?.classList.remove("selecting");
+  updateSelectBar();
+  if (render && S.activeRoom) renderMessages(S.activeRoom, false);
+}
+
+function toggleSelectedMsg(msg, el) {
+  if (!msg?.id) return;
+  if (selectedMsgIds.has(msg.id)) {
+    selectedMsgIds.delete(msg.id);
+  } else if (forwardableText(msg)) {
+    selectedMsgIds.add(msg.id);
+  } else {
+    showForwardNote("Files and pictures stay in the chat they were sent to. Only text can be forwarded.");
+    return;
+  }
+  el.classList.toggle("selected", selectedMsgIds.has(msg.id));
+  updateSelectBar();
+}
+
+function updateSelectBar() {
+  const count = selectedMsgIds.size;
+  const label = $("select-count");
+  if (label) label.textContent = `${count} selected`;
+  const forward = $("select-forward");
+  if (forward) forward.disabled = count === 0;
+}
+
+function showForwardNote(text) {
+  showModerationToast(text, { action: "note" });
+}
+
+function renderForwardList(query = "") {
+  const list = $("forward-list");
+  if (!list) return;
+  const q = query.trim().toLowerCase();
+  const rooms = Object.entries(S.rooms)
+    .filter(([, room]) => !q || String(room.name || "").toLowerCase().includes(q))
+    .sort(([, a], [, b]) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+  list.innerHTML = "";
+  if (!rooms.length) {
+    const empty = document.createElement("p");
+    empty.className = "forward-empty";
+    empty.textContent = q ? "No chats match." : "No chats yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const [roomKey, room] of rooms) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "forward-row";
+    row.setAttribute("role", "listitem");
+    const name = room.name || `${roomKey.slice(0, 8)}...`;
+    row.innerHTML = `<img src="${esc(avatar(name, 28, room.avatar))}" alt="" /><span>${esc(name)}</span>`;
+    row.addEventListener("click", () => { void forwardSelected(roomKey); });
+    list.appendChild(row);
+  }
+}
+
+async function forwardSelected(targetRoomKey) {
+  const fromRoom = S.activeRoom;
+  const texts = forwardTexts(S.messages[fromRoom], selectedMsgIds);
+  closeAllModals();
+  stopSelecting({ render: false });
+  if (!texts.length || !S.rooms[targetRoomKey]) return;
+  await openRoom(targetRoomKey);
+  for (const text of texts) {
+    try {
+      const resp = await chat.sendMessage(targetRoomKey, { message: text, forwarded: true });
+      if (resp.sent) appendMessage(targetRoomKey, resp.sent);
+    } catch (err) {
+      // A room's filters apply to what is forwarded into it, as to anything
+      // typed there. The rest wait rather than go out of order.
+      showModerationToast(err?.message || "That message could not be forwarded.", err || {});
+      return;
+    }
+  }
+  playSound("send");
+}
+
+$("select-cancel")?.addEventListener("click", () => stopSelecting());
+$("select-forward")?.addEventListener("click", () => {
+  if (!selectedMsgIds.size) return;
+  const search = $("forward-search");
+  if (search) search.value = "";
+  renderForwardList("");
+  openModal("forward-modal");
+  search?.focus();
+});
+$("forward-search")?.addEventListener("input", (e) => renderForwardList(e.target.value || ""));
 
 function showMsgInfo(e, msg) {
   let popup = $("msg-info-popup");
@@ -3414,6 +3547,11 @@ $("message-search")?.addEventListener("input", () => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    if (selectMode && !document.querySelector(".modal.open")) {
+      stopSelecting();
+      e.preventDefault();
+      return;
+    }
     const msp = $("chat-message-search-panel");
     if (msp && !msp.hidden) {
       closeMessageSearchPanel();

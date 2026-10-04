@@ -1303,3 +1303,38 @@ a:hover { text-decoration: none; }
      window, which is what put a scrollbar inside a scrollbar. */
   flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: 0.5rem;
 }
+
+/* Forwarding: picking messages, the chats to send them to, and the label
+   a forwarded message carries. */
+.msg-forwarded {
+  font-style: italic; font-size: 0.72rem; color: var(--muted);
+  margin-bottom: 2px;
+}
+.select-bar {
+  display: none; align-items: center; gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  background: var(--header-bg);
+  border-top: 1px solid var(--border);
+}
+.select-count { flex: 1; text-align: center; font-size: 0.85rem; color: var(--muted); }
+#chat-active.selecting .select-bar { display: flex; }
+#chat-active.selecting #message-form { display: none; }
+#chat-active.selecting .message { cursor: pointer; }
+#chat-active.selecting .msg-react-trigger { display: none; }
+.message.selected .msg-bubble {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.forward-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 50vh; overflow-y: auto;
+}
+.forward-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  width: 100%; padding: 0.45rem 0.5rem;
+  background: none; color: var(--text); text-align: left;
+  border-radius: 8px; font-weight: 400; cursor: pointer;
+}
+.forward-row:hover, .forward-row:focus-visible { background: var(--hover); }
+.forward-row img { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex: none; }
+.forward-row span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.forward-empty { font-size: 0.8rem; color: var(--muted); padding: 0.5rem; }

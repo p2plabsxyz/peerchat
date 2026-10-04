@@ -738,6 +738,7 @@ function feedEntryToMsg(entry, roomKey) {
     if (entry.fileName) out.fileName = entry.fileName;
     if (entry.fileSize != null) out.fileSize = entry.fileSize;
     if (entry.fileEnc === true) out.fileEnc = true;
+    if (entry.fwd === true) out.forwarded = true;
     return out;
   }
   return {
@@ -2113,6 +2114,7 @@ export function initChat(sdk, options = {}) {
               ...(msg.replyTo && { replyTo: msg.replyTo }),
               ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
               ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
+              ...(msg.fwd === true && { fwd: true }),
             }).catch(() => {});
             continue;
           }
@@ -2159,6 +2161,7 @@ export function initChat(sdk, options = {}) {
             ...(msg.replyTo && { replyTo: msg.replyTo }),
             ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
             ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
+            ...(msg.fwd === true && { fwd: true }),
           }).catch((e) => console.error("[chat] Peer msg error:", e.message));
 
           const room = savedData.rooms[msg.roomKey];
@@ -2559,12 +2562,16 @@ export async function handleChatRequest(req, sdk) {
           fileSize = Math.floor(body.fileSize);
         }
         const fileEnc = body.fileEnc === true && !!fileName;
+        // Sent on from another chat: shown as forwarded on every side. A build
+        // without this shows it as an ordinary message.
+        const forwarded = body.forwarded === true;
         const entry = {
           id, sender: localId, sn, ct, iv, tag, ts,
           ...(replyTo && { replyTo }),
           ...(fileName && { fileName }),
           ...(fileSize != null && fileName && { fileSize }),
           ...(fileEnc && { fileEnc: true }),
+          ...(forwarded && { fwd: true }),
         };
 
         cacheDecryptedMessage(roomKey, id, payload);
@@ -2578,6 +2585,7 @@ export async function handleChatRequest(req, sdk) {
             ...(fileName && { fileName }),
             ...(fileSize != null && { fileSize }),
             ...(fileEnc && { fileEnc: true }),
+            ...(forwarded && { forwarded: true }),
           },
         });
       }
