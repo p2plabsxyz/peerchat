@@ -77,6 +77,20 @@ describe("room creator moderation", () => {
     assert.equal(bans.find((ban) => ban.id === "d00dfeed").key, "");
   });
 
+  // A device that joins after somebody was removed never met them, and said
+  // "c0ffee11 was removed" with only eight letters of their key to go on.
+  it("carries the name the creator knew them by", () => {
+    const bans = addRoomBan([], { id: "c0ffee11", at: 5, name: "  Bob   Smith " });
+    assert.equal(bans[0].name, "Bob Smith");
+    const relayed = normalizeRoomBans(JSON.parse(JSON.stringify(bans)));
+    assert.equal(relayed[0].name, "Bob Smith");
+    assert.equal(normalizeRoomBans([...relayed, { key: CREATOR, at: 6 }]).find((ban) => ban.id === "c0ffee11").name, "Bob Smith");
+    // Only what a profile name may be: nothing else rides in on it.
+    for (const name of ["<b>Bob</b>", "Bob\u202e", "x".repeat(51), 42, null]) {
+      assert.equal(normalizeRoomBans([{ id: "c0ffee11", at: 1, name }])[0].name, "");
+    }
+  });
+
   it("bounds the list so relaying cannot grow it forever", () => {
     const many = Array.from({ length: MAX_ROOM_BANS + 50 }, (_, index) => ({
       id: index.toString(16).padStart(8, "0"),

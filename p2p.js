@@ -1922,7 +1922,7 @@ export function initChat(sdk, options = {}) {
             const before = new Set(normalizeRoomBans(room.bans).map((ban) => ban.id));
             room.bans = normalizeRoomBans(msg.bans);
             for (const ban of room.bans) {
-              if (!before.has(ban.id)) appendRemovalNotice(msg.roomKey, ban.id, "");
+              if (!before.has(ban.id)) appendRemovalNotice(msg.roomKey, ban.id, ban.name);
             }
             // Anyone the creator let back in stops being filtered out.
             for (const id of Object.keys(room.members || {})) {
@@ -2335,8 +2335,10 @@ export async function handleChatRequest(req, sdk) {
         // Their full key if they are here to take it from, so the removal
         // catches that person rather than anyone sharing their first eight.
         const connected = peers.find((peer) => peer.id === peerId && peerSharesRoom(peer, rk));
-        const removedName = room.members?.[peerId]?.username || "";
-        room.bans = addRoomBan(room.bans, { id: peerId, key: connected?.fullId || "" });
+        const removedName = room.members?.[peerId]?.username ||
+          savedData.peerProfiles?.[peerId]?.username || "";
+        // The name goes with the removal, for anyone in the room who never met them.
+        room.bans = addRoomBan(room.bans, { id: peerId, key: connected?.fullId || "", name: removedName });
         if (room.members?.[peerId]) delete room.members[peerId];
 
         appendRemovalNotice(rk, peerId, removedName);
