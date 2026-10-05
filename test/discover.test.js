@@ -125,13 +125,15 @@ describe("find people", () => {
   });
 
   it("treats a personal link as a request, not a room to join", () => {
-    assert.match(app, /const pendingDirectInvite = parseDirectInvite\(location\.hash\)/);
+    const take = app.slice(app.indexOf("function takeInviteFromAddress()"), app.indexOf("takeInviteFromAddress();"));
+    assert.match(take, /const person = parseDirectInvite\(location\.hash\)/);
     const consume = app.slice(app.indexOf("async function consumeInvite()"), app.indexOf("async function init()"));
     // Handled before the room path, and your own code does nothing.
-    assert.ok(consume.indexOf("pendingDirectInvite") < consume.indexOf("if (!pendingInvite) return;"));
-    assert.match(consume, /pendingDirectInvite !== S\.profile\?\.id/);
-    assert.match(consume, /openDM\(pendingDirectInvite, name\)/);
+    assert.ok(consume.indexOf("if (directInvite)") < consume.indexOf("if (!invite) return;"));
+    assert.match(consume, /directInvite !== S\.profile\?\.id/);
+    assert.match(consume, /openDM\(directInvite, name\)/);
     // The key is still wiped from the address bar either way.
-    assert.match(app, /if \(pendingInvite \|\| pendingDirectInvite\) \{/);
+    assert.match(take, /if \(!room && !person\) return false;/);
+    assert.match(take, /history\.replaceState/);
   });
 });

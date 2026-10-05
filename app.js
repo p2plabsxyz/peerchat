@@ -42,6 +42,9 @@ const S = {
   rooms: {},
   peerProfiles: {},
   onlinePeers: new Set(),
+  // Online but away: their PeerSky in the background or the computer idle, or
+  // a phone with PeerChat in the background.
+  idlePeers: new Set(),
   activeRoom: null,
   messages: {},
   reactions: {},
@@ -1062,34 +1065,53 @@ function hideBoot() {
 
 // An invite carries the room key, so it is read once and wiped from the URL
 // before the app renders; history and the address bar must not keep it.
-const pendingInvite = parseInvite(location.hash);
-const pendingDirectInvite = parseDirectInvite(location.hash);
-if (pendingInvite || pendingDirectInvite) {
+let pendingInvite = null;
+let pendingDirectInvite = null;
+function takeInviteFromAddress() {
+  const room = parseInvite(location.hash);
+  const person = parseDirectInvite(location.hash);
+  if (!room && !person) return false;
+  pendingInvite = room;
+  pendingDirectInvite = person;
   try { history.replaceState(null, "", location.pathname + location.search); } catch {}
+  return true;
 }
+takeInviteFromAddress();
+
+// A link opened in a tab that already shows PeerChat only changes the part
+// after the #, so the page does not load again and the invite was never read.
+addEventListener("hashchange", () => {
+  // Before a profile exists the invite waits, and is opened once there is one.
+  if (takeInviteFromAddress() && S.profile?.username) void consumeInvite();
+});
 
 async function consumeInvite() {
+  // Each invite is opened once, however the page came to read it.
+  const directInvite = pendingDirectInvite;
+  const invite = pendingInvite;
+  pendingDirectInvite = null;
+  pendingInvite = null;
   // A personal link names a person rather than a room, so it asks them.
-  if (pendingDirectInvite) {
-    if (pendingDirectInvite !== S.profile?.id) {
-      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[pendingDirectInvite];
-      const name = S.peerProfiles[pendingDirectInvite]?.username || known?.username || pendingDirectInvite;
+  if (directInvite) {
+    if (directInvite !== S.profile?.id) {
+      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[directInvite];
+      const name = S.peerProfiles[directInvite]?.username || known?.username || directInvite;
       try {
-        await openDM(pendingDirectInvite, name);
+        await openDM(directInvite, name);
       } catch (err) {
         console.error("[chat] personal invite:", err);
       }
     }
     return;
   }
-  if (!pendingInvite) return;
+  if (!invite) return;
   try {
-    if (!S.rooms[pendingInvite]) {
-      await chat.joinRoom(pendingInvite);
+    if (!S.rooms[invite]) {
+      await chat.joinRoom(invite);
       await loadRooms();
       renderRoomList();
     }
-    await openRoom(pendingInvite);
+    await openRoom(invite);
   } catch (err) {
     console.error("[chat] invite:", err);
     alert("Could not open that invite link.");
@@ -1123,6 +1145,7 @@ async function loadRooms() {
   const data = await chat.getRooms();
   S.peerProfiles = data.peerProfiles || {};
   S.onlinePeers = new Set(data.onlinePeers || []);
+  S.idlePeers = new Set(data.idlePeers || []);
   S.pendingDMs = data.pendingDMs || {};
   S.blockedPeers = data.blockedPeers || [];
   const next = {};
@@ -1624,6 +1647,7 @@ function schedulePresencePrune() {
       updateRoomPeerCount(S.activeRoom);
       renderRoomList();
       applyDMComposerGate(S.activeRoom);
+      for (const peerId of dropped) refreshPresence(peerId);
     }
     schedulePresencePrune();
   }, Math.max(0, expiresAt - Date.now()));
@@ -2314,7 +2338,8 @@ function connectGlobalSSE() {
   es.addEventListener("online-peers", (ev) => {
     touch();
     try {
-      const { peers: ids } = JSON.parse(ev.data);
+      const { peers: ids, idle } = JSON.parse(ev.data);
+      S.idlePeers = new Set(Array.isArray(idle) ? idle : []);
       const next = new Set(ids || []);
       for (const id of next) presenceHold.online(id);
       // A snapshot taken mid-redial would otherwise undo the hold.
@@ -2346,6 +2371,17 @@ function connectGlobalSSE() {
       renderRoomList();
       // The offline note in a direct room hangs off this.
       applyDMComposerGate(S.activeRoom);
+      refreshPresence(peerId);
+    } catch {}
+  });
+
+  es.addEventListener("peer-idle", (ev) => {
+    touch();
+    try {
+      const { peerId, idle } = JSON.parse(ev.data);
+      if (idle) S.idlePeers.add(peerId);
+      else S.idlePeers.delete(peerId);
+      refreshPresence(peerId);
     } catch {}
   });
 
@@ -2657,9 +2693,8 @@ function buildMentionPopup() {
     const m = popup._candidates[i];
     const item = document.createElement("div");
     item.className = "mention-item" + (i === 0 ? " active" : "");
-    const isOn = (m.id === S.profile?.id) || S.onlinePeers.has(m.id);
     const mentionAvatar = S.peerProfiles[m.id]?.avatar || null;
-    item.innerHTML = `<img src="${esc(avatar(m.username, 20, mentionAvatar))}" /><span>${esc(m.username)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
+    item.innerHTML = `<img src="${esc(avatar(m.username, 20, mentionAvatar))}" /><span>${esc(m.username)}</span><span class="online-dot ${peerPresence(m.id)}"></span>`;
     item.addEventListener("mousedown", (e) => {
       e.preventDefault();
       insertMention(m);
@@ -2803,10 +2838,9 @@ $("chat-header-main")?.addEventListener("click", () => {
       const dmName = dmProfile.username || room.name || dmId;
       if (!query || dmName.toLowerCase().includes(query)) {
         const dmAv = dmProfile.avatar || room.avatar || null;
-        const isOn = S.onlinePeers.has(dmId);
         const row = document.createElement("div");
         row.className = "member-row";
-        row.innerHTML = `<img src="${esc(avatar(dmName, 22, dmAv))}" /><span>${esc(dmName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
+        row.innerHTML = `<img src="${esc(avatar(dmName, 22, dmAv))}" /><span>${esc(dmName)}</span><span class="online-dot ${peerPresence(dmId)}"></span>`;
         row.style.cursor = "pointer";
         row.addEventListener("click", () => { closeAllModals(); showUserInfo(dmId, dmName); });
         memberList.appendChild(row);
@@ -2821,26 +2855,28 @@ $("chat-header-main")?.addEventListener("click", () => {
         // the list is rebuilt from what peers relay.
         if (removed.has(id)) continue;
         const self = id === S.profile?.id;
+        const presence = peerPresence(id);
         rows.push({
           id,
           m,
           self,
-          online: self || S.onlinePeers.has(id),
+          online: presence !== "offline",
+          idle: presence === "idle",
           username: S.peerProfiles[id]?.username || m.username || id,
         });
       }
-      const memberEntries = collapseMembers(rows).sort((a, b) => {
-        if (a.online === b.online) return 0;
-        return a.online ? -1 : 1;
-      });
+      // Here first, then away, then gone.
+      const rank = (entry) => (entry.online ? (entry.idle ? 1 : 0) : 2);
+      const memberEntries = collapseMembers(rows).sort((a, b) => rank(a) - rank(b));
       memberCount = memberEntries.length;
       
-      for (const { id, m, online: isOn, username: memberName } of memberEntries) {
+      for (const { id, m, online: isOn, idle: isIdle, username: memberName } of memberEntries) {
         if (!query || memberName.toLowerCase().includes(query)) {
           const row = document.createElement("div");
           row.className = "member-row";
           const memberAvatar = S.peerProfiles[id]?.avatar || m.avatar || null;
-          row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${isOn ? "online" : "offline"}"></span>`;
+          const dot = isOn ? (isIdle ? "idle" : "online") : "offline";
+          row.innerHTML = `<img src="${esc(avatar(memberName, 22, memberAvatar))}" /><span>${esc(memberName)}</span><span class="online-dot ${dot}"></span>`;
           row.style.cursor = "pointer";
           row.addEventListener("click", () => { closeAllModals(); showUserInfo(id, memberName); });
 
@@ -2928,6 +2964,28 @@ $("chat-header-main")?.addEventListener("click", () => {
 let _uiCurrentPeerId = null;
 let _uiCurrentPeerName = null;
 
+// Online, away or gone, for one person's dot. You are always here to yourself.
+function peerPresence(id) {
+  if (id === S.profile?.id) return "online";
+  if (!S.onlinePeers.has(id)) return "offline";
+  return S.idlePeers.has(id) ? "idle" : "online";
+}
+
+const PRESENCE_LABELS = { online: "Online", idle: "Idle", offline: "Offline" };
+
+function renderUserStatus(peerId) {
+  const presence = peerPresence(peerId);
+  $("ui-status").innerHTML = `<span class="online-dot ${presence}"></span> ${PRESENCE_LABELS[presence]}`;
+}
+
+// Whatever on screen shows this person's dot. A group's count stays a count
+// of who is online, away or not.
+function refreshPresence(peerId) {
+  refreshRoomInfoMembers?.();
+  if (_uiCurrentPeerId === peerId) renderUserStatus(peerId);
+  if ($("discover-search")?.value) renderDiscoverList();
+}
+
 function showUserInfo(senderId, displayName) {
   const peer = S.peerProfiles[senderId];
   const name = peer?.username || displayName || senderId;
@@ -2938,8 +2996,7 @@ function showUserInfo(senderId, displayName) {
   $("ui-name").textContent = name;
   $("ui-bio").textContent = peer?.bio || "";
 
-  const isOn = S.onlinePeers.has(senderId);
-  $("ui-status").innerHTML = `<span class="online-dot ${isOn ? "online" : "offline"}"></span> ${isOn ? "Online" : "Offline"}`;
+  renderUserStatus(senderId);
 
   const room = S.rooms[S.activeRoom];
   const member = room?.members?.[senderId];
@@ -3310,6 +3367,7 @@ function discoverDirectory(query = "") {
     members: room?.members,
     peerProfiles: S.peerProfiles,
     onlinePeers: S.onlinePeers,
+    idlePeers: S.idlePeers,
     bans: room?.bans,
     selfId: S.profile?.id,
     query,
@@ -3337,7 +3395,7 @@ function renderDiscoverList() {
     row.innerHTML =
       `<img src="${esc(avatar(member.username, 22, member.avatar))}" />` +
       `<span>${esc(member.username)}</span>` +
-      `<span class="online-dot ${member.online ? "online" : "offline"}"></span>`;
+      `<span class="online-dot ${member.online ? (member.idle ? "idle" : "online") : "offline"}"></span>`;
     row.style.cursor = "pointer";
     row.addEventListener("click", () => {
       closeAllModals();

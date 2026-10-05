@@ -137,6 +137,8 @@ describe("removing somebody over a real connection", () => {
     const bans = frames.filter((f) => f.type === "room-bans" && f.room === wireRoom(ROOM));
     assert.ok(bans.length, "the removal never reached them");
     assert.deepEqual(bans.at(-1).bans.map((ban) => ban.id), [peerId]);
+    // With their name, for whoever in the room never met them.
+    assert.equal(bans.at(-1).bans[0].name, "Bob");
 
     // The connection carries both rooms, so it stays up.
     assert.equal(pair.clientStream.destroyed, false);
@@ -209,5 +211,24 @@ describe("removing somebody over a real connection", () => {
     transport.send(bans());
     await settle();
     assert.equal((await roomOf(THEIR_ROOM)).removedByCreator, true);
+  });
+
+  // A device that joined after somebody was removed never met them. It used to
+  // say "c0ffee11 was removed" with nothing else to go on.
+  it("names somebody this device never met, as the creator knew them", async () => {
+    const theirKey = pair.clientStream.publicKey.toString("hex").toLowerCase();
+    transport.send(JSON.stringify({
+      type: "room-meta", room: wireRoom(THEIR_ROOM), name: "Theirs", bio: "", link: "",
+      createdAt: Date.now(), createdBy: peerId, creatorKey: theirKey, createdByName: "Bob",
+    }) + "\n");
+    await settle();
+    transport.send(JSON.stringify({
+      type: "room-bans", room: wireRoom(THEIR_ROOM),
+      bans: [{ id: "c0ffee11", key: "", at: Date.now(), name: "Carol" }],
+    }) + "\n");
+    await settle();
+    const { messages } = await call("get-history", "GET", null, THEIR_ROOM);
+    const notice = messages.filter((message) => message.moderationNotice).at(-1);
+    assert.match(notice.text, /^Carol was removed from the room by Bob$/);
   });
 });
