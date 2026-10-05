@@ -1062,34 +1062,53 @@ function hideBoot() {
 
 // An invite carries the room key, so it is read once and wiped from the URL
 // before the app renders; history and the address bar must not keep it.
-const pendingInvite = parseInvite(location.hash);
-const pendingDirectInvite = parseDirectInvite(location.hash);
-if (pendingInvite || pendingDirectInvite) {
+let pendingInvite = null;
+let pendingDirectInvite = null;
+function takeInviteFromAddress() {
+  const room = parseInvite(location.hash);
+  const person = parseDirectInvite(location.hash);
+  if (!room && !person) return false;
+  pendingInvite = room;
+  pendingDirectInvite = person;
   try { history.replaceState(null, "", location.pathname + location.search); } catch {}
+  return true;
 }
+takeInviteFromAddress();
+
+// A link opened in a tab that already shows PeerChat only changes the part
+// after the #, so the page does not load again and the invite was never read.
+addEventListener("hashchange", () => {
+  // Before a profile exists the invite waits, and is opened once there is one.
+  if (takeInviteFromAddress() && S.profile?.username) void consumeInvite();
+});
 
 async function consumeInvite() {
+  // Each invite is opened once, however the page came to read it.
+  const directInvite = pendingDirectInvite;
+  const invite = pendingInvite;
+  pendingDirectInvite = null;
+  pendingInvite = null;
   // A personal link names a person rather than a room, so it asks them.
-  if (pendingDirectInvite) {
-    if (pendingDirectInvite !== S.profile?.id) {
-      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[pendingDirectInvite];
-      const name = S.peerProfiles[pendingDirectInvite]?.username || known?.username || pendingDirectInvite;
+  if (directInvite) {
+    if (directInvite !== S.profile?.id) {
+      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[directInvite];
+      const name = S.peerProfiles[directInvite]?.username || known?.username || directInvite;
       try {
-        await openDM(pendingDirectInvite, name);
+        await openDM(directInvite, name);
       } catch (err) {
         console.error("[chat] personal invite:", err);
       }
     }
     return;
   }
-  if (!pendingInvite) return;
+  if (!invite) return;
   try {
-    if (!S.rooms[pendingInvite]) {
-      await chat.joinRoom(pendingInvite);
+    if (!S.rooms[invite]) {
+      await chat.joinRoom(invite);
       await loadRooms();
       renderRoomList();
     }
-    await openRoom(pendingInvite);
+    await openRoom(invite);
   } catch (err) {
     console.error("[chat] invite:", err);
     alert("Could not open that invite link.");

@@ -86,3 +86,20 @@ describe("personal invite links", () => {
     assert.equal(parseInvite(buildDirectInviteUrl(PEER)), "");
   });
 });
+
+// A link opened in a tab that already shows PeerChat only changes the part
+// after the #, so the page is not loaded again. The invite was read at load
+// and nowhere else, so nothing happened.
+describe("an invite opened while PeerChat is open", () => {
+  it("is read when the address changes, and opened once", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+    assert.match(app, /addEventListener\("hashchange", \(\) => \{\s*\/\/[^\n]*\n\s*if \(takeInviteFromAddress\(\) && S\.profile\?\.username\) void consumeInvite\(\);/);
+    // Wiped from the address as soon as it is read, so history does not keep it.
+    const take = app.slice(app.indexOf("function takeInviteFromAddress()"), app.indexOf("takeInviteFromAddress();"));
+    assert.match(take, /history\.replaceState\(null, "", location\.pathname \+ location\.search\)/);
+    // Taken before it is used, so the same link never opens twice.
+    const consume = app.slice(app.indexOf("async function consumeInvite()"), app.indexOf("async function init()"));
+    assert.ok(consume.indexOf("pendingInvite = null") < consume.indexOf("chat.joinRoom(invite)"));
+  });
+});
