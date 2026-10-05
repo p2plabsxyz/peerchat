@@ -114,6 +114,14 @@ const chatTransports = new WeakMap();
 const pendingPeers = new WeakMap();
 
 let peers = [];
+// Away from PeerSky: the screen locked, the computer asleep or idle, or another
+// app in front for a while. PeerSky works that out and says so here, and each
+// person in a room with us hears it. A phone in the background says the same.
+let localIdle = false;
+// Who said they are away, by short id. A group still counts them as online;
+// their own dot says which.
+const idlePeers = new Set();
+const MAX_PRESENCE_FRAMES_PER_WINDOW = 30;
 let localId = "";
 let localKey = "";
 let safeStore = null;
@@ -844,6 +852,43 @@ function topicsFrameFor(conn) {
 
 function shareTopics(conn) {
   try { writeToConnection(conn, topicsFrameFor(conn)); } catch {}
+}
+
+function sharePresence(conn) {
+  const frame = { type: "presence", state: localIdle ? "idle" : "active" };
+  try { writeToConnection(conn, JSON.stringify(frame) + "\n"); } catch {}
+}
+
+/**
+ * Whether the person is away from PeerSky. Only peers in a room with us hear
+ * it: anyone who knows one of our topics gets as far as a connection, and
+ * whether we are at the computer is not theirs to know. An older build drops
+ * the frame, since it names no room and carries no message.
+ */
+export function setPresenceIdle(idle) {
+  const next = idle === true;
+  if (next === localIdle) return;
+  localIdle = next;
+  for (const peer of peers) {
+    if (peer.rooms.length && !peer.conn.destroyed) sharePresence(peer.conn);
+  }
+}
+
+// A budget of its own, so a burst of room traffic on connecting cannot crowd
+// out the one frame that says where someone is.
+function takePresenceFrame(peer, now = Date.now()) {
+  if (!peer.presenceRate || now >= peer.presenceRate.resetsAt) {
+    peer.presenceRate = { count: 1, resetsAt: now + RATE_WINDOW_MS };
+    return true;
+  }
+  if (peer.presenceRate.count >= MAX_PRESENCE_FRAMES_PER_WINDOW) return false;
+  peer.presenceRate.count += 1;
+  return true;
+}
+
+// The ones online that said they are away.
+function idleOnlineIds(onlineIds) {
+  return onlineIds.filter((id) => idlePeers.has(id));
 }
 
 // Everything about rooms a peer has just proved it is in: our profile, each
@@ -1587,6 +1632,10 @@ export function initChat(sdk, options = {}) {
       peers.push(peer);
       broadcastPeerCountNow();
       broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
+      // Whether they are away comes again on this connection, once a room
+      // opens on it. Until then they are taken as here, which is also all an
+      // older build that never says can be.
+      if (idlePeers.delete(remoteId)) broadcastGlobal("peer-idle", { peerId: remoteId, idle: false });
 
       // Our proofs, and any invite waiting on this person. Nothing about a
       // room goes out here: a room opens when the peer proves it holds the key,
@@ -1671,9 +1720,25 @@ export function initChat(sdk, options = {}) {
                 // The other side ignores rooms already open, so it settles.
                 shareTopics(conn);
                 shareRoomsWith(conn, added);
+                if (!peerEntry.presenceShared) {
+                  peerEntry.presenceShared = true;
+                  sharePresence(conn);
+                }
                 broadcastPeerCountNow();
               }
             }
+            continue;
+          }
+
+          // Whether they are away, from someone in a room with us.
+          if (msg.type === "presence") {
+            const entry = peerForConnection(conn);
+            if (!entry?.rooms.length || !takePresenceFrame(entry)) continue;
+            const idle = msg.state === "idle";
+            if (idle === idlePeers.has(remoteId)) continue;
+            if (idle) idlePeers.add(remoteId);
+            else idlePeers.delete(remoteId);
+            broadcastGlobal("peer-idle", { peerId: remoteId, idle });
             continue;
           }
 
@@ -2778,7 +2843,7 @@ export async function handleChatRequest(req, sdk) {
         }
         prunePeers();
         const onlinePeers = [...new Set(peers.map((p) => p.id))];
-        return respond(200, { rooms, peerProfiles: savedData.peerProfiles || {}, onlinePeers, pendingDMs: savedData.pendingDMs || {}, blockedPeers: listBlockedPeers() });
+        return respond(200, { rooms, peerProfiles: savedData.peerProfiles || {}, onlinePeers, idlePeers: idleOnlineIds(onlinePeers), pendingDMs: savedData.pendingDMs || {}, blockedPeers: listBlockedPeers() });
       }
 
       if (action === "get-history") {
@@ -2843,7 +2908,7 @@ export async function handleChatRequest(req, sdk) {
         stream.write(`event: peersCount\ndata: ${JSON.stringify({ count: peerCount })}\n\n`);
 
         const onlineIds = [...new Set(peers.map((p) => p.id))];
-        stream.write(`event: online-peers\ndata: ${JSON.stringify({ peers: onlineIds })}\n\n`);
+        stream.write(`event: online-peers\ndata: ${JSON.stringify({ peers: onlineIds, idle: idleOnlineIds(onlineIds) })}\n\n`);
 
         for (const k of Object.keys(savedData.rooms)) {
           const p = roomUpdatePayload(k);

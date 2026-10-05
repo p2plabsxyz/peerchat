@@ -316,6 +316,19 @@ export async function createHandler(options) {
 }
 ```
 
+#### 3. Say when the person is away (optional)
+
+People in a room with you see a yellow dot and "Idle" while you are away, and green while you are here. Only your browser knows which, so it tells PeerChat:
+
+```js
+import { setPresenceIdle } from "./path/to/peerchat/p2p.js";
+
+setPresenceIdle(true); // screen locked, computer asleep or idle, or another app in front
+setPresenceIdle(false); // back
+```
+
+PeerSky works it out in `src/peerchat-presence.js`. Without it everyone sees you as here whenever you are online. Group headers count people online, away or not; the member list and a person's card say which.
+
 ### Theming
 
 `styles.css` imports [`browser://theme/vars.css`](https://github.com/p2plabsxyz/peersky-browser/blob/main/docs/Theme.md) and maps layout colors from **`--browser-theme-background`**, **`--browser-theme-text-color`**, **`--browser-theme-primary-highlight`**, **`--browser-theme-secondary-highlight`**, and **`--browser-theme-font-family`**, with Peersky extras (`--peersky-nav-background`, `--base02`, etc.) when present. The UI should follow PeerSky’s selected theme and stay compatible with other browsers that implement the same protocol.

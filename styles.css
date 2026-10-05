@@ -889,6 +889,7 @@ a:hover { text-decoration: none; }
   display: inline-block; flex-shrink: 0;
 }
 .online-dot.online  { background: var(--base0A, var(--browser-theme-secondary-highlight)); }
+.online-dot.idle    { background: #f0b232; }
 .online-dot.offline { background: var(--border); }
 
 /* Avatar */
