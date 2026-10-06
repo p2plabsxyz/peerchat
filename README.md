@@ -4,7 +4,7 @@
     <img src="./demo.png" width="639" alt="Screenshot of PeerChat in light mode: browser tab with peersky://p2p/peerchat URL, sidebar with rooms and a selected chat with “Capt Jack Sparrow,” conversation bubbles, an embedded video, and the emoji picker above the input field.">
 </div>
 
-Small-group chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser) on desktop and [PeerSky Mobile](https://github.com/p2plabsxyz/peersky-mobile) on iOS and Android. Phones and desktops talk in the same rooms: the phone has its own implementation of the same protocol, described in [docs/peerchat.md](https://github.com/p2plabsxyz/peersky-mobile/blob/main/docs/peerchat.md). You create a room, share a key, and everyone who has that key joins the same swarm, with no chat server in the middle. History starts at the moment you join; nobody backfills what came before.
+Chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser) on desktop and [PeerSky Mobile](https://github.com/p2plabsxyz/peersky-mobile) on iOS and Android. Phones and desktops talk in the same rooms: the phone has its own implementation of the same protocol, described in [docs/peerchat.md](https://github.com/p2plabsxyz/peersky-mobile/blob/main/docs/peerchat.md). You create a room, share a key, and everyone who has that key joins the same swarm, with no chat server in the middle. History starts at the moment you join; nobody backfills what came before.
 
 **No accounts. No servers. Works without internet. End to end encrypted.** Messages go straight between the people in a room, encrypted on the sender's device with a key only the room holds, and a peer gets nothing about a room until it proves it holds that key. On a local network, rooms keep talking with the internet down.
 
@@ -173,7 +173,7 @@ These apps solve different problems; the table is to set expectations, not to pi
 | **Without internet** | No | No | **Yes**, on a local network |
 | **Pros** | Strong E2E story, PFS, large user base, safety numbers | Self-host, bridges, optional E2E | **No signup;** data synced directly between peers; you control local files |
 | **Cons** | Depends on Signal’s infrastructure and updates | Server sees metadata; E2E history can be fiddly | **Room key = full access** to history for anyone who gets it; **no PFS** on the room key; metadata on the network is a research topic |
-| **Good when** | You want mainstream, audited E2E messaging | You want federation or a public server | You want **local-first, small groups**, same app as Hyper browsing |
+| **Good when** | You want mainstream, audited E2E messaging | You want federation or a public server | You want **local-first** chat, in the same app as Hyper browsing |
 | **File uploads** | Platform limits | Varies by server | **No limit** |
 
 **P2P angle:** PeerChat avoids a message database run by a third party. Desktop
