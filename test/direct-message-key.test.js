@@ -35,7 +35,7 @@ describe("direct message keys", () => {
     // One conversation per person, found by who it is with.
     const lookup = p2p.slice(p2p.indexOf("function findDirectRoomKey"), p2p.indexOf("function shareDMInvites"));
     assert.match(lookup, /room\.isDM && normPeerId\(room\.dmWith\) === wanted/);
-    assert.match(app, /room\.isDM && room\.dmWith === peerId/);
+    assert.match(app, /isDirectRoomFor\(room, peerKey \|\| peerId\)/);
   });
 
   it("takes an invite on the strength of the connection, not the key", () => {

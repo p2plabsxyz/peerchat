@@ -2,11 +2,14 @@ import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
 import {
   buildDirectInviteUrl,
   buildInviteUrl,
+  isDirectRoomFor,
   parseDirectInvite,
   parseInvite,
+  splitDirectPeer,
 } from "./lib/invite.js";
 import { createQrMatrix } from "./lib/qrcode-matrix.js";
 import { buildDirectory, collapseMembers } from "./lib/members.js";
+import { nameNotice } from "./lib/notice-names.js";
 
 import { chat } from "./chat-api.js";
 import {
@@ -757,7 +760,8 @@ function chatMessageRenders(m) {
   if (!m) return false;
   if (m.type === "reaction") return false;
   if (m.type === "system") {
-    return typeof m.text === "string" && m.text.trim().length > 0;
+    const text = systemText(m);
+    return typeof text === "string" && text.trim().length > 0;
   }
   const text = typeof m.message === "string" ? m.message : "";
   if (text.trim().length > 0) return true;
@@ -1091,13 +1095,15 @@ async function consumeInvite() {
   const invite = pendingInvite;
   pendingDirectInvite = null;
   pendingInvite = null;
-  // A personal link names a person rather than a room, so it asks them.
+  // A personal link names a person rather than a room, so it asks them: the
+  // whole key, or the peer id of an older link.
   if (directInvite) {
-    if (directInvite !== S.profile?.id) {
-      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[directInvite];
-      const name = S.peerProfiles[directInvite]?.username || known?.username || directInvite;
+    const { id, key } = splitDirectPeer(directInvite);
+    if (id && id !== S.profile?.id) {
+      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[id];
+      const name = S.peerProfiles[id]?.username || known?.username || id;
       try {
-        await openDM(directInvite, name);
+        await openDM(id, name, key);
       } catch (err) {
         console.error("[chat] personal invite:", err);
       }
@@ -1458,8 +1464,7 @@ async function openRoom(roomKey) {
   $("chat-active").style.display = "flex";
   $("chat-room-avatar").src = avatar(room.name, 32, room.avatar);
   $("chat-room-name").textContent = room.name || roomKey.slice(0, 8) + "...";
-  const _initCount = roomOnlineCount(roomKey);
-  $("chat-room-peers").textContent = `${_initCount} peer${_initCount !== 1 ? "s" : ""}`;
+  showRoomStatus(roomKey);
   $("messages").innerHTML = "";
 
   applyDMComposerGate(roomKey);
@@ -1546,7 +1551,7 @@ async function openRoom(roomKey) {
 
 function messageMatchesSearch(m, q) {
   if (!q) return true;
-  if (m.type === "system") return (m.text || "").toLowerCase().includes(q);
+  if (m.type === "system") return (systemText(m) || "").toLowerCase().includes(q);
   return (m.message || "").toLowerCase().includes(q);
 }
 
@@ -1576,7 +1581,7 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
       if (!chatMessageRenders(m)) continue;
       const el = document.createElement("div");
       el.className = "system-msg";
-      el.textContent = m.text;
+      el.textContent = systemText(m);
       container.appendChild(el);
       continue;
     }
@@ -1662,8 +1667,24 @@ function roomOnlineCount(roomKey) {
 
 function updateRoomPeerCount(roomKey) {
   if (roomKey !== S.activeRoom) return;
+  showRoomStatus(roomKey);
+}
+
+// A direct message says how the other person is, as the phone does: online,
+// away or offline. A group counts who is online.
+function showRoomStatus(roomKey) {
+  const room = S.rooms[roomKey];
+  const el = $("chat-room-peers");
+  if (!el) return;
+  if (room?.isDM && room.dmWith) {
+    const presence = peerPresence(room.dmWith);
+    el.textContent = PRESENCE_LABELS[presence];
+    el.dataset.presence = presence;
+    return;
+  }
+  delete el.dataset.presence;
   const c = roomOnlineCount(roomKey);
-  $("chat-room-peers").textContent = `${c} peer${c !== 1 ? "s" : ""}`;
+  el.textContent = `${c} peer${c !== 1 ? "s" : ""}`;
 }
 
 function previewCardHost(preview) {
@@ -2070,9 +2091,11 @@ function appendMessage(roomKey, msg) {
     const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     let el;
     if (msg.type === "system") {
+      const text = systemText(msg);
+      if (!text) return true;
       el = document.createElement("div");
       el.className = "system-msg";
-      el.textContent = msg.text;
+      el.textContent = text;
     } else {
       msg.roomKey = msg.roomKey || roomKey;
       el = makeMsgEl(msg);
@@ -2392,6 +2415,7 @@ function connectGlobalSSE() {
       const { peerId, username, bio, isOnline } = data;
       const peerAvatar = data.avatar || null;
       const peerRooms = Array.isArray(data.rooms) ? data.rooms : null;
+      if (!username) return;
       S.peerProfiles[peerId] = { username, bio, avatar: peerAvatar, updatedAt: Date.now() };
       if (isOnline) S.onlinePeers.add(peerId);
       patchRoomsForPeer(peerId, username, bio, peerAvatar, peerRooms);
@@ -2855,6 +2879,9 @@ $("chat-header-main")?.addEventListener("click", () => {
         // the list is rebuilt from what peers relay.
         if (removed.has(id)) continue;
         const self = id === S.profile?.id;
+        // Someone who never took a name never took part.
+        const memberName = nameForPeer(id);
+        if (!self && !memberName) continue;
         const presence = peerPresence(id);
         rows.push({
           id,
@@ -2862,7 +2889,7 @@ $("chat-header-main")?.addEventListener("click", () => {
           self,
           online: presence !== "offline",
           idle: presence === "idle",
-          username: S.peerProfiles[id]?.username || m.username || id,
+          username: memberName || id,
         });
       }
       // Here first, then away, then gone.
@@ -2964,6 +2991,39 @@ $("chat-header-main")?.addEventListener("click", () => {
 let _uiCurrentPeerId = null;
 let _uiCurrentPeerName = null;
 
+// A person's name from what this desktop has heard: their profile, or what a
+// room remembers them as. An id written in where the name belongs is none.
+function nameForPeer(id) {
+  if (id === S.profile?.id) return S.profile?.username || "";
+  const real = (name) => (typeof name === "string" && name && name !== id ? name : "");
+  const fromProfile = real(S.peerProfiles[id]?.username);
+  if (fromProfile) return fromProfile;
+  for (const room of Object.values(S.rooms)) {
+    const name = real(room.members?.[id]?.username);
+    if (name) return name;
+  }
+  return "";
+}
+
+function isPeerName(name) {
+  if (S.profile?.username === name) return true;
+  for (const [id, profile] of Object.entries(S.peerProfiles)) {
+    if (profile?.username === name && id !== name) return true;
+  }
+  for (const room of Object.values(S.rooms)) {
+    for (const [id, member] of Object.entries(room.members || {})) {
+      if (member?.username === name && id !== name) return true;
+    }
+  }
+  return false;
+}
+
+// A system line as it reads now: a join or leave written with an id gets the
+// name, or nothing when there is none to give.
+function systemText(m) {
+  return nameNotice(m.text, nameForPeer, isPeerName);
+}
+
 // Online, away or gone, for one person's dot. You are always here to yourself.
 function peerPresence(id) {
   if (id === S.profile?.id) return "online";
@@ -2981,6 +3041,7 @@ function renderUserStatus(peerId) {
 // Whatever on screen shows this person's dot. A group's count stays a count
 // of who is online, away or not.
 function refreshPresence(peerId) {
+  updateRoomPeerCount(S.activeRoom);
   refreshRoomInfoMembers?.();
   if (_uiCurrentPeerId === peerId) renderUserStatus(peerId);
   if ($("discover-search")?.value) renderDiscoverList();
@@ -3113,15 +3174,17 @@ function renderBlockedList() {
 // sha256 of the two peer ids, and those are public, so anybody who knew both
 // could derive it and read the conversation. The backend mints a random one
 // now and hands it over on the connection.
-function directRoomWith(peerId) {
-  return Object.values(S.rooms).find((room) => room.isDM && room.dmWith === peerId) || null;
+function directRoomWith(peerId, peerKey = "") {
+  return Object.values(S.rooms).find((room) => isDirectRoomFor(room, peerKey || peerId)) || null;
 }
 
-async function openDM(peerId, peerUsername) {
+// peerKey is the whole key a link names. The request then goes to that key
+// alone; a member picked from a list has only the peer id to go by.
+async function openDM(peerId, peerUsername, peerKey = "") {
   const myId = S.profile?.id;
   if (!myId || !peerId || peerId === myId) return;
   try {
-    const existing = directRoomWith(peerId);
+    const existing = directRoomWith(peerId, peerKey);
     closeAllModals();
     if (existing && !existing.blockedByPeer) {
       await openRoom(existing.roomKey);
@@ -3130,7 +3193,7 @@ async function openDM(peerId, peerUsername) {
     // A room they blocked goes back through join-dm, which clears the flag and
     // re-sends the request. Otherwise their unblock would never reach us.
     if (existing?.blockedByPeer) {
-      await chat.joinDM({ toId: peerId, toUsername: peerUsername });
+      await chat.joinDM({ toId: peerId, toKey: peerKey, toUsername: peerUsername });
       await loadRooms();
       renderRoomList();
       await openRoom(existing.roomKey);
@@ -3147,7 +3210,7 @@ async function openDM(peerId, peerUsername) {
     $("message-input").disabled = true;
     $("send-btn").disabled = true;
     const result = await chat.joinDM({
-      toId: peerId, toUsername: peerUsername,
+      toId: peerId, toKey: peerKey, toUsername: peerUsername,
       toAvatar: peerAv, toBio: peer?.bio || "",
     });
     if (result.roomKey) {
@@ -3332,7 +3395,7 @@ function renderDiscoverQr() {
   if (!holder) return;
   holder.innerHTML = "";
 
-  const url = buildDirectInviteUrl(S.profile?.id || "");
+  const url = buildDirectInviteUrl(S.profile?.key || "");
   if (!url) {
     holder.innerHTML = '<p class="muted small">Set a display name first and your code appears here.</p>';
     return;

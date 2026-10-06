@@ -343,6 +343,8 @@ html, body {
   display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #chat-room-peers { font-size: 0.75rem; color: var(--muted); }
+#chat-room-peers[data-presence="online"] { color: var(--base0A, var(--browser-theme-secondary-highlight)); }
+#chat-room-peers[data-presence="idle"] { color: #f0b232; }
 
 #messages {
   flex: 1; overflow-y: auto; padding: 1rem; position: relative;
@@ -950,9 +952,11 @@ a:hover { text-decoration: none; }
 }
 .avatar-upload-label { cursor: pointer; }
 
-/* Inline file in chat */
+/* Inline file in chat. A bubble in a narrow chat, such as one side of a
+   split window, is narrower than 280px, and a picture held to 280px alone
+   spilled out of it. */
 .msg-file-img {
-  max-width: 280px; max-height: 240px;
+  max-width: min(280px, 100%); max-height: 240px;
   border-radius: 8px; margin-top: 6px;
   cursor: pointer; display: block;
 }

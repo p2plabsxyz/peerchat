@@ -307,8 +307,14 @@ export function checkAdultDomains(text) {
 }
 
 // Run content filters without changing moderation state.
-// roomMod is optional: { abuseFilter, nsfwFilter, spamRateLimit }
+// roomMod is optional: { abuseFilter, nsfwFilter, spamRateLimit, directMessage }
 export function checkContent(text, roomMod) {
+  // A direct message is two people, either of whom can block the other, so
+  // the group filters stay out of it: threats, the word list and adult domain
+  // links all pass. The spam limit still holds, and images are still checked
+  // and shown behind a warning.
+  if (roomMod?.directMessage === true) return { flagged: false, reason: "" };
+
   // The two toggles gate different things. Abuse covers threats and targeted
   // harassment; nsfwFilter covers the shared word list. Both used to scan that
   // list, so turning off either one on its own changed nothing and the room

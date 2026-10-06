@@ -44,7 +44,7 @@
       <h1>About PeerChat</h1>
 
       <p class="lead">
-        Small-group chat inside PeerSky Browser. You create a room, share a key, and everyone who has that key joins the same swarm; no chat server in the middle. <br>
+        Chat inside PeerSky Browser. You create a room, share a key, and everyone who has that key joins the same swarm; no chat server in the middle. <br>
         <strong>No accounts. No servers. Works without internet. End to end encrypted.</strong> Messages go straight between the people in a room, locked on the sender’s device with a key only the room holds.<br>
         <strong>Everything stays local on your machine</strong> (room list, profile, keys file); except what you explicitly sync over the peer network.<br>
         <strong>You own your chats:</strong> there’s no company holding logs or resetting your password; the room key is the shared secret.
@@ -93,7 +93,9 @@
         Whoever opens it mints it and sends it inside the request, which only travels on a connection
         whose public key the handshake has already proved, so it reaches that person and nobody else. It is
         sent to their full public key, never to the 8-character peer ID, which is short enough that someone
-        could make a key with the same one; while two connected keys share an ID, the request waits.
+        could make a key with the same one. A personal invite link or QR code carries the full key, so its
+        request goes to that key alone. One started from a member list, or from an older link with only the
+        ID, waits while two connected keys share that ID.
         Everything after that is the same as a room: the topic is a separate derivation, the messages
         are AES-256-GCM, and attachments are sealed with a third derivation of the same key.
       </p>
@@ -149,7 +151,7 @@
 
       <h2>What is blocked for everyone</h2>
       <p class="muted">
-        These are on for everyone and there is nothing to switch on:
+        In groups these are on for everyone and there is nothing to switch on:
       </p>
       <ul>
         <li><strong>Nudity in pictures and video</strong>: refused before it is sent, and checked again when it
@@ -161,6 +163,12 @@
         <li><strong>Scam links</strong>: a link whose address is built to impersonate a real site is
           marked under its preview. The link still opens if you decide to open it.</li>
       </ul>
+      <p class="muted">
+        <strong>In a direct message</strong> the text filters are off: threats, slurs and adult links all go
+        through. It is between the two of you, and either of you can block the other. A picture that looks
+        explicit is sent as it is and arrives hidden behind a warning the other person can open. The spam limit
+        still applies.
+      </p>
       <p class="muted">
         <strong>Not detected:</strong> violent or graphic images, injury and death. No workable model for that
         exists that could run on your own machine, and PeerChat will not send your pictures to a company to have

@@ -288,3 +288,12 @@ describe("media moderation", () => {
     assert.equal((hydrateBody.match(/screenIncomingMedia/g) || []).length, 2);
   });
 });
+
+// A bubble in a narrow chat, such as one side of a split window, is narrower
+// than 280px. Held to 280px alone, a photo spilled out of it by up to 174px.
+describe("a photo in a narrow chat", () => {
+  it("stays inside its bubble", async () => {
+    const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+    assert.match(css, /\.msg-file-img \{\s+max-width: min\(280px, 100%\); max-height: 240px;/);
+  });
+});

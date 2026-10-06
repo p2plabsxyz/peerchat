@@ -68,6 +68,7 @@ import {
   makeTransfer,
   mergeLabels,
   nextLabel,
+  normalizeDeviceKey,
   normalizeLabel,
   normalizeLink,
   normalizeSharedRooms,
@@ -84,6 +85,14 @@ const DEFAULT_ROOM_MODERATION = {
   nsfwFilter: true,
   spamRateLimit: 10,
 };
+
+// What a room's messages are checked against. directMessage is never stored
+// or sent: a room says nothing about it, a direct message just is one.
+function roomModerationFor(roomKey) {
+  const room = savedData.rooms[roomKey];
+  if (room?.isDM) return { ...DEFAULT_ROOM_MODERATION, directMessage: true };
+  return room?.moderation || null;
+}
 
 function sanitizeRoomModeration(input) {
   if (!input || typeof input !== "object") return { ...DEFAULT_ROOM_MODERATION };
@@ -732,7 +741,7 @@ function feedEntryToMsg(entry, roomKey) {
     const raw = consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey);
     const payload = dropFlaggedPreview(
       decodeMessagePayload(raw),
-      savedData.rooms[roomKey]?.moderation || null,
+      roomModerationFor(roomKey),
     );
     const out = {
       id: entry.id,
@@ -1803,11 +1812,19 @@ export function initChat(sdk, options = {}) {
             const joinPeerId = remoteId || msg.peerId;
             // Block join using the connection-level peer identity, not the self-reported body.
             if (moderationIsKicked(joinPeerId, msg.roomKey)) continue;
-            const joinName = clamp(msg.username, 50) ||
-              savedData.rooms[msg.roomKey]?.members?.[joinPeerId]?.username ||
-              savedData.peerProfiles?.[joinPeerId]?.username ||
-              joinPeerId;
+            // An id is no name. Phones announced themselves with theirs before
+            // they had one, and it was written into the room as who joined.
+            const realName = (name) => (name && name !== joinPeerId ? name : "");
+            const joinName = realName(clamp(msg.username, 50)) ||
+              realName(savedData.rooms[msg.roomKey]?.members?.[joinPeerId]?.username) ||
+              realName(savedData.peerProfiles?.[joinPeerId]?.username);
             const room = savedData.rooms[msg.roomKey];
+            // Someone without a name yet is not in the conversation: no member,
+            // no line, no history until they join again with one.
+            if (!joinName) {
+              sendRoomMeta(conn, msg.roomKey);
+              continue;
+            }
             // Announcing a join does not undo a removal.
             if (room && isPeerBannedFromRoom(room.bans, { peerId: joinPeerId, connectionKey: fullId })) continue;
             const alreadyKnownMember = !!(room?.members?.[joinPeerId]?.joinedAt);
@@ -2075,13 +2092,16 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "leave") {
             if (msg.roomKey && msg.peerId) {
               if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-              const leaveName = clamp(msg.username, 50) || msg.peerId;
               const room = savedData.rooms[msg.roomKey];
+              const realName = (name) => (name && name !== msg.peerId ? name : "");
+              const leaveName = realName(clamp(msg.username, 50)) ||
+                realName(room?.members?.[msg.peerId]?.username) ||
+                realName(savedData.peerProfiles?.[msg.peerId]?.username);
               if (room?.members?.[msg.peerId]) {
                 delete room.members[msg.peerId];
               }
               const sysId = msg.id || `${wireTopic(msg.roomKey)}-${msg.peerId}-left-${msg.ts || Date.now()}`;
-              if (roomFeeds[msg.roomKey] && trackId(sysId)) {
+              if (leaveName && roomFeeds[msg.roomKey] && trackId(sysId)) {
                 appendToFeed(msg.roomKey, { id: sysId, type: "system", text: `${leaveName} left`, ts: msg.ts || Date.now() }).catch(() => {});
               }
               debouncePersist();
@@ -2135,7 +2155,7 @@ export function initChat(sdk, options = {}) {
             const _sysRoom = savedData.rooms[msg.roomKey];
             if (_sysRoom && !_sysRoom.isHost && _sysRoom.joinedAt && msg.ts && msg.ts < _sysRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
-            const _sysRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const _sysRoomMod = roomModerationFor(msg.roomKey);
             const sysModeration = moderationCheckContent(msg.text, _sysRoomMod);
             if (sysModeration.flagged) {
               appendModerationNotice(msg.roomKey, msg.id, "Synced history", {
@@ -2161,7 +2181,7 @@ export function initChat(sdk, options = {}) {
             if (!trackId(msg.id)) continue;
             const decrypted = decryptIncomingChat(msg, "synced message");
             if (!decrypted.ok) continue;
-            const _syncRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const _syncRoomMod = roomModerationFor(msg.roomKey);
             const syncedPayload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _syncRoomMod);
             const syncModeration = moderationCheckContent(syncedPayload.text, _syncRoomMod);
             if (syncModeration.flagged) {
@@ -2204,7 +2224,7 @@ export function initChat(sdk, options = {}) {
           try {
             const decrypted = decryptIncomingChat(msg, "peer message");
             if (!decrypted.ok) continue;
-            const _peerRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const _peerRoomMod = roomModerationFor(msg.roomKey);
             const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _peerRoomMod);
             moderatedPlaintext = payload.preview ? decrypted.plaintext : payload.text;
             const modResult = moderationCheck(remoteId, msg.roomKey, payload.text, undefined, {
@@ -2301,7 +2321,10 @@ export async function handleChatRequest(req, sdk) {
 
       if (action === "join-dm") {
         const body = await req.json().catch(() => ({}));
-        const toId = clamp(body.toId, MAX_SENDER_LEN);
+        // A link names the whole key. A member picked from a list, and an older
+        // link, give only the peer id it starts with.
+        const toKeyNorm = normalizeDeviceKey(body.toKey);
+        const toId = toKeyNorm ? toKeyNorm.slice(0, 8) : clamp(body.toId, MAX_SENDER_LEN);
         const toUsername = clamp(body.toUsername, MAX_NAME_LEN) || toId;
         const toAvatar = sanitizeAvatar(body.toAvatar);
         const toBio = clamp(body.toBio, MAX_BIO_LEN);
@@ -2314,19 +2337,31 @@ export async function handleChatRequest(req, sdk) {
         // any other room's and handed over on the connection instead.
         const dmRoomKey = findDirectRoomKey(toIdNorm) || randomBytes(32).toString("hex");
         if (isPeerBlocked(toIdNorm)) return respond(403, { error: "Unblock this person before messaging them." });
+        const existing = savedData.rooms[dmRoomKey];
+        if (toKeyNorm && existing?.dmWithKey && existing.dmWithKey !== toKeyNorm) {
+          // Someone else whose key starts the same way. One conversation per
+          // peer id is what the rest of PeerChat goes by, so this one is not
+          // opened.
+          return respond(409, { error: "You already message someone else with this id." });
+        }
+        if (toKeyNorm && existing && !existing.dmWithKey && existing.pendingAcceptance) {
+          // A request that has gone to nobody yet goes to the key in the link.
+          existing.dmWithKey = toKeyNorm;
+          persistData();
+        }
         // Asking again clears it. A block that could never be retried would
         // make the other side's unblock meaningless, and if they are still
         // blocking us the answer comes straight back.
-        const retried = savedData.rooms[dmRoomKey];
-        if (retried?.blockedByPeer) {
-          retried.blockedByPeer = false;
-          retried.pendingAcceptance = true;
+        if (existing?.blockedByPeer) {
+          existing.blockedByPeer = false;
+          existing.pendingAcceptance = true;
           persistData();
         }
         if (!savedData.rooms[dmRoomKey]) {
           savedData.rooms[dmRoomKey] = {
             roomKey: dmRoomKey, isHost: false, isDM: true,
             dmWith: toIdNorm,
+            ...(toKeyNorm && { dmWithKey: toKeyNorm }),
             name: toUsername, bio: toBio || "", avatar: toAvatar || null,
             createdAt: Date.now(),
             createdBy: localId,
@@ -2339,9 +2374,10 @@ export async function handleChatRequest(req, sdk) {
           persistData();
         }
         await joinRoom(sdk, dmRoomKey).catch(() => {});
-        // To the one key behind that short id, bound from here on. With nobody
-        // there yet, or two keys sharing it, it waits: the invite goes out when
-        // they connect, if they are then the only one.
+        // To the key a link named, or else the one key behind that short id,
+        // bound from here on. With nobody there yet, or two keys sharing it, it
+        // waits: the invite goes out when they connect, if they are then the
+        // only one.
         const room = savedData.rooms[dmRoomKey];
         const toKey = room.dmWithKey || soleKeyFor(peers, toIdNorm);
         if (toKey) {
@@ -2566,7 +2602,7 @@ export async function handleChatRequest(req, sdk) {
         if (!message) return respond(400, { error: "Empty message" });
 
         const _sendRoom = savedData.rooms[roomKey];
-        const _sendRoomMod = _sendRoom?.moderation || null;
+        const _sendRoomMod = roomModerationFor(roomKey);
 
         // A block closes the conversation both ways, so neither side can send.
         if (_sendRoom?.isDM && _sendRoom.blockedByPeer) {
@@ -2786,6 +2822,8 @@ export async function handleChatRequest(req, sdk) {
       if (action === "get-profile") {
         return respond(200, {
           id: localId,
+          // The whole key, for this person's own link and QR code.
+          key: localKey,
           username: savedData.profile?.username || "",
           device: savedData.device?.label || "",
           displayName: myName(),
@@ -2823,6 +2861,7 @@ export async function handleChatRequest(req, sdk) {
             isHost: !!r.isHost,
             isDM: !!r.isDM,
             dmWith: r.dmWith || null,
+            dmWithKey: r.dmWithKey || null,
             pendingAcceptance: !!r.pendingAcceptance,
             blockedByPeer: !!r.blockedByPeer,
             isPinned: !!r.isPinned,
