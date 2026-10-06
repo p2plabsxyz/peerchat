@@ -40,6 +40,10 @@ describe("the PeerChat welcome", () => {
   it("shows the rules right above the button, and the button agrees to them", () => {
     assert.equal(WELCOME_RULES.length, 5);
     assert.match(WELCOME_RULES[0], /No sexual content or nudity, ever/);
+    // Every report is read, but no deadline is promised: a small team cannot
+    // keep one. App Review's day is an internal target, not a rule shown here.
+    assert.match(WELCOME_RULES[3], /report them\. We read every report\.$/);
+    assert.doesNotMatch(WELCOME_RULES.join(" "), /hours/);
     assert.equal(PEERCHAT_WELCOME.action, "I understand");
     assert.match(PEERCHAT_WELCOME.rules.note, /Clicking I understand means you agree to these rules/);
   });
