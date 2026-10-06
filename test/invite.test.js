@@ -5,8 +5,10 @@ import { randomBytes } from "node:crypto";
 import {
   buildDirectInviteUrl,
   buildInviteUrl,
+  isDirectRoomFor,
   parseDirectInvite,
   parseInvite,
+  splitDirectPeer,
   INVITE_BASE,
 } from "../lib/invite.js";
 
@@ -61,29 +63,67 @@ describe("invite links", () => {
 // a screen for a stranger to scan.
 describe("personal invite links", () => {
   const PEER = "a1b2c3d4";
+  const KEY = `${PEER}${"5e".repeat(28)}`;
   const ROOM = "ab".repeat(32);
 
-  it("round-trips", () => {
-    const url = buildDirectInviteUrl(PEER);
-    assert.equal(url, `peersky://p2p/peerchat/#dm=${PEER}`);
-    assert.equal(parseDirectInvite(url), PEER);
+  it("carry the whole key and round-trip", () => {
+    const url = buildDirectInviteUrl(KEY);
+    assert.equal(url, `peersky://p2p/peerchat/#dm=${KEY}`);
+    assert.equal(parseDirectInvite(url), KEY);
+    assert.equal(parseDirectInvite(`#dm=${KEY.toUpperCase()}`), KEY);
+    assert.equal(buildDirectInviteUrl(KEY.toUpperCase()), url);
+  });
+
+  // Links already shared carry the peer id. They keep working.
+  it("still open an older link with only the peer id", () => {
+    assert.equal(parseDirectInvite(`peersky://p2p/peerchat/#dm=${PEER}`), PEER);
     assert.equal(parseDirectInvite(`#dm=${PEER.toUpperCase()}`), PEER);
     assert.equal(parseDirectInvite(PEER), PEER);
   });
 
-  it("takes only an 8 character peer id", () => {
-    for (const bad of ["nothex!!", ROOM, "", null]) {
+  it("are made only from a whole key", () => {
+    for (const bad of [PEER, "nothex!!", `${KEY}0`, "", null]) {
       assert.equal(buildDirectInviteUrl(bad), "");
     }
     assert.equal(parseDirectInvite("#dm=nothex!!"), "");
     assert.equal(parseDirectInvite(""), "");
   });
 
-  // A room key is a capability and a peer id is not, so neither may be read as
-  // the other.
-  it("keeps rooms and people apart", () => {
+  it("read as the peer id everything shows and the key behind it", () => {
+    assert.deepEqual(splitDirectPeer(KEY.toUpperCase()), { id: PEER, key: KEY });
+    assert.deepEqual(splitDirectPeer(PEER), { id: PEER, key: "" });
+    assert.deepEqual(splitDirectPeer("nothex!!"), { id: "", key: "" });
+    assert.deepEqual(splitDirectPeer(null), { id: "", key: "" });
+  });
+
+  // A link opens the conversation already there, unless that one is with
+  // someone else whose key starts the same way.
+  it("open only the conversation with the key they name", () => {
+    const bound = { isDM: true, dmWith: PEER, dmWithKey: KEY, pendingAcceptance: false };
+    const other = { ...bound, dmWithKey: `${PEER}${"77".repeat(28)}` };
+    const waiting = { isDM: true, dmWith: PEER, dmWithKey: null, pendingAcceptance: true };
+    const older = { isDM: true, dmWith: PEER, pendingAcceptance: false };
+
+    assert.equal(isDirectRoomFor(bound, KEY), true);
+    assert.equal(isDirectRoomFor(other, KEY), false);
+    // A request that went to no key yet is asked again, to this one.
+    assert.equal(isDirectRoomFor(waiting, KEY), false);
+    // A conversation from before keys were kept is the one with that id.
+    assert.equal(isDirectRoomFor(older, KEY), true);
+    // An older link only has the id to go by.
+    for (const room of [bound, other, waiting, older]) assert.equal(isDirectRoomFor(room, PEER), true);
+    assert.equal(isDirectRoomFor({ ...bound, isDM: false }, KEY), false);
+    assert.equal(isDirectRoomFor({ ...bound, dmWith: "ffffffff" }, KEY), false);
+  });
+
+  // A room key is a capability and a person's key is not, so neither may be
+  // read as the other.
+  it("keep rooms and people apart", () => {
     assert.equal(parseDirectInvite(buildInviteUrl(ROOM)), "");
-    assert.equal(parseInvite(buildDirectInviteUrl(PEER)), "");
+    assert.equal(parseInvite(buildDirectInviteUrl(KEY)), "");
+    // Both are 64 hex, so a bare one is the room key it always was.
+    assert.equal(parseDirectInvite(ROOM), "");
+    assert.equal(parseInvite(`#room=${ROOM}`), ROOM);
   });
 });
 

@@ -68,6 +68,7 @@ import {
   makeTransfer,
   mergeLabels,
   nextLabel,
+  normalizeDeviceKey,
   normalizeLabel,
   normalizeLink,
   normalizeSharedRooms,
@@ -2320,7 +2321,10 @@ export async function handleChatRequest(req, sdk) {
 
       if (action === "join-dm") {
         const body = await req.json().catch(() => ({}));
-        const toId = clamp(body.toId, MAX_SENDER_LEN);
+        // A link names the whole key. A member picked from a list, and an older
+        // link, give only the peer id it starts with.
+        const toKeyNorm = normalizeDeviceKey(body.toKey);
+        const toId = toKeyNorm ? toKeyNorm.slice(0, 8) : clamp(body.toId, MAX_SENDER_LEN);
         const toUsername = clamp(body.toUsername, MAX_NAME_LEN) || toId;
         const toAvatar = sanitizeAvatar(body.toAvatar);
         const toBio = clamp(body.toBio, MAX_BIO_LEN);
@@ -2333,19 +2337,31 @@ export async function handleChatRequest(req, sdk) {
         // any other room's and handed over on the connection instead.
         const dmRoomKey = findDirectRoomKey(toIdNorm) || randomBytes(32).toString("hex");
         if (isPeerBlocked(toIdNorm)) return respond(403, { error: "Unblock this person before messaging them." });
+        const existing = savedData.rooms[dmRoomKey];
+        if (toKeyNorm && existing?.dmWithKey && existing.dmWithKey !== toKeyNorm) {
+          // Someone else whose key starts the same way. One conversation per
+          // peer id is what the rest of PeerChat goes by, so this one is not
+          // opened.
+          return respond(409, { error: "You already message someone else with this id." });
+        }
+        if (toKeyNorm && existing && !existing.dmWithKey && existing.pendingAcceptance) {
+          // A request that has gone to nobody yet goes to the key in the link.
+          existing.dmWithKey = toKeyNorm;
+          persistData();
+        }
         // Asking again clears it. A block that could never be retried would
         // make the other side's unblock meaningless, and if they are still
         // blocking us the answer comes straight back.
-        const retried = savedData.rooms[dmRoomKey];
-        if (retried?.blockedByPeer) {
-          retried.blockedByPeer = false;
-          retried.pendingAcceptance = true;
+        if (existing?.blockedByPeer) {
+          existing.blockedByPeer = false;
+          existing.pendingAcceptance = true;
           persistData();
         }
         if (!savedData.rooms[dmRoomKey]) {
           savedData.rooms[dmRoomKey] = {
             roomKey: dmRoomKey, isHost: false, isDM: true,
             dmWith: toIdNorm,
+            ...(toKeyNorm && { dmWithKey: toKeyNorm }),
             name: toUsername, bio: toBio || "", avatar: toAvatar || null,
             createdAt: Date.now(),
             createdBy: localId,
@@ -2358,9 +2374,10 @@ export async function handleChatRequest(req, sdk) {
           persistData();
         }
         await joinRoom(sdk, dmRoomKey).catch(() => {});
-        // To the one key behind that short id, bound from here on. With nobody
-        // there yet, or two keys sharing it, it waits: the invite goes out when
-        // they connect, if they are then the only one.
+        // To the key a link named, or else the one key behind that short id,
+        // bound from here on. With nobody there yet, or two keys sharing it, it
+        // waits: the invite goes out when they connect, if they are then the
+        // only one.
         const room = savedData.rooms[dmRoomKey];
         const toKey = room.dmWithKey || soleKeyFor(peers, toIdNorm);
         if (toKey) {
@@ -2805,6 +2822,8 @@ export async function handleChatRequest(req, sdk) {
       if (action === "get-profile") {
         return respond(200, {
           id: localId,
+          // The whole key, for this person's own link and QR code.
+          key: localKey,
           username: savedData.profile?.username || "",
           device: savedData.device?.label || "",
           displayName: myName(),
@@ -2842,6 +2861,7 @@ export async function handleChatRequest(req, sdk) {
             isHost: !!r.isHost,
             isDM: !!r.isDM,
             dmWith: r.dmWith || null,
+            dmWithKey: r.dmWithKey || null,
             pendingAcceptance: !!r.pendingAcceptance,
             blockedByPeer: !!r.blockedByPeer,
             isPinned: !!r.isPinned,

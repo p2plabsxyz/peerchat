@@ -2,8 +2,10 @@ import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
 import {
   buildDirectInviteUrl,
   buildInviteUrl,
+  isDirectRoomFor,
   parseDirectInvite,
   parseInvite,
+  splitDirectPeer,
 } from "./lib/invite.js";
 import { createQrMatrix } from "./lib/qrcode-matrix.js";
 import { buildDirectory, collapseMembers } from "./lib/members.js";
@@ -1093,13 +1095,15 @@ async function consumeInvite() {
   const invite = pendingInvite;
   pendingDirectInvite = null;
   pendingInvite = null;
-  // A personal link names a person rather than a room, so it asks them.
+  // A personal link names a person rather than a room, so it asks them: the
+  // whole key, or the peer id of an older link.
   if (directInvite) {
-    if (directInvite !== S.profile?.id) {
-      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[directInvite];
-      const name = S.peerProfiles[directInvite]?.username || known?.username || directInvite;
+    const { id, key } = splitDirectPeer(directInvite);
+    if (id && id !== S.profile?.id) {
+      const known = S.rooms[PRE_JOINED_ROOM_KEY]?.members?.[id];
+      const name = S.peerProfiles[id]?.username || known?.username || id;
       try {
-        await openDM(directInvite, name);
+        await openDM(id, name, key);
       } catch (err) {
         console.error("[chat] personal invite:", err);
       }
@@ -3170,15 +3174,17 @@ function renderBlockedList() {
 // sha256 of the two peer ids, and those are public, so anybody who knew both
 // could derive it and read the conversation. The backend mints a random one
 // now and hands it over on the connection.
-function directRoomWith(peerId) {
-  return Object.values(S.rooms).find((room) => room.isDM && room.dmWith === peerId) || null;
+function directRoomWith(peerId, peerKey = "") {
+  return Object.values(S.rooms).find((room) => isDirectRoomFor(room, peerKey || peerId)) || null;
 }
 
-async function openDM(peerId, peerUsername) {
+// peerKey is the whole key a link names. The request then goes to that key
+// alone; a member picked from a list has only the peer id to go by.
+async function openDM(peerId, peerUsername, peerKey = "") {
   const myId = S.profile?.id;
   if (!myId || !peerId || peerId === myId) return;
   try {
-    const existing = directRoomWith(peerId);
+    const existing = directRoomWith(peerId, peerKey);
     closeAllModals();
     if (existing && !existing.blockedByPeer) {
       await openRoom(existing.roomKey);
@@ -3187,7 +3193,7 @@ async function openDM(peerId, peerUsername) {
     // A room they blocked goes back through join-dm, which clears the flag and
     // re-sends the request. Otherwise their unblock would never reach us.
     if (existing?.blockedByPeer) {
-      await chat.joinDM({ toId: peerId, toUsername: peerUsername });
+      await chat.joinDM({ toId: peerId, toKey: peerKey, toUsername: peerUsername });
       await loadRooms();
       renderRoomList();
       await openRoom(existing.roomKey);
@@ -3204,7 +3210,7 @@ async function openDM(peerId, peerUsername) {
     $("message-input").disabled = true;
     $("send-btn").disabled = true;
     const result = await chat.joinDM({
-      toId: peerId, toUsername: peerUsername,
+      toId: peerId, toKey: peerKey, toUsername: peerUsername,
       toAvatar: peerAv, toBio: peer?.bio || "",
     });
     if (result.roomKey) {
@@ -3389,7 +3395,7 @@ function renderDiscoverQr() {
   if (!holder) return;
   holder.innerHTML = "";
 
-  const url = buildDirectInviteUrl(S.profile?.id || "");
+  const url = buildDirectInviteUrl(S.profile?.key || "");
   if (!url) {
     holder.innerHTML = '<p class="muted small">Set a display name first and your code appears here.</p>';
     return;

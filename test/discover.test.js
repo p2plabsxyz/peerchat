@@ -25,7 +25,8 @@ describe("find people", () => {
   it("offers your own code, and says what scanning it does", () => {
     assert.match(html, /id="discover-btn"/);
     assert.match(html, /id="discover-qr"/);
-    assert.match(app, /buildDirectInviteUrl\(S\.profile\?\.id \|\| ""\)/);
+    // The whole key, so the code names one person and nobody else.
+    assert.match(app, /buildDirectInviteUrl\(S\.profile\?\.key \|\| ""\)/);
     // It is a request, not a way in, and the window says so.
     assert.match(html, /sends you a message request/);
     assert.match(html, /nothing happens until you say so/);
@@ -130,8 +131,10 @@ describe("find people", () => {
     const consume = app.slice(app.indexOf("async function consumeInvite()"), app.indexOf("async function init()"));
     // Handled before the room path, and your own code does nothing.
     assert.ok(consume.indexOf("if (directInvite)") < consume.indexOf("if (!invite) return;"));
-    assert.match(consume, /directInvite !== S\.profile\?\.id/);
-    assert.match(consume, /openDM\(directInvite, name\)/);
+    assert.match(consume, /const \{ id, key \} = splitDirectPeer\(directInvite\);/);
+    assert.match(consume, /id && id !== S\.profile\?\.id/);
+    // The request goes to the key the link names.
+    assert.match(consume, /openDM\(id, name, key\)/);
     // The key is still wiped from the address bar either way.
     assert.match(take, /if \(!room && !person\) return false;/);
     assert.match(take, /history\.replaceState/);

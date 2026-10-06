@@ -93,7 +93,9 @@
         Whoever opens it mints it and sends it inside the request, which only travels on a connection
         whose public key the handshake has already proved, so it reaches that person and nobody else. It is
         sent to their full public key, never to the 8-character peer ID, which is short enough that someone
-        could make a key with the same one; while two connected keys share an ID, the request waits.
+        could make a key with the same one. A personal invite link or QR code carries the full key, so its
+        request goes to that key alone. One started from a member list, or from an older link with only the
+        ID, waits while two connected keys share that ID.
         Everything after that is the same as a room: the topic is a separate derivation, the messages
         are AES-256-GCM, and attachments are sealed with a third derivation of the same key.
       </p>
