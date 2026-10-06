@@ -85,6 +85,14 @@ const DEFAULT_ROOM_MODERATION = {
   spamRateLimit: 10,
 };
 
+// What a room's messages are checked against. directMessage is never stored
+// or sent: a room says nothing about it, a direct message just is one.
+function roomModerationFor(roomKey) {
+  const room = savedData.rooms[roomKey];
+  if (room?.isDM) return { ...DEFAULT_ROOM_MODERATION, directMessage: true };
+  return room?.moderation || null;
+}
+
 function sanitizeRoomModeration(input) {
   if (!input || typeof input !== "object") return { ...DEFAULT_ROOM_MODERATION };
   const out = { ...DEFAULT_ROOM_MODERATION };
@@ -732,7 +740,7 @@ function feedEntryToMsg(entry, roomKey) {
     const raw = consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey);
     const payload = dropFlaggedPreview(
       decodeMessagePayload(raw),
-      savedData.rooms[roomKey]?.moderation || null,
+      roomModerationFor(roomKey),
     );
     const out = {
       id: entry.id,
@@ -2146,7 +2154,7 @@ export function initChat(sdk, options = {}) {
             const _sysRoom = savedData.rooms[msg.roomKey];
             if (_sysRoom && !_sysRoom.isHost && _sysRoom.joinedAt && msg.ts && msg.ts < _sysRoom.joinedAt) continue;
             if (!trackId(msg.id)) continue;
-            const _sysRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const _sysRoomMod = roomModerationFor(msg.roomKey);
             const sysModeration = moderationCheckContent(msg.text, _sysRoomMod);
             if (sysModeration.flagged) {
               appendModerationNotice(msg.roomKey, msg.id, "Synced history", {
@@ -2172,7 +2180,7 @@ export function initChat(sdk, options = {}) {
             if (!trackId(msg.id)) continue;
             const decrypted = decryptIncomingChat(msg, "synced message");
             if (!decrypted.ok) continue;
-            const _syncRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const _syncRoomMod = roomModerationFor(msg.roomKey);
             const syncedPayload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _syncRoomMod);
             const syncModeration = moderationCheckContent(syncedPayload.text, _syncRoomMod);
             if (syncModeration.flagged) {
@@ -2215,7 +2223,7 @@ export function initChat(sdk, options = {}) {
           try {
             const decrypted = decryptIncomingChat(msg, "peer message");
             if (!decrypted.ok) continue;
-            const _peerRoomMod = savedData.rooms[msg.roomKey]?.moderation || null;
+            const _peerRoomMod = roomModerationFor(msg.roomKey);
             const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _peerRoomMod);
             moderatedPlaintext = payload.preview ? decrypted.plaintext : payload.text;
             const modResult = moderationCheck(remoteId, msg.roomKey, payload.text, undefined, {
@@ -2577,7 +2585,7 @@ export async function handleChatRequest(req, sdk) {
         if (!message) return respond(400, { error: "Empty message" });
 
         const _sendRoom = savedData.rooms[roomKey];
-        const _sendRoomMod = _sendRoom?.moderation || null;
+        const _sendRoomMod = roomModerationFor(roomKey);
 
         // A block closes the conversation both ways, so neither side can send.
         if (_sendRoom?.isDM && _sendRoom.blockedByPeer) {
