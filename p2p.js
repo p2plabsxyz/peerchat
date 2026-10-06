@@ -1803,11 +1803,19 @@ export function initChat(sdk, options = {}) {
             const joinPeerId = remoteId || msg.peerId;
             // Block join using the connection-level peer identity, not the self-reported body.
             if (moderationIsKicked(joinPeerId, msg.roomKey)) continue;
-            const joinName = clamp(msg.username, 50) ||
-              savedData.rooms[msg.roomKey]?.members?.[joinPeerId]?.username ||
-              savedData.peerProfiles?.[joinPeerId]?.username ||
-              joinPeerId;
+            // An id is no name. Phones announced themselves with theirs before
+            // they had one, and it was written into the room as who joined.
+            const realName = (name) => (name && name !== joinPeerId ? name : "");
+            const joinName = realName(clamp(msg.username, 50)) ||
+              realName(savedData.rooms[msg.roomKey]?.members?.[joinPeerId]?.username) ||
+              realName(savedData.peerProfiles?.[joinPeerId]?.username);
             const room = savedData.rooms[msg.roomKey];
+            // Someone without a name yet is not in the conversation: no member,
+            // no line, no history until they join again with one.
+            if (!joinName) {
+              sendRoomMeta(conn, msg.roomKey);
+              continue;
+            }
             // Announcing a join does not undo a removal.
             if (room && isPeerBannedFromRoom(room.bans, { peerId: joinPeerId, connectionKey: fullId })) continue;
             const alreadyKnownMember = !!(room?.members?.[joinPeerId]?.joinedAt);
@@ -2075,13 +2083,16 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "leave") {
             if (msg.roomKey && msg.peerId) {
               if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-              const leaveName = clamp(msg.username, 50) || msg.peerId;
               const room = savedData.rooms[msg.roomKey];
+              const realName = (name) => (name && name !== msg.peerId ? name : "");
+              const leaveName = realName(clamp(msg.username, 50)) ||
+                realName(room?.members?.[msg.peerId]?.username) ||
+                realName(savedData.peerProfiles?.[msg.peerId]?.username);
               if (room?.members?.[msg.peerId]) {
                 delete room.members[msg.peerId];
               }
               const sysId = msg.id || `${wireTopic(msg.roomKey)}-${msg.peerId}-left-${msg.ts || Date.now()}`;
-              if (roomFeeds[msg.roomKey] && trackId(sysId)) {
+              if (leaveName && roomFeeds[msg.roomKey] && trackId(sysId)) {
                 appendToFeed(msg.roomKey, { id: sysId, type: "system", text: `${leaveName} left`, ts: msg.ts || Date.now() }).catch(() => {});
               }
               debouncePersist();
