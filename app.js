@@ -3203,6 +3203,12 @@ function directRoomWith(peerId, peerKey = "") {
   return Object.values(S.rooms).find((room) => isDirectRoomFor(room, peerKey || peerId)) || null;
 }
 
+// Your chat with yourself. Your devices all join it, so messaging any of them
+// opens it rather than starting another one.
+function chatWithYourself() {
+  return Object.values(S.rooms).find((room) => room.isDM && room.dmWith && isOwnId(room.dmWith) && !room.pendingAcceptance) || null;
+}
+
 // Your chat with this person, when this is another of their devices: it is in
 // that chat, under their name.
 function chatWithPersonOf(peerId, peerName) {
@@ -3226,7 +3232,8 @@ async function openDM(peerId, peerUsername, peerKey = "") {
   try {
     // A link names one device. Picked from a list, it may be another device of
     // someone you already talk to.
-    const existing = directRoomWith(peerId, peerKey) || (peerKey ? null : chatWithPersonOf(peerId, peerUsername));
+    const existing = directRoomWith(peerId, peerKey) ||
+      (peerKey ? null : isOwnId(peerId) ? chatWithYourself() : chatWithPersonOf(peerId, peerUsername));
     closeAllModals();
     if (existing && !existing.blockedByPeer) {
       await openRoom(existing.roomKey);

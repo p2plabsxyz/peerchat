@@ -29,7 +29,9 @@ describe("messaging someone's other device", () => {
   it("is where the page looks, for a device picked from a list", () => {
     const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
     const open = app.slice(app.indexOf("async function openDM("), app.indexOf("async function removeRoomMember("));
-    assert.match(open, /directRoomWith\(peerId, peerKey\) \|\| \(peerKey \? null : chatWithPersonOf\(peerId, peerUsername\)\)/);
+    assert.match(open, /directRoomWith\(peerId, peerKey\) \|\|\s+\(peerKey \? null : isOwnId\(peerId\) \? chatWithYourself\(\) : chatWithPersonOf\(peerId, peerUsername\)\)/);
+    // One chat with yourself, whichever of your devices you press Message on.
+    assert.match(app, /function chatWithYourself\(\) \{\s+return Object\.values\(S\.rooms\)\.find\(\(room\) => room\.isDM && room\.dmWith && isOwnId\(room\.dmWith\) && !room\.pendingAcceptance\)/);
     const find = app.slice(app.indexOf("function chatWithPersonOf("), app.indexOf("async function openDM("));
     assert.match(find, /if \(isOwnId\(peerId\)\) return null;/);
     assert.match(find, /!room\.pendingAcceptance && !room\.blockedByPeer && !isOwnId\(room\.dmWith\)/);
