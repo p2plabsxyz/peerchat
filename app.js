@@ -38,6 +38,7 @@ import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 import { menuPosition } from "./lib/menu-position.js";
+import { findMentions, mentionQueryStart, mentionsPerson } from "./lib/mentions.js";
 import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
 const S = {
@@ -102,7 +103,6 @@ const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;
 function esc(s) { return s.replace(/[&<>"']/g, (c) => ESC[c]); }
 
 const USERNAME_ALLOWED_RE = /^[A-Za-z0-9]+(?: [A-Za-z0-9]+)*$/;
-const MENTION_IN_ESCAPED_TEXT_RE = /(^|[^\w])@([A-Za-z0-9]+(?: [A-Za-z0-9]+)*)/g;
 
 function normalizeUsernameInput(s) {
   return String(s ?? "").trim().replace(/\s+/g, " ");
@@ -125,10 +125,27 @@ function validateUsernameOrAlert(username) {
   return u;
 }
 
+// Names never have anything esc() changes, so they read the same escaped.
 function mentionizeEscapedPlain(escapedPlain) {
-  const withMentions = escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
-    `${prefix}<span class="mention" data-mention="${esc(name)}">@${esc(name)}</span>`);
-  return applyMarkdownFormatting(withMentions);
+  if (!escapedPlain.includes("@")) return applyMarkdownFormatting(escapedPlain);
+  const mentions = findMentions(escapedPlain, roomMentionNames(S.activeRoom));
+  let withMentions = "";
+  let last = 0;
+  for (const { start, end, name } of mentions) {
+    withMentions += escapedPlain.slice(last, start) +
+      `<span class="mention" data-mention="${esc(name)}">${escapedPlain.slice(start, end)}</span>`;
+    last = end;
+  }
+  return applyMarkdownFormatting(withMentions + escapedPlain.slice(last));
+}
+
+// The names a mention in a room can be: everyone it knows, and you.
+function roomMentionNames(roomKey) {
+  const names = [S.profile?.username, S.profile?.displayName];
+  for (const [id, member] of Object.entries(S.rooms[roomKey]?.members || {})) {
+    names.push(member?.username, S.peerProfiles[id]?.username);
+  }
+  return names;
 }
 
 function applyMarkdownFormatting(escapedText) {
@@ -2262,14 +2279,14 @@ function connectGlobalSSE() {
       if (!isSystem && !isOwnId(msg.sender)) {
         if (rk !== S.activeRoom) {
           room.unreadCount = (room.unreadCount || 0) + 1;
-          if (msgText && isMentioned(msgText)) {
+          if (msgText && isMentioned(msgText, rk)) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
             playSound("mention");
           } else if (!room.isMuted) {
             playSound("message");
           }
         } else {
-          if (msgText && isMentioned(msgText) && !room.isMuted) {
+          if (msgText && isMentioned(msgText, rk) && !room.isMuted) {
             playSound("mention");
           } else if (!room.isMuted) {
             playSound("receive");
@@ -2556,9 +2573,10 @@ function connectGlobalSSE() {
   }
 }
 
-function isMentioned(message) {
+// Named on any of your devices: "@ada@mobile" is you on your desktop too.
+function isMentioned(message, roomKey) {
   if (!S.profile?.username) return false;
-  return message.includes("@" + S.profile.username);
+  return mentionsPerson(message, roomMentionNames(roomKey), [S.profile.username, S.profile.displayName]);
 }
 
 $('create-room-btn')?.addEventListener('click', () => {
@@ -2694,9 +2712,9 @@ function buildMentionPopup() {
   const val = input.value;
   const cursor = input.selectionStart;
   const before = val.slice(0, cursor);
-  const atIdx = before.lastIndexOf("@");
+  const atIdx = mentionQueryStart(before);
 
-  if (atIdx === -1 || (atIdx > 0 && /\S/.test(before[atIdx - 1]))) {
+  if (atIdx === -1) {
     popup.classList.remove("open"); mentionIdx = -1; return;
   }
 
@@ -2734,7 +2752,8 @@ function insertMention(m) {
   const val = input.value;
   const cursor = input.selectionStart;
   const before = val.slice(0, cursor);
-  const atIdx = before.lastIndexOf("@");
+  const atIdx = mentionQueryStart(before);
+  if (atIdx === -1) return;
   const newVal = val.slice(0, atIdx) + "@" + m.username + "  " + val.slice(cursor);
   input.value = newVal;
   input.selectionStart = input.selectionEnd = atIdx + m.username.length + 3;

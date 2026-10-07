@@ -75,6 +75,7 @@ import {
   normalizeTransfer,
 } from "./lib/device-link.js";
 import { checkRoomProof, roomProof } from "./lib/room-proof.js";
+import { mentionsPerson } from "./lib/mentions.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -1333,7 +1334,8 @@ async function setUpFeed(sdk, roomKey) {
         if (!isSystem && !isReaction && roomKey !== activeRoom && msg.sender !== localId) {
           room.unreadCount = (room.unreadCount || 0) + 1;
           const uname = savedData.profile?.username;
-          if (uname && msgText.includes("@" + uname)) {
+          const names = Object.values(room.members || {}).map((member) => member?.username);
+          if (uname && mentionsPerson(msgText, names, [uname, myName()])) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
           }
         }
