@@ -21,7 +21,9 @@ describe("messages from your own devices", () => {
   it("shows them as yours and calls a chat with one of them You", async () => {
     const p2p = await read("p2p.js");
     const app = await read("app.js");
-    assert.match(p2p, /name: r\.isDM && r\.dmWith && siblingIds\.has\(String\(r\.dmWith\)\.slice\(0, 8\)\.toLowerCase\(\)\)\s+\? "You"/);
+    // One name for it wherever a room goes out: the list and every update.
+    assert.match(p2p, /function shownRoomName\(roomKey, room\) \{\s+if \(room\.isDM && room\.dmWith && siblingIds\.has\(normPeerId\(room\.dmWith\)\.slice\(0, 8\)\)\) return "You";/);
+    assert.match(p2p, /name: shownRoomName\(k, r\),/);
     assert.match(app, /function makeMsgEl\(msg\) \{\s+const self = isOwnId\(msg\.sender\);/);
     assert.match(app, /room\.name = isOwnId\(peerId\) \? "You" : username;/);
     // Not unread, and no sound, for what you wrote elsewhere.

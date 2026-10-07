@@ -2158,8 +2158,9 @@ function refreshActiveChatForPeer(peerId, username, peerAvatar) {
   if (!S.activeRoom) return;
   const activeRoom = S.rooms[S.activeRoom];
   if (activeRoom?.isDM && peerIdEq(activeRoom.dmWith, peerId)) {
-    $("chat-room-name").textContent = username;
-    $("chat-room-avatar").src = avatar(username, 32, peerAvatar);
+    const shown = isOwnId(peerId) ? "You" : username;
+    $("chat-room-name").textContent = shown;
+    $("chat-room-avatar").src = avatar(shown, 32, peerAvatar);
   }
   const msgs = S.messages[S.activeRoom];
   if (!msgs?.length) return;
@@ -2322,6 +2323,10 @@ function connectGlobalSSE() {
       const prevModeration = room.moderation;
 
       Object.assign(room, data);
+      if (!room.pendingAcceptance && S.pendingDMs?.[data.roomKey]) {
+        delete S.pendingDMs[data.roomKey];
+        renderRequestsButton();
+      }
 
       room.unreadCount = prevUnread;
       room.unreadMentions = prevMentions;
@@ -2509,7 +2514,7 @@ function connectGlobalSSE() {
       const { roomKey, fromId, fromUsername, fromAvatar, fromBio } = JSON.parse(ev.data);
       const room = S.rooms[roomKey];
       if (room?.isDM) {
-        if (fromUsername) room.name = fromUsername;
+        if (fromUsername) room.name = isOwnId(fromId) ? "You" : fromUsername;
         room.avatar = fromAvatar || null;
         room.bio = fromBio || "";
         room.pendingAcceptance = false;

@@ -655,12 +655,26 @@ function broadcastGlobal(event, data) {
   for (let i = dead.length - 1; i >= 0; i--) globalSseClients.splice(dead[i], 1);
 }
 
+// This device, or another of this person's own, by the short id messages carry.
+function isOwnSender(peerId) {
+  const id = normPeerId(peerId);
+  return !!id && (id === normPeerId(localId) || siblingIds.has(id.slice(0, 8)));
+}
+
+// A direct chat with another of this person's devices is a chat with
+// themselves. It is stored under the other device's name, the one its request
+// or answer came with, and every update used to put that name back.
+function shownRoomName(roomKey, room) {
+  if (room.isDM && room.dmWith && siblingIds.has(normPeerId(room.dmWith).slice(0, 8))) return "You";
+  return room.name || roomKey.slice(0, 8) + "...";
+}
+
 function roomUpdatePayload(roomKey) {
   const room = savedData.rooms[roomKey];
   if (!room) return null;
   return {
     roomKey,
-    name: room.name || roomKey.slice(0, 8) + "...",
+    name: shownRoomName(roomKey, room),
     bio: room.bio || "",
     avatar: room.avatar || null,
     isDM: !!room.isDM,
@@ -1138,6 +1152,52 @@ async function dropRoomLocally(sdk, roomKey) {
   }
 }
 
+// Opens a request: the conversation is bound to the key the invite came from,
+// joined here, offered to this person's other devices and answered.
+async function acceptPendingDM(sdk, dmRoomKey) {
+  const pending = savedData.pendingDMs?.[dmRoomKey];
+  if (!pending) return false;
+  const peerNorm = normPeerId(pending.fromId);
+  // A request kept from before keys were recorded falls back to the only key
+  // behind the short id.
+  const fromKey = pending.fromKey || soleKeyFor(peers, peerNorm);
+  savedData.rooms[dmRoomKey] = {
+    roomKey: dmRoomKey, isHost: false, isDM: true,
+    dmWith: peerNorm,
+    ...(fromKey && { dmWithKey: fromKey }),
+    name: pending.fromUsername, bio: pending.fromBio || "",
+    avatar: pending.fromAvatar || null,
+    createdAt: pending.receivedAt || Date.now(),
+    createdBy: peerNorm, createdByName: pending.fromUsername,
+    isPinned: false, isMuted: false,
+    unreadCount: 0, unreadMentions: 0,
+    lastMessage: null, members: {},
+    pendingAcceptance: false,
+  };
+  delete savedData.pendingDMs[dmRoomKey];
+  clearRoomLeft(dmRoomKey);
+  persistData();
+  await joinRoom(sdk, dmRoomKey).catch(() => {});
+  offerRoomToSiblings(dmRoomKey);
+  const acceptMsg = JSON.stringify({
+    type: "dm-accept", roomKey: dmRoomKey,
+    fromId: localId, fromUsername: myName() || localId,
+    fromAvatar: savedData.profile?.avatar || null,
+    fromBio: savedData.profile?.bio || "",
+  }) + "\n";
+  relayToKey(fromKey, acceptMsg);
+  return true;
+}
+
+// Another of this person's devices asked: there is nobody to ask, so the chat
+// with themselves opens without a request.
+function acceptSiblingDM(roomKey) {
+  if (!chatSdk) return;
+  acceptPendingDM(chatSdk, roomKey)
+    .then((accepted) => { if (accepted) emitRoomUpdate(roomKey); })
+    .catch((error) => console.error(`[chat] Chat with your other device ${roomKey.slice(0, 8)}: ${error.message}`));
+}
+
 /** The room this device already keeps for a conversation with one person. */
 function findDirectRoomKey(peerId) {
   const wanted = normPeerId(peerId);
@@ -1331,7 +1391,8 @@ async function setUpFeed(sdk, roomKey) {
           };
         }
 
-        if (!isSystem && !isReaction && roomKey !== activeRoom && msg.sender !== localId) {
+        // What you wrote on another of your devices is not news to you.
+        if (!isSystem && !isReaction && roomKey !== activeRoom && !isOwnSender(msg.sender)) {
           room.unreadCount = (room.unreadCount || 0) + 1;
           const uname = savedData.profile?.username;
           const names = Object.values(room.members || {}).map((member) => member?.username);
@@ -1339,7 +1400,7 @@ async function setUpFeed(sdk, roomKey) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
           }
         }
-        if (isReaction && roomKey !== activeRoom && msg.sender !== localId) {
+        if (isReaction && roomKey !== activeRoom && !isOwnSender(msg.sender)) {
           room.unreadCount = (room.unreadCount || 0) + 1;
         }
         emitRoomUpdate(roomKey);
@@ -1764,8 +1825,14 @@ export function initChat(sdk, options = {}) {
               const first = entry && !entry.sibling;
               if (entry) entry.sibling = true;
               takeSiblingProfile(msg.link, msg.avatar || null);
-              // Every room this device is in, once per connection.
-              if (first) sendRoomsToSibling(conn, sharedRoomEntries());
+              if (first) {
+                // Every room this device is in, once per connection.
+                sendRoomsToSibling(conn, sharedRoomEntries());
+                // And a chat it asked for before it had proved itself here.
+                for (const [rk, pending] of Object.entries(savedData.pendingDMs || {})) {
+                  if (pending?.fromKey === fullId) acceptSiblingDM(rk);
+                }
+              }
             }
             if (msg.username) {
               const uname = clamp(msg.username, 50);
@@ -1919,6 +1986,10 @@ export function initChat(sdk, options = {}) {
                 receivedAt: Date.now(),
               };
               persistData();
+            }
+            if (siblingFor(conn) && savedData.pendingDMs[msg.roomKey]?.fromKey === fullId) {
+              acceptSiblingDM(msg.roomKey);
+              continue;
             }
             broadcastGlobal("dm-invite", {
               roomKey: msg.roomKey, fromId: remoteId, fromUsername: fromName,
@@ -2483,38 +2554,8 @@ export async function handleChatRequest(req, sdk) {
         const body = await req.json().catch(() => ({}));
         const dmRoomKey = body.roomKey;
         if (!dmRoomKey || !isValidRoomKey(dmRoomKey)) return respond(400, { error: "Invalid room key" });
-        if (!savedData.pendingDMs) savedData.pendingDMs = {};
-        const pending = savedData.pendingDMs[dmRoomKey];
-        if (!pending) return respond(404, { error: "No pending DM invite" });
-        const peerNorm = normPeerId(pending.fromId);
-        // Bound to the key the invite came from. A request kept from before
-        // keys were recorded falls back to the only key behind the short id.
-        const fromKey = pending.fromKey || soleKeyFor(peers, peerNorm);
-        savedData.rooms[dmRoomKey] = {
-          roomKey: dmRoomKey, isHost: false, isDM: true,
-          dmWith: peerNorm,
-          ...(fromKey && { dmWithKey: fromKey }),
-          name: pending.fromUsername, bio: pending.fromBio || "",
-          avatar: pending.fromAvatar || null,
-          createdAt: pending.receivedAt || Date.now(),
-          createdBy: peerNorm, createdByName: pending.fromUsername,
-          isPinned: false, isMuted: false,
-          unreadCount: 0, unreadMentions: 0,
-          lastMessage: null, members: {},
-          pendingAcceptance: false,
-        };
-        delete savedData.pendingDMs[dmRoomKey];
-        clearRoomLeft(dmRoomKey);
-        persistData();
-        await joinRoom(sdk, dmRoomKey).catch(() => {});
-        offerRoomToSiblings(dmRoomKey);
-        const acceptMsg = JSON.stringify({
-          type: "dm-accept", roomKey: dmRoomKey,
-          fromId: localId, fromUsername: myName() || localId,
-          fromAvatar: savedData.profile?.avatar || null,
-          fromBio: savedData.profile?.bio || "",
-        }) + "\n";
-        relayToKey(fromKey, acceptMsg);
+        if (!savedData.pendingDMs?.[dmRoomKey]) return respond(404, { error: "No pending DM invite" });
+        await acceptPendingDM(sdk, dmRoomKey);
         return respond(200, { roomKey: dmRoomKey });
       }
 
@@ -2852,11 +2893,7 @@ export async function handleChatRequest(req, sdk) {
         for (const [k, r] of Object.entries(savedData.rooms)) {
           rooms.push({
             roomKey: k,
-            // A direct chat with another of this person's devices is a chat
-            // with themselves.
-            name: r.isDM && r.dmWith && siblingIds.has(String(r.dmWith).slice(0, 8).toLowerCase())
-              ? "You"
-              : r.name || k.slice(0, 8) + "...",
+            name: shownRoomName(k, r),
             bio: r.bio || "",
             link: r.link || "",
             avatar: r.avatar || null,
