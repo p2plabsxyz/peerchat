@@ -39,6 +39,7 @@ import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 import { menuPosition } from "./lib/menu-position.js";
 import { findMentions, mentionQueryStart, mentionsPerson } from "./lib/mentions.js";
+import { chatWithPerson } from "./lib/person-chat.js";
 import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
 const S = {
@@ -3202,13 +3203,30 @@ function directRoomWith(peerId, peerKey = "") {
   return Object.values(S.rooms).find((room) => isDirectRoomFor(room, peerKey || peerId)) || null;
 }
 
+// Your chat with this person, when this is another of their devices: it is in
+// that chat, under their name.
+function chatWithPersonOf(peerId, peerName) {
+  if (isOwnId(peerId)) return null;
+  const chats = Object.values(S.rooms)
+    .filter((room) => room.isDM && room.dmWith && !room.pendingAcceptance && !room.blockedByPeer && !isOwnId(room.dmWith))
+    .map((room) => ({
+      room,
+      dmWith: room.dmWith,
+      partnerName: room.members?.[room.dmWith]?.username || S.peerProfiles[room.dmWith]?.username || room.name,
+      members: Object.keys(room.members || {}),
+    }));
+  return chatWithPerson(chats, peerId, peerName)?.room || null;
+}
+
 // peerKey is the whole key a link names. The request then goes to that key
 // alone; a member picked from a list has only the peer id to go by.
 async function openDM(peerId, peerUsername, peerKey = "") {
   const myId = S.profile?.id;
   if (!myId || !peerId || peerId === myId) return;
   try {
-    const existing = directRoomWith(peerId, peerKey);
+    // A link names one device. Picked from a list, it may be another device of
+    // someone you already talk to.
+    const existing = directRoomWith(peerId, peerKey) || (peerKey ? null : chatWithPersonOf(peerId, peerUsername));
     closeAllModals();
     if (existing && !existing.blockedByPeer) {
       await openRoom(existing.roomKey);
