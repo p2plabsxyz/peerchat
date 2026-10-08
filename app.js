@@ -38,6 +38,8 @@ import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 import { menuPosition } from "./lib/menu-position.js";
+import { findMentions, mentionQueryStart, mentionsPerson } from "./lib/mentions.js";
+import { chatWithPerson } from "./lib/person-chat.js";
 import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
 const S = {
@@ -102,7 +104,6 @@ const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;
 function esc(s) { return s.replace(/[&<>"']/g, (c) => ESC[c]); }
 
 const USERNAME_ALLOWED_RE = /^[A-Za-z0-9]+(?: [A-Za-z0-9]+)*$/;
-const MENTION_IN_ESCAPED_TEXT_RE = /(^|[^\w])@([A-Za-z0-9]+(?: [A-Za-z0-9]+)*)/g;
 
 function normalizeUsernameInput(s) {
   return String(s ?? "").trim().replace(/\s+/g, " ");
@@ -125,10 +126,27 @@ function validateUsernameOrAlert(username) {
   return u;
 }
 
+// Names never have anything esc() changes, so they read the same escaped.
 function mentionizeEscapedPlain(escapedPlain) {
-  const withMentions = escapedPlain.replace(MENTION_IN_ESCAPED_TEXT_RE, (match, prefix, name) =>
-    `${prefix}<span class="mention" data-mention="${esc(name)}">@${esc(name)}</span>`);
-  return applyMarkdownFormatting(withMentions);
+  if (!escapedPlain.includes("@")) return applyMarkdownFormatting(escapedPlain);
+  const mentions = findMentions(escapedPlain, roomMentionNames(S.activeRoom));
+  let withMentions = "";
+  let last = 0;
+  for (const { start, end, name } of mentions) {
+    withMentions += escapedPlain.slice(last, start) +
+      `<span class="mention" data-mention="${esc(name)}">${escapedPlain.slice(start, end)}</span>`;
+    last = end;
+  }
+  return applyMarkdownFormatting(withMentions + escapedPlain.slice(last));
+}
+
+// The names a mention in a room can be: everyone it knows, and you.
+function roomMentionNames(roomKey) {
+  const names = [S.profile?.username, S.profile?.displayName];
+  for (const [id, member] of Object.entries(S.rooms[roomKey]?.members || {})) {
+    names.push(member?.username, S.peerProfiles[id]?.username);
+  }
+  return names;
 }
 
 function applyMarkdownFormatting(escapedText) {
@@ -699,8 +717,10 @@ function proseHtml(text) {
   )).join("");
 }
 
+// hs:// is how a P2PMD note is shared. It stayed plain text here while the
+// phone made it a link; the browser opens P2PMD with the key in the join box.
 function linkifyLine(text) {
-  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+  const re = /(https?|hs|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
@@ -2141,8 +2161,9 @@ function refreshActiveChatForPeer(peerId, username, peerAvatar) {
   if (!S.activeRoom) return;
   const activeRoom = S.rooms[S.activeRoom];
   if (activeRoom?.isDM && peerIdEq(activeRoom.dmWith, peerId)) {
-    $("chat-room-name").textContent = username;
-    $("chat-room-avatar").src = avatar(username, 32, peerAvatar);
+    const shown = isOwnId(peerId) ? "You" : username;
+    $("chat-room-name").textContent = shown;
+    $("chat-room-avatar").src = avatar(shown, 32, peerAvatar);
   }
   const msgs = S.messages[S.activeRoom];
   if (!msgs?.length) return;
@@ -2262,14 +2283,14 @@ function connectGlobalSSE() {
       if (!isSystem && !isOwnId(msg.sender)) {
         if (rk !== S.activeRoom) {
           room.unreadCount = (room.unreadCount || 0) + 1;
-          if (msgText && isMentioned(msgText)) {
+          if (msgText && isMentioned(msgText, rk)) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
             playSound("mention");
           } else if (!room.isMuted) {
             playSound("message");
           }
         } else {
-          if (msgText && isMentioned(msgText) && !room.isMuted) {
+          if (msgText && isMentioned(msgText, rk) && !room.isMuted) {
             playSound("mention");
           } else if (!room.isMuted) {
             playSound("receive");
@@ -2305,6 +2326,10 @@ function connectGlobalSSE() {
       const prevModeration = room.moderation;
 
       Object.assign(room, data);
+      if (!room.pendingAcceptance && S.pendingDMs?.[data.roomKey]) {
+        delete S.pendingDMs[data.roomKey];
+        renderRequestsButton();
+      }
 
       room.unreadCount = prevUnread;
       room.unreadMentions = prevMentions;
@@ -2492,7 +2517,7 @@ function connectGlobalSSE() {
       const { roomKey, fromId, fromUsername, fromAvatar, fromBio } = JSON.parse(ev.data);
       const room = S.rooms[roomKey];
       if (room?.isDM) {
-        if (fromUsername) room.name = fromUsername;
+        if (fromUsername) room.name = isOwnId(fromId) ? "You" : fromUsername;
         room.avatar = fromAvatar || null;
         room.bio = fromBio || "";
         room.pendingAcceptance = false;
@@ -2556,9 +2581,10 @@ function connectGlobalSSE() {
   }
 }
 
-function isMentioned(message) {
+// Named on any of your devices: "@ada@mobile" is you on your desktop too.
+function isMentioned(message, roomKey) {
   if (!S.profile?.username) return false;
-  return message.includes("@" + S.profile.username);
+  return mentionsPerson(message, roomMentionNames(roomKey), [S.profile.username, S.profile.displayName]);
 }
 
 $('create-room-btn')?.addEventListener('click', () => {
@@ -2694,9 +2720,9 @@ function buildMentionPopup() {
   const val = input.value;
   const cursor = input.selectionStart;
   const before = val.slice(0, cursor);
-  const atIdx = before.lastIndexOf("@");
+  const atIdx = mentionQueryStart(before);
 
-  if (atIdx === -1 || (atIdx > 0 && /\S/.test(before[atIdx - 1]))) {
+  if (atIdx === -1) {
     popup.classList.remove("open"); mentionIdx = -1; return;
   }
 
@@ -2734,7 +2760,8 @@ function insertMention(m) {
   const val = input.value;
   const cursor = input.selectionStart;
   const before = val.slice(0, cursor);
-  const atIdx = before.lastIndexOf("@");
+  const atIdx = mentionQueryStart(before);
+  if (atIdx === -1) return;
   const newVal = val.slice(0, atIdx) + "@" + m.username + "  " + val.slice(cursor);
   input.value = newVal;
   input.selectionStart = input.selectionEnd = atIdx + m.username.length + 3;
@@ -3178,13 +3205,40 @@ function directRoomWith(peerId, peerKey = "") {
   return Object.values(S.rooms).find((room) => isDirectRoomFor(room, peerKey || peerId)) || null;
 }
 
+// Your chat with yourself, when the device you are messaging is in it. Your
+// devices all join it, so messaging any of them opens it rather than starting
+// another one. One it is not in, such as a chat with a reinstalled phone's old
+// key, would never reach it.
+function chatWithYourself(peerId) {
+  return Object.values(S.rooms).find((room) => room.isDM && room.dmWith && isOwnId(room.dmWith) &&
+    !room.pendingAcceptance && Object.keys(room.members || {}).some((id) => peerIdEq(id, peerId))) || null;
+}
+
+// Your chat with this person, when this is another of their devices: it is in
+// that chat, under their name.
+function chatWithPersonOf(peerId, peerName) {
+  if (isOwnId(peerId)) return null;
+  const chats = Object.values(S.rooms)
+    .filter((room) => room.isDM && room.dmWith && !room.pendingAcceptance && !room.blockedByPeer && !isOwnId(room.dmWith))
+    .map((room) => ({
+      room,
+      dmWith: room.dmWith,
+      partnerName: room.members?.[room.dmWith]?.username || S.peerProfiles[room.dmWith]?.username || room.name,
+      members: Object.keys(room.members || {}),
+    }));
+  return chatWithPerson(chats, peerId, peerName)?.room || null;
+}
+
 // peerKey is the whole key a link names. The request then goes to that key
 // alone; a member picked from a list has only the peer id to go by.
 async function openDM(peerId, peerUsername, peerKey = "") {
   const myId = S.profile?.id;
   if (!myId || !peerId || peerId === myId) return;
   try {
-    const existing = directRoomWith(peerId, peerKey);
+    // A link names one device. Picked from a list, it may be another device of
+    // someone you already talk to.
+    const existing = directRoomWith(peerId, peerKey) ||
+      (peerKey ? null : isOwnId(peerId) ? chatWithYourself(peerId) : chatWithPersonOf(peerId, peerUsername));
     closeAllModals();
     if (existing && !existing.blockedByPeer) {
       await openRoom(existing.roomKey);
