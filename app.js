@@ -717,8 +717,10 @@ function proseHtml(text) {
   )).join("");
 }
 
+// hs:// is how a P2PMD note is shared. It stayed plain text here while the
+// phone made it a link; the browser opens P2PMD with the key in the join box.
 function linkifyLine(text) {
-  const re = /(https?|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+  const re = /(https?|hs|hyper|ipfs|ipns|peersky|bt|bittorrent):\/\/[^\s<>"']+|magnet:\?[^\s<>"']+|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const parts = [];
   let last = 0, m;
   while ((m = re.exec(text)) !== null) {
