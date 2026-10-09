@@ -23,6 +23,7 @@ import {
 } from "./lib/attachment-crypto.js";
 import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { createPresenceHold, presenceWithHeld } from "./lib/presence.js";
+import { collectLoadedMedia, restoreLoadedMedia } from "./lib/kept-media.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
@@ -236,6 +237,7 @@ function expandLargeMedia(wrap) {
   const isVideo = mediaType === 'video';
   const el = document.createElement(isVideo ? 'video' : 'img');
   el.className = 'msg-file-img';
+  el.dataset.mediaKey = url;
   if (isVideo) {
     el.controls = true;
     el.preload = 'metadata';
@@ -661,6 +663,7 @@ function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("[data-enc-src]")) {
     const url = el.getAttribute("data-enc-src");
     el.removeAttribute("data-enc-src");
+    el.dataset.mediaKey = url;
     const own = isOwnMessageMedia(el);
     resolveDecryptedUrl(url, roomRefs.key(el.getAttribute("data-file-room")), el.getAttribute("data-file-name"))
       .then((src) => (own ? (el.src = src) : screenIncomingMedia(el, src)))
@@ -672,6 +675,7 @@ function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("img.msg-file-img[src], video.msg-file-img[src]")) {
     if (el.dataset.screened) continue;
     el.dataset.screened = "1";
+    if (!el.dataset.mediaKey) el.dataset.mediaKey = el.getAttribute("src") || "";
     if (isOwnMessageMedia(el)) continue;
     const src = el.getAttribute("src");
     if (src) void screenIncomingMedia(el, src);
@@ -1583,6 +1587,7 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
   const container = $("messages");
   const savedScroll = container.scrollTop;
   const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+  const loadedMedia = collectLoadedMedia(container.querySelectorAll(".msg-file-img"));
   container.innerHTML = "";
   const dz = document.createElement("div");
   dz.id = "dropzone";
@@ -1624,6 +1629,8 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
     m.roomKey = m.roomKey || roomKey;
     container.appendChild(makeMsgEl(m));
   }
+  // Before the scroll is set, so the pane already has its pictures' heights.
+  restoreLoadedMedia(container.querySelectorAll(".msg-file-img, [data-large-type]"), loadedMedia);
   if (scrollToBottom) {
     const divider = document.getElementById("unread-divider");
     // Only when the unread run starts above the last screenful. Two new
@@ -2184,7 +2191,9 @@ function refreshActiveChatForPeer(peerId, username, peerAvatar) {
   if (!msgs?.length) return;
   let changed = false;
   for (const m of msgs) {
-    if (peerIdEq(m.sender, peerId)) { m.senderName = username; changed = true; }
+    // Only a new name. Each connection announces the same one again, and a
+    // rebuild for every one of them blinked the pictures in the room.
+    if (peerIdEq(m.sender, peerId) && m.senderName !== username) { m.senderName = username; changed = true; }
   }
   if (changed) renderMessages(S.activeRoom, false);
 }
@@ -2201,7 +2210,10 @@ async function refreshActiveRoom() {
       }
       const { messages: fresh } = await chat.getHistory(S.activeRoom);
       const _existing = S.messages[S.activeRoom] || [];
-      if (fresh && fresh.length > _existing.length) {
+      // Counted as the buffer is, as the sync check does: raw history carries
+      // reactions that never reach the pane, so a room with one rebuilt itself
+      // after every sync with every peer, and its pictures blinked.
+      if (fresh && fresh.filter(chatMessageRenders).length > _existing.length) {
         const firstRender = _existing.length === 0;
         S.messages[S.activeRoom] = extractReactions(S.activeRoom, mergeWithHistory(_existing, fresh));
         renderMessages(S.activeRoom, firstRender);
