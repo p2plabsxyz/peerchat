@@ -58,6 +58,11 @@ async function idleIds() {
   return { online: data.onlinePeers, idle: data.idlePeers };
 }
 
+async function connectionsTo(id) {
+  const res = await handleChatRequest({ url: "hyper://chat?action=net-status", method: "GET", json: async () => ({}) }, sdk);
+  return JSON.parse(await res.text()).peers.filter((peer) => peer.id === id).length;
+}
+
 const open = [];
 
 async function connect({ keyPair } = {}) {
@@ -153,17 +158,23 @@ describe("idle", () => {
     bea.send({ type: "presence", state: "idle" });
     await eventually(async () => (await idleIds()).idle.includes(id), "bea away again");
 
-    // A new connection starts as here: an older build never says either way,
-    // and a newer one says again as the room opens on it.
+    // Back from a redial they are as away as they said, not here until they
+    // say it again: taking each new connection as here turned the dot green on
+    // every redial. Only a build that says can be away, and it says again as
+    // the room opens on the new connection.
     bea.transport.close();
     await bea.pair.close().catch(() => {});
     const again = await connect({ keyPair: BEA });
-    await eventually(async () => (await idleIds()).online.includes(id), "bea online again");
-    assert.equal((await idleIds()).idle.includes(id), false);
+    await eventually(async () => (await connectionsTo(id)) === 1, "bea online again");
+    assert.equal((await idleIds()).idle.includes(id), true);
+    // A second connection alongside the first changes nothing either.
+    await connect({ keyPair: BEA });
+    await eventually(async () => (await connectionsTo(id)) === 2, "bea on two connections");
+    assert.equal((await idleIds()).idle.includes(id), true);
     again.send(topicsFrame(again.pair.clientStream, [ROOM]));
     await eventually(() => again.presence().length, "the room opening again");
-    again.send({ type: "presence", state: "idle" });
-    await eventually(async () => (await idleIds()).idle.includes(id), "bea away on the new connection");
+    again.send({ type: "presence", state: "active" });
+    await eventually(async () => !(await idleIds()).idle.includes(id), "bea back on the new connection");
   });
 
   it("stops listening to a peer that will not stop saying it", async () => {
@@ -204,7 +215,12 @@ describe("idle on screen", async () => {
     assert.match(css, /\.online-dot\.idle\s+\{ background: #f0b232; \}/);
     assert.match(app, /const PRESENCE_LABELS = \{ online: "Online", idle: "Idle", offline: "Offline" \};/);
     assert.match(app, /es\.addEventListener\("peer-idle"/);
-    assert.match(app, /S\.idlePeers = new Set\(data\.idlePeers \|\| \[\]\);/);
+    // Every list of who is here keeps whoever is between connections, away
+    // included: the room list's refresh took the server's lists as they were,
+    // and an away dot went green and back on each redial.
+    assert.match(app, /takePresenceLists\(data\.onlinePeers, data\.idlePeers\);/);
+    assert.match(app, /takePresenceLists\(ids, Array\.isArray\(idle\) \? idle : \[\]\);/);
+    assert.match(app, /held: presenceHold\.heldIds\(\),\s+wasIdle: S\.idlePeers,/);
     // The member list, the user card and the people search all ask the same.
     assert.match(app, /<span class="online-dot \$\{peerPresence\(dmId\)\}">/);
     assert.match(app, /const dot = isOn \? \(isIdle \? "idle" : "online"\) : "offline";/);

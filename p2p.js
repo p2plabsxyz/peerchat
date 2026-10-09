@@ -76,6 +76,7 @@ import {
 } from "./lib/device-link.js";
 import { checkRoomProof, roomProof } from "./lib/room-proof.js";
 import { mentionsPerson } from "./lib/mentions.js";
+import { PEER_PRESENCE_GRACE_MS } from "./lib/presence.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -131,6 +132,9 @@ let localIdle = false;
 // Who said they are away, by short id. A group still counts them as online;
 // their own dot says which.
 const idlePeers = new Set();
+// When each person's last connection went, by short id, so one back from a
+// redial is still as away as they said.
+const lastGoneAt = new Map();
 const MAX_PRESENCE_FRAMES_PER_WINDOW = 30;
 let localId = "";
 let localKey = "";
@@ -1705,9 +1709,16 @@ export function initChat(sdk, options = {}) {
       broadcastPeerCountNow();
       broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
       // Whether they are away comes again on this connection, once a room
-      // opens on it. Until then they are taken as here, which is also all an
-      // older build that never says can be.
-      if (idlePeers.delete(remoteId)) broadcastGlobal("peer-idle", { peerId: remoteId, idle: false });
+      // opens on it. Somebody still here on another connection, or back from
+      // a redial inside the grace, stays as away as they last said: taking
+      // every new connection as here turned an away dot green until their
+      // next presence frame, again on each redial, which was the blinking.
+      // Anyone else starts as here, which is all an older build can be.
+      const goneAt = lastGoneAt.get(remoteId);
+      lastGoneAt.delete(remoteId);
+      const stillHere = peers.some((candidate) => candidate !== peer && candidate.id === remoteId && !candidate.conn.destroyed) ||
+        (goneAt !== undefined && Date.now() - goneAt < PEER_PRESENCE_GRACE_MS);
+      if (!stillHere && idlePeers.delete(remoteId)) broadcastGlobal("peer-idle", { peerId: remoteId, idle: false });
 
       // Our proofs, and any invite waiting on this person. Nothing about a
       // room goes out here: a room opens when the peer proves it holds the key,
@@ -1735,6 +1746,7 @@ export function initChat(sdk, options = {}) {
         candidate.id === remoteId && !candidate.conn.destroyed
       );
       if (!stillConnected) {
+        lastGoneAt.set(remoteId, Date.now());
         broadcastGlobal("peer-status", { peerId: remoteId, isOnline: false });
       }
     }

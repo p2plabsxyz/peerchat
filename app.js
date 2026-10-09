@@ -22,7 +22,7 @@ import {
   sealsInFrames,
 } from "./lib/attachment-crypto.js";
 import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
-import { createPresenceHold } from "./lib/presence.js";
+import { createPresenceHold, presenceWithHeld } from "./lib/presence.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
@@ -1170,8 +1170,7 @@ async function loadRooms() {
   const prevRooms = _roomsLoaded ? S.rooms : null;
   const data = await chat.getRooms();
   S.peerProfiles = data.peerProfiles || {};
-  S.onlinePeers = new Set(data.onlinePeers || []);
-  S.idlePeers = new Set(data.idlePeers || []);
+  takePresenceLists(data.onlinePeers, data.idlePeers);
   S.pendingDMs = data.pendingDMs || {};
   S.blockedPeers = data.blockedPeers || [];
   const next = {};
@@ -1656,6 +1655,22 @@ function mergeWithHistory(existing, incoming) {
 
 const presenceHold = createPresenceHold();
 let presenceTimer = null;
+
+// Every list of who is here comes through this. A list made mid-redial would
+// otherwise undo the hold: the room list's refresh took the server's lists as
+// they were, and somebody between connections went grey or green and back.
+function takePresenceLists(onlineIds, idleIds) {
+  for (const id of onlineIds || []) presenceHold.online(id);
+  const shown = presenceWithHeld({
+    online: onlineIds || [],
+    idle: idleIds || [],
+    held: presenceHold.heldIds(),
+    wasIdle: S.idlePeers,
+  });
+  S.onlinePeers = shown.online;
+  S.idlePeers = shown.idle;
+  schedulePresencePrune();
+}
 
 // Nothing else fires when a held peer finally drops off, so without this the
 // count would stay as it was until some unrelated event moved it.
@@ -2387,13 +2402,7 @@ function connectGlobalSSE() {
     touch();
     try {
       const { peers: ids, idle } = JSON.parse(ev.data);
-      S.idlePeers = new Set(Array.isArray(idle) ? idle : []);
-      const next = new Set(ids || []);
-      for (const id of next) presenceHold.online(id);
-      // A snapshot taken mid-redial would otherwise undo the hold.
-      for (const id of presenceHold.heldIds()) next.add(id);
-      S.onlinePeers = next;
-      schedulePresencePrune();
+      takePresenceLists(ids, Array.isArray(idle) ? idle : []);
       loadRooms().then(() => {
         renderRoomList();
         updateRoomPeerCount(S.activeRoom);
