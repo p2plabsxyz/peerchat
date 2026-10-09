@@ -590,7 +590,9 @@ function encAttrs(roomKey) {
 }
 
 function encryptedAttachmentHtml(url, msg) {
-  const roomKey = msg.roomKey || S.activeRoom;
+  // What opens the file: its own key in a room whose keys rotate, otherwise
+  // the room's.
+  const roomKey = msg.fileKey || msg.roomKey || S.activeRoom;
   const name = msg.fileName || "";
   const attrs = encAttrs(roomKey);
   const kind = isImageFile(name) ? "image" : isVideoFile(name) ? "video" : "file";
@@ -3863,24 +3865,36 @@ async function refuseIfExplicit(file) {
   if (!decision.allowed) throw new Error(decision.reason);
 }
 
+// A key of the file's own, for a room whose keys rotate. It goes inside the
+// sealed message, so the file opens only for someone who can read that.
+function newFileKey() {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function uploadAndSendFile(file) {
   const roomKey = S.activeRoom;
   const base = await getRoomDriveUrl(roomKey);
   if (!base) { alert("Could not initialize file storage."); return; }
   const path = opaqueAttachmentPath();
+  // Sealed as if the file were a room of its own, whose key is fileKey. Any
+  // other room seals its files with the room key, as before.
+  const fileKey = S.rooms[roomKey]?.rotates ? newFileKey() : "";
+  const sealKey = fileKey || roomKey;
   try {
     // A big file goes up as a stream, sealed a frame at a time as it is read.
     // Handed over whole, the browser would hold all of it first.
     const framed = sealsInFrames(file.size);
     const body = framed
-      ? sealAttachmentStream(file, roomKey)
-      : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
+      ? sealAttachmentStream(file, sealKey)
+      : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), sealKey);
     const uploadResp = await fetch(base + path, { method: "PUT", body, ...(framed && { duplex: "half" }) });
     if (!uploadResp.ok) throw new Error(await uploadResp.text().catch(() => "") || "the drive did not take it");
     const fileUrl = base + path;
     const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
     if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
-    const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
+    const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true, ...(fileKey && { fileKey }) });
     if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
   } catch (err) { alert(describeUploadFailure(file.name, err.message)); }

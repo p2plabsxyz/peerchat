@@ -93,6 +93,17 @@ import {
   pickSigningKeyPair,
   signRemovals,
 } from "./lib/removal-signature.js";
+import {
+  currentKeyGift,
+  earlierKeyChain,
+  hourOf,
+  makeRotatingRoomKey,
+  messageKeyAt,
+  newKeyChain,
+  normalizeKeyChain,
+  roomRotates,
+  takeKeyGift,
+} from "./lib/key-chain.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -298,13 +309,26 @@ function deriveLegacyMessageKey(roomKey) {
   return createHash("sha256").update(LEGACY_MESSAGE_KEY_CONTEXT + roomKey).digest();
 }
 
-export function encryptMsg(text, roomKey) {
-  const k = deriveMessageKey(roomKey);
+// The chain a room's messages are sealed with, or null for a room that seals
+// with its room key, as every room did before chains. See lib/key-chain.js.
+function roomChainFor(roomKey) {
+  if (!roomRotates(roomKey)) return null;
+  return normalizeKeyChain(savedData.rooms?.[roomKey]?.chain);
+}
+
+// Sealed with the hour's key in a room with a chain, and the hour goes with it
+// as e. Any other room, or this one before its chain has reached this device,
+// seals with the room key as before.
+export function encryptMsg(text, roomKey, now = Date.now()) {
+  const chain = roomChainFor(roomKey);
+  const e = chain ? hourOf(now) : null;
+  const hourKey = chain ? messageKeyAt(chain, e) : null;
+  const k = hourKey || deriveMessageKey(roomKey);
   const iv = randomBytes(12);
   const c = createCipheriv("aes-256-gcm", k, iv);
   let ct = c.update(text, "utf8", "hex");
   ct += c.final("hex");
-  return { ct, iv: iv.toString("hex"), tag: c.getAuthTag().toString("hex") };
+  return { ct, iv: iv.toString("hex"), tag: c.getAuthTag().toString("hex"), ...(hourKey && { e }) };
 }
 
 function openMsg(ct, iv, tag, key) {
@@ -315,7 +339,14 @@ function openMsg(ct, iv, tag, key) {
   return pt;
 }
 
-export function decryptMsg(ct, iv, tag, roomKey) {
+export function decryptMsg(ct, iv, tag, roomKey, e) {
+  // Sealed with one hour's key. Before the first hour this device holds, it
+  // cannot be opened, which is the point: a key given later reads nothing older.
+  if (e !== undefined && e !== null) {
+    const hourKey = Number.isSafeInteger(e) ? messageKeyAt(roomChainFor(roomKey), e) : null;
+    if (!hourKey) throw new Error("no key for that hour");
+    return openMsg(ct, iv, tag, hourKey);
+  }
   try {
     return openMsg(ct, iv, tag, deriveMessageKey(roomKey));
   } catch (err) {
@@ -646,6 +677,25 @@ function unsignRemovals(room) {
   room.bansSigned = { v: normalizeSignedRemovals(room.bansSigned).v, sig: "" };
 }
 
+// A room's current key, for somebody now in it on this connection. Never an
+// earlier hour's: whoever joins reads from now on, not what came before.
+function sendRoomChain(conn, roomKey) {
+  const chain = roomChainFor(roomKey);
+  if (!chain || connectionRemovedFrom(conn, roomKey)) return;
+  const gift = currentKeyGift(chain);
+  if (!gift) return;
+  try {
+    writeToConnection(conn, JSON.stringify({ type: "room-chain", roomKey, ...gift }) + "\n");
+  } catch {}
+}
+
+function broadcastRoomChain(roomKey, exceptConn = null) {
+  for (const peer of peers) {
+    if (peer.conn === exceptConn || peer.conn.destroyed || !peerSharesRoom(peer, roomKey)) continue;
+    sendRoomChain(peer.conn, roomKey);
+  }
+}
+
 function sendRoomBans(conn, roomKey) {
   const room = savedData.rooms?.[roomKey];
   if (!room) return;
@@ -767,6 +817,7 @@ function roomUpdatePayload(roomKey) {
     dmWith: room.dmWith || null,
     pendingAcceptance: !!room.pendingAcceptance,
     blockedByPeer: !!room.blockedByPeer,
+    rotates: !!roomChainFor(roomKey),
     createdBy: room.createdBy || "",
     createdByName: room.createdByName || "",
     isCreator: isRoomCreator(roomKey),
@@ -819,7 +870,7 @@ export function dropFlaggedPreview(payload, roomModeration) {
   const previewText = [payload.preview.title, payload.preview.description].filter(Boolean).join(" ");
   if (!previewText) return payload;
   if (moderationCheckContent(previewText, roomModeration).flagged) {
-    return { text: payload.text, preview: null };
+    return { ...payload, preview: null };
   }
   return payload;
 }
@@ -834,7 +885,7 @@ function feedEntryToMsg(entry, roomKey) {
     return { id: entry.id, type: "reaction", msgId: entry.msgId, emoji: entry.emoji, sender: entry.sender, senderName: entry.sn || entry.sender, timestamp: entry.ts };
   }
   if (entry.ct && entry.iv && entry.tag) {
-    const raw = consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey);
+    const raw = consumeCachedDecryptedMessage(roomKey, entry.id) ?? decryptMsg(entry.ct, entry.iv, entry.tag, roomKey, entry.e);
     const payload = dropFlaggedPreview(
       decodeMessagePayload(raw),
       roomModerationFor(roomKey),
@@ -844,6 +895,7 @@ function feedEntryToMsg(entry, roomKey) {
       sender: entry.sender,
       senderName: entry.sn || entry.sender,
       message: payload.text,
+      ...(payload.fileKey && { fileKey: payload.fileKey }),
       timestamp: entry.ts,
       replyTo: entry.replyTo || null,
     };
@@ -913,7 +965,7 @@ function decryptIncomingChat(msg, label) {
   }
 
   try {
-    return { ok: true, plaintext: decryptMsg(msg.ct, msg.iv, msg.tag, msg.roomKey) };
+    return { ok: true, plaintext: decryptMsg(msg.ct, msg.iv, msg.tag, msg.roomKey, msg.e) };
   } catch (err) {
     console.warn(`[chat] Dropping ${label}: decrypt failed (${err.message})`);
     return { ok: false, plaintext: "" };
@@ -1010,6 +1062,8 @@ function shareRoomsWith(conn, roomKeys) {
   // was dropped, so somebody who left and rejoined found the room open again.
   for (const rk of roomKeys) {
     sendRoomMeta(conn, rk);
+    // The current key ahead of the history, which it is needed to read.
+    sendRoomChain(conn, rk);
     sendRoomBans(conn, rk);
   }
   shareMembers(conn, roomKeys);
@@ -1520,6 +1574,8 @@ function sharedRoomEntry(roomKey) {
     createdBy: room.createdBy || (room.isHost ? localId : ""),
     createdByName: room.createdByName || "",
     creatorKey: room.creatorKey || (room.isHost ? localKey : ""),
+    // The person's own other device reads the room's history as this one does.
+    ...(roomChainFor(roomKey) && { chain: roomChainFor(roomKey) }),
   };
 }
 
@@ -1584,6 +1640,7 @@ function addRooms(rooms) {
       // A copied chat file carries keys the keychain here cannot open.
       existing.roomKey = room.roomKey;
       if (room.creatorKey && !existing.creatorKey) existing.creatorKey = room.creatorKey;
+      if (room.chain && roomRotates(room.roomKey)) existing.chain = earlierKeyChain(existing.chain, room.chain);
       continue;
     }
     if (savedData.leftRooms?.[room.roomKey]) continue;
@@ -1603,6 +1660,7 @@ function addRooms(rooms) {
       moderation: { ...DEFAULT_ROOM_MODERATION },
       creatorKey: room.creatorKey,
       bans: [],
+      ...(room.chain && roomRotates(room.roomKey) && { chain: room.chain }),
       ...(room.isDM ? { isDM: true, dmWith: room.dmWith } : {}),
     };
     added.push(room.roomKey);
@@ -1645,7 +1703,12 @@ function offerRoomToSiblings(roomKey) {
 
 async function takeSiblingRooms(list) {
   const added = addRooms(normalizeSharedRooms(list));
-  if (!added.length) return;
+  // A room already here may have learned something from it too, such as an
+  // earlier start of its key chain, so this is saved either way.
+  if (!added.length) {
+    debouncePersist();
+    return;
+  }
   persistData();
   await joinAddedRooms(added, "your other device");
 }
@@ -2158,6 +2221,22 @@ export function initChat(sdk, options = {}) {
             if (peerRecord && isPeerRemovedFromRoom(msg.roomKey, peerRecord)) continue;
           }
 
+          // A room's current key, from somebody in it. Only a room whose key
+          // carries the mark has a chain, so nobody can give an older room one.
+          // Taken once, and passed on to anyone here who may not have it yet.
+          if (msg.type === "room-chain") {
+            if (!msg.roomKey || !isValidRoomKey(msg.roomKey) || !roomRotates(msg.roomKey)) continue;
+            const room = savedData.rooms[msg.roomKey];
+            if (!room) continue;
+            const { chain, taken } = takeKeyGift(room.chain, msg);
+            if (!taken) continue;
+            room.chain = chain;
+            persistData();
+            emitRoomUpdate(msg.roomKey);
+            broadcastRoomChain(msg.roomKey, conn);
+            continue;
+          }
+
           // The removal list, from the creator and nobody else. It carries no
           // message id and no encrypted body, so a build that predates this
           // drops it at its first check rather than making anything of it.
@@ -2370,10 +2449,11 @@ export function initChat(sdk, options = {}) {
               }, msg.ts);
               continue;
             }
-            cacheDecryptedMessage(msg.roomKey, msg.id, syncedPayload.preview ? decrypted.plaintext : syncedPayload.text);
+            cacheDecryptedMessage(msg.roomKey, msg.id, (syncedPayload.preview || syncedPayload.fileKey) ? decrypted.plaintext : syncedPayload.text);
             appendToFeed(msg.roomKey, {
               id: msg.id, sender: clamp(msg.sender, MAX_SENDER_LEN), sn: clamp(msg.sn, 50),
               ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
+              ...(Number.isSafeInteger(msg.e) && { e: msg.e }),
               ...(msg.replyTo && { replyTo: msg.replyTo }),
               ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
               ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
@@ -2404,7 +2484,7 @@ export function initChat(sdk, options = {}) {
             if (!decrypted.ok) continue;
             const _peerRoomMod = roomModerationFor(msg.roomKey);
             const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _peerRoomMod);
-            moderatedPlaintext = payload.preview ? decrypted.plaintext : payload.text;
+            moderatedPlaintext = (payload.preview || payload.fileKey) ? decrypted.plaintext : payload.text;
             const modResult = moderationCheck(remoteId, msg.roomKey, payload.text, undefined, {
               roomModeration: _peerRoomMod,
             });
@@ -2421,6 +2501,7 @@ export function initChat(sdk, options = {}) {
           appendToFeed(msg.roomKey, {
             id: msg.id, sender: remoteId, sn: clamp(msg.sn, 50) || remoteId,
             ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
+            ...(Number.isSafeInteger(msg.e) && { e: msg.e }),
             ...(msg.replyTo && { replyTo: msg.replyTo }),
             ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
             ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
@@ -2473,8 +2554,10 @@ export async function handleChatRequest(req, sdk) {
         if (body.avatar != null && body.avatar !== "" && sanitizeAvatar(body.avatar) === null) {
           return respond(400, { error: "Invalid room image" });
         }
-        const key = randomBytes(32).toString("hex");
+        // Marked, with a chain, so its keys rotate. See lib/key-chain.js.
+        const key = makeRotatingRoomKey();
         savedData.rooms[key] = {
+          chain: newKeyChain(),
           roomKey: key, isHost: true,
           name: clamp(body.name, MAX_NAME_LEN) || "New Room",
           bio: clamp(body.bio, MAX_BIO_LEN),
@@ -2513,7 +2596,7 @@ export async function handleChatRequest(req, sdk) {
         // both could derive it, join the topic and read the whole conversation
         // along with its media. A room key is a secret, so it is minted like
         // any other room's and handed over on the connection instead.
-        const dmRoomKey = findDirectRoomKey(toIdNorm) || randomBytes(32).toString("hex");
+        const dmRoomKey = findDirectRoomKey(toIdNorm) || makeRotatingRoomKey();
         if (isPeerBlocked(toIdNorm)) return respond(403, { error: "Unblock this person before messaging them." });
         const existing = savedData.rooms[dmRoomKey];
         if (toKeyNorm && existing?.dmWithKey && existing.dmWithKey !== toKeyNorm) {
@@ -2548,6 +2631,7 @@ export async function handleChatRequest(req, sdk) {
             unreadCount: 0, unreadMentions: 0,
             lastMessage: null, members: {},
             pendingAcceptance: true,
+            ...(roomRotates(dmRoomKey) && { chain: newKeyChain() }),
           };
           persistData();
         }
@@ -2801,8 +2885,12 @@ export async function handleChatRequest(req, sdk) {
           }
         }
 
-        const payload = encodeMessagePayload(message, preview);
-        const { ct, iv, tag } = encryptMsg(payload, roomKey);
+        // A file in a room with a chain is sealed with its own key, which goes
+        // inside the sealed message. See lib/key-chain.js.
+        const fileKey = body.fileEnc === true && roomChainFor(roomKey) &&
+          typeof body.fileKey === "string" && /^[0-9a-f]{64}$/.test(body.fileKey) ? body.fileKey : "";
+        const payload = encodeMessagePayload(message, preview, fileKey);
+        const { ct, iv, tag, e } = encryptMsg(payload, roomKey);
         const ts = Date.now();
         const sn = myName() || localId;
         const replyTo = body.replyTo ? {
@@ -2825,6 +2913,7 @@ export async function handleChatRequest(req, sdk) {
         const forwarded = body.forwarded === true;
         const entry = {
           id, sender: localId, sn, ct, iv, tag, ts,
+          ...(e !== undefined && { e }),
           ...(replyTo && { replyTo }),
           ...(fileName && { fileName }),
           ...(fileSize != null && fileName && { fileSize }),
@@ -2840,6 +2929,7 @@ export async function handleChatRequest(req, sdk) {
           sent: {
             id, sender: localId, senderName: sn, message, timestamp: ts, replyTo: replyTo || null, roomKey,
             ...(preview && { preview }),
+            ...(fileKey && { fileKey }),
             ...(fileName && { fileName }),
             ...(fileSize != null && { fileSize }),
             ...(fileEnc && { fileEnc: true }),
@@ -3013,6 +3103,7 @@ export async function handleChatRequest(req, sdk) {
             isDM: !!r.isDM,
             dmWith: r.dmWith || null,
             dmWithKey: r.dmWithKey || null,
+            rotates: !!roomChainFor(k),
             pendingAcceptance: !!r.pendingAcceptance,
             blockedByPeer: !!r.blockedByPeer,
             isPinned: !!r.isPinned,
