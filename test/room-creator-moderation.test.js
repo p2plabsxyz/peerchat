@@ -221,7 +221,7 @@ describe("room creator moderation, wired up", () => {
 
   it("says a removal out loud in the room, on every peer that honours it", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
-    assert.match(p2p, /function appendRemovalNotice\(roomKey, peerId, username\)/);
+    assert.match(p2p, /function appendRemovalNotice\(roomKey, peerId, username, at = Date\.now\(\)\)/);
     // By name: "the creator" tells nobody in the room who that was.
     assert.match(p2p, /was removed from the room by \$\{by\}/);
     assert.match(p2p, /room\?\.createdByName \|\| room\?\.createdBy \|\| "whoever made the room"/);
@@ -231,10 +231,17 @@ describe("room creator moderation, wired up", () => {
     assert.match(action, /appendRemovalNotice\(rk, peerId, removedName\)/);
 
     // Everyone else says it when the removal reaches them, and only for bans
-    // that are new to them rather than the whole list every time.
+    // that are new to them and made since they joined, rather than the whole
+    // list every time, or removals from before a newcomer was there.
     const receive = p2p.slice(p2p.indexOf('if (msg.type === "room-bans")'), p2p.indexOf('if (msg.type === "room-meta")'));
     assert.match(receive, /const before = new Set\(/);
-    assert.match(receive, /if \(!before\.has\(ban\.id\)\) appendRemovalNotice/);
+    assert.match(receive, /const since = room\.joinedAt \|\| Date\.now\(\);/);
+    assert.match(receive, /if \(!before\.has\(ban\.id\) && ban\.at > since\) appendRemovalNotice\(msg\.roomKey, ban\.id, ban\.name, ban\.at\)/);
+    // A room being joined has its join time from the start, so it is never
+    // filled in from a createdAt the creator's details moved back mid-join.
+    const joinStart = p2p.indexOf('if (action === "join")');
+    const join = p2p.slice(joinStart, p2p.indexOf("await joinRoom(sdk, roomKey);", joinStart));
+    assert.match(join, /joinedAt: Date\.now\(\),/);
   });
 
   it("keeps a removed person out of somebody else's history sync", async () => {

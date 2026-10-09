@@ -564,7 +564,7 @@ function isPeerIdRemovedFromRoom(roomKey, peerId) {
  * appears exactly where the removal took effect and cannot be forged by
  * somebody who is not the creator.
  */
-function appendRemovalNotice(roomKey, peerId, username) {
+function appendRemovalNotice(roomKey, peerId, username, at = Date.now()) {
   const room = savedData.rooms?.[roomKey];
   const name = clamp(username, MAX_NAME_LEN) ||
     room?.members?.[peerId]?.username ||
@@ -575,11 +575,11 @@ function appendRemovalNotice(roomKey, peerId, username) {
     ? (myName() || localId)
     : (room?.createdByName || room?.createdBy || "whoever made the room");
   return appendToFeed(roomKey, {
-    id: `removed-${roomKey}-${peerId}-${Date.now()}`,
+    id: `removed-${roomKey}-${peerId}-${at}`,
     type: "system",
     moderationNotice: true,
     text: `${name} was removed from the room by ${by}`,
-    ts: Date.now(),
+    ts: at,
   }).catch(() => {});
 }
 
@@ -2076,8 +2076,14 @@ export function initChat(sdk, options = {}) {
             // Their list replaces ours outright: they are the record.
             const before = new Set(normalizeRoomBans(room.bans).map((ban) => ban.id));
             room.bans = normalizeRoomBans(msg.bans);
+            // Only a removal made since this device joined is news here. A
+            // newcomer gets the whole list the first time it meets the creator,
+            // and turning it into notices greeted every new member with the
+            // names of everyone ever removed. While the join is still under way
+            // there is no join time yet, and nothing before now counts.
+            const since = room.joinedAt || Date.now();
             for (const ban of room.bans) {
-              if (!before.has(ban.id)) appendRemovalNotice(msg.roomKey, ban.id, ban.name);
+              if (!before.has(ban.id) && ban.at > since) appendRemovalNotice(msg.roomKey, ban.id, ban.name, ban.at);
             }
             // Anyone the creator let back in stops being filtered out.
             for (const id of Object.keys(room.members || {})) {
@@ -2585,6 +2591,11 @@ export async function handleChatRequest(req, sdk) {
             roomKey, isHost: false,
             name: roomKey.slice(0, 8) + "...",
             bio: "", createdAt: Date.now(),
+            // Joined as of now, before the swarm is asked. The creator's room
+            // details can land mid-join and move createdAt back to when the
+            // room was made, and a join time filled in from that dated this
+            // device's join to then.
+            joinedAt: Date.now(),
             createdBy: "", createdByName: "",
             isPinned: false, isMuted: false,
             unreadCount: 0, unreadMentions: 0,
