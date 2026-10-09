@@ -46,6 +46,15 @@ const PERSIST_DELAY_MS = 2_000;
 const MAX_BLOCKED_PEERS = 500;
 // Comfortably under the 256 KB a receiver will accept, on this side and on mobile.
 const MEMBERS_LIST_MAX_BYTES = 192 * 1024;
+// Each new connection is told about this many people in a room at most, the
+// most recent first, as the phone does. A room has no limit on who joins; what
+// is bounded is what one device copies and resends. Sending everybody, pictures
+// included, on every connection grew with the room until a big one was hundreds
+// of MB per connection.
+const MAX_SHARED_MEMBERS = 100;
+// And this much of a room's log goes to a peer when it connects, newest last,
+// as on the phone. Every entry from the start used to be read and sent.
+const MAX_SYNC_ENTRIES = 200;
 const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject", "dm-blocked"]);
 
 import { earliestRoomCreatedAt } from "./lib/room-created-at.js";
@@ -801,11 +810,6 @@ function consumeCachedDecryptedMessage(roomKey, msgId) {
   return plaintext;
 }
 
-function isModerationNoticeEntry(entry) {
-  return entry?.moderationNotice === true ||
-    (entry?.type === "system" && typeof entry.id === "string" && entry.id.startsWith("mod-"));
-}
-
 // A preview is untrusted peer data riding the encrypted payload, so the
 // receiver filters it independently (README: "your node still filters their
 // messages independently"). A flagged preview drops only the card; the message
@@ -878,12 +882,15 @@ async function syncRoomHistoryTo(conn, rk) {
   const since = peerJoinedAt(conn, rk);
   if (since === null) return;
   const len = feed.length;
-  for (let i = 0; i < len; i++) {
+  for (let i = Math.max(0, len - MAX_SYNC_ENTRIES); i < len; i++) {
     try {
       if (conn.destroyed) return;
       if (!connectionSharesRoom(conn, rk)) return;
       const e = await feed.get(i);
-      if (isModerationNoticeEntry(e)) continue;
+      // Joins and leaves are what this device saw, and the receiver notes the
+      // ones it sees. Passed on, every join in a room reached every desktop,
+      // and went out again on every connection after.
+      if (e?.type === "system") continue;
       if (Number.isFinite(e?.ts) && e.ts < since) continue;
       const syncType = e.type === "system" ? "sync-system" : e.type === "reaction" ? "sync-reaction" : "sync";
       const ok = writeToConnection(conn, JSON.stringify({ type: syncType, roomKey: rk, ...e }) + "\n");
@@ -1122,7 +1129,11 @@ function shareMembers(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
       bytes = 0;
     };
 
-    for (const [peerId, m] of Object.entries(room.members)) {
+    const newestFirst = Object.entries(room.members)
+      .filter(([peerId, m]) => peerId && m?.username)
+      .sort(([, a], [, b]) => (Number.isFinite(b.joinedAt) ? b.joinedAt : 0) - (Number.isFinite(a.joinedAt) ? a.joinedAt : 0))
+      .slice(0, MAX_SHARED_MEMBERS);
+    for (const [peerId, m] of newestFirst) {
       if (!peerId || !m?.username) continue;
       let entry = {
         username: m.username,
@@ -2292,11 +2303,19 @@ export function initChat(sdk, options = {}) {
             if (!room.members) room.members = {};
             const incoming = msg.members || {};
             // Only merge new member profiles, never blindly delete based on incomplete lists
-            for (const [peerId, m] of Object.entries(incoming)) {
+            for (const [rawId, m] of Object.entries(incoming)) {
+              const peerId = normPeerId(rawId);
+              if (!/^[0-9a-f]{8}$/.test(peerId) || room.members[peerId]) continue;
               // Somebody removed is not in the room, so a list relayed by
               // anyone who has not heard yet cannot put them back into it.
               if (isPeerBannedFromRoom(room.bans, { peerId })) continue;
-              if (!room.members[peerId]) room.members[peerId] = m;
+              const username = clamp(m?.username, 50);
+              if (!username || username === peerId) continue;
+              // A name and a bio, which is all anyone else can vouch for. Their
+              // picture comes from them when this device meets them, and when
+              // they joined only ever from their own join. Kept from every list,
+              // pictures and all, each desktop ended up holding the whole room.
+              room.members[peerId] = { username, bio: clamp(m?.bio, MAX_BIO_LEN) };
             }
             debouncePersist();
             continue;
@@ -2321,24 +2340,11 @@ export function initChat(sdk, options = {}) {
             continue;
           }
 
-          if (msg.type === "sync-system") {
-            if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
-            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-            const _sysRoom = savedData.rooms[msg.roomKey];
-            if (_sysRoom && !_sysRoom.isHost && _sysRoom.joinedAt && msg.ts && msg.ts < _sysRoom.joinedAt) continue;
-            if (!trackId(msg.id)) continue;
-            const _sysRoomMod = roomModerationFor(msg.roomKey);
-            const sysModeration = moderationCheckContent(msg.text, _sysRoomMod);
-            if (sysModeration.flagged) {
-              appendModerationNotice(msg.roomKey, msg.id, "Synced history", {
-                action: "warn",
-                reason: sysModeration.reason,
-              }, msg.ts);
-              continue;
-            }
-            appendToFeed(msg.roomKey, { id: msg.id, type: "system", text: msg.text, ts: msg.ts || Date.now() }).catch(() => {});
-            continue;
-          }
+          // Somebody else's history carries the joins and leaves they saw. Taken
+          // in and sent on again, every join in a room ended up on every
+          // desktop, a line each. A device notes the joins and leaves it sees
+          // itself, as the phone always has. An older build still sends these.
+          if (msg.type === "sync-system") continue;
 
           // A removed person's old messages can still reach us through somebody
           // else's history sync, which is how they kept appearing afterwards.
