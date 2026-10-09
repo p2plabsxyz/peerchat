@@ -77,6 +77,13 @@ import {
 import { checkRoomProof, roomProof } from "./lib/room-proof.js";
 import { mentionsPerson } from "./lib/mentions.js";
 import { PEER_PRESENCE_GRACE_MS } from "./lib/presence.js";
+import {
+  checkSignedRemovals,
+  nextRemovalsVersion,
+  normalizeSignedRemovals,
+  pickSigningKeyPair,
+  signRemovals,
+} from "./lib/removal-signature.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -138,6 +145,10 @@ const lastGoneAt = new Map();
 const MAX_PRESENCE_FRAMES_PER_WINDOW = 30;
 let localId = "";
 let localKey = "";
+// The key pair behind localKey, for signing the removal lists of rooms made
+// here. Null until it is read from the store, and for good when the store does
+// not hold the key this device connects with.
+let signingKeys = null;
 let safeStore = null;
 let dataPath = null;
 let activeRoom = null;
@@ -593,21 +604,83 @@ function isRemovedFromRoom(roomKey) {
   return isPeerBannedFromRoom(bans, { peerId: localId, connectionKey: localKey });
 }
 
+// The network key's pair: given by PeerSky when it connects with keys of its
+// own, otherwise the store's, which is the one hyper-sdk connects with.
+async function loadSigningKeys(sdk, options) {
+  const candidates = [options.keyPair];
+  try {
+    if (typeof sdk.corestore?.createKeyPair === "function") candidates.push(await sdk.corestore.createKeyPair("noise"));
+  } catch {}
+  signingKeys = pickSigningKeyPair(localKey, candidates);
+}
+
+// The creator's list, signed, so anybody in the room can pass it on. A list
+// from before lists were signed is signed the first time it goes out, and a
+// list the creator just changed gets a new version.
+function signedRemovalsFor(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  if (!room) return null;
+  const held = normalizeSignedRemovals(room.bansSigned);
+  if (held.sig) return held;
+  if (!signingKeys || !isRoomCreator(roomKey)) return null;
+  const version = nextRemovalsVersion(held.v);
+  const sig = signRemovals({ topic: wireTopic(roomKey), version, bans: room.bans, keyPair: signingKeys });
+  if (!sig) return null;
+  room.bansSigned = { v: version, sig };
+  debouncePersist();
+  return room.bansSigned;
+}
+
+// A list changed here, by the creator: the old signature no longer fits it.
+// The version stays, so the next one is later.
+function unsignRemovals(room) {
+  room.bansSigned = { v: normalizeSignedRemovals(room.bansSigned).v, sig: "" };
+}
+
 function sendRoomBans(conn, roomKey) {
-  if (!isRoomCreator(roomKey)) return;
+  const room = savedData.rooms?.[roomKey];
+  if (!room) return;
+  const signed = signedRemovalsFor(roomKey);
+  // Unsigned, a list only counts from the creator, so only the creator sends
+  // one. Signed, anyone in the room passes it on. An older build checks the
+  // connection either way, and drops it from anyone else.
+  if (!signed && !isRoomCreator(roomKey)) return;
   try {
     writeToConnection(conn, JSON.stringify({
       type: "room-bans",
       roomKey,
-      bans: normalizeRoomBans(savedData.rooms?.[roomKey]?.bans),
+      bans: normalizeRoomBans(room.bans),
+      ...(signed ? { signed } : {}),
     }) + "\n");
   } catch {}
 }
 
-function broadcastRoomBans(roomKey) {
-  if (!isRoomCreator(roomKey)) return;
+// Everyone in the room this device is connected to, but whoever it came from.
+function broadcastRoomBans(roomKey, exceptConn = null) {
   for (const peer of peers) {
-    if (!peer.conn.destroyed && peerSharesRoom(peer, roomKey)) sendRoomBans(peer.conn, roomKey);
+    if (peer.conn === exceptConn || peer.conn.destroyed || !peerSharesRoom(peer, roomKey)) continue;
+    sendRoomBans(peer.conn, roomKey);
+  }
+}
+
+// A new list for a room, from its creator one way or another. It replaces the
+// list here outright: the creator is the record.
+function applyRoomBans(roomKey, bans) {
+  const room = savedData.rooms[roomKey];
+  const before = new Set(normalizeRoomBans(room.bans).map((ban) => ban.id));
+  room.bans = normalizeRoomBans(bans);
+  // Only a removal made since this device joined is news here. A newcomer
+  // gets the whole list the first time it hears it, and turning it into
+  // notices greeted every new member with the names of everyone ever removed.
+  // While the join is still under way there is no join time yet, and nothing
+  // before now counts.
+  const since = room.joinedAt || Date.now();
+  for (const ban of room.bans) {
+    if (!before.has(ban.id) && ban.at > since) appendRemovalNotice(roomKey, ban.id, ban.name, ban.at);
+  }
+  // Anyone the creator let back in stops being filtered out.
+  for (const id of Object.keys(room.members || {})) {
+    if (isPeerBannedFromRoom(room.bans, { peerId: id })) delete room.members[id];
   }
 }
 
@@ -1597,6 +1670,8 @@ export function initChat(sdk, options = {}) {
   // The whole key. The eight characters above are a label; a removal is checked
   // against this. See lib/room-moderation.js.
   localKey = sdk.publicKey ? b4a.toString(sdk.publicKey, "hex").toLowerCase() : "";
+  signingKeys = null;
+  loadSigningKeys(sdk, options).catch(() => {});
 
   initModeration().catch((e) => console.warn("[chat] Moderation blocklist load failed:", e.message));
 
@@ -2079,28 +2154,34 @@ export function initChat(sdk, options = {}) {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room) continue;
+            const held = normalizeSignedRemovals(room.bansSigned);
+            const signed = normalizeSignedRemovals(msg.signed);
+            const creatorKey = resolveCreatorKey(msg.roomKey, room.creatorKey);
+
+            // Signed with the creator key, it counts from anyone, when it is
+            // newer than the list here, and it goes on to everyone else in the
+            // room. That is how a removal reaches people who never meet the
+            // creator.
+            if (signed.sig && checkSignedRemovals({ topic: wireTopic(msg.roomKey), creatorKey, bans: msg.bans, signed })) {
+              if (signed.v <= held.v) continue;
+              applyRoomBans(msg.roomKey, msg.bans);
+              room.bansSigned = signed;
+              persistData();
+              emitRoomUpdate(msg.roomKey);
+              broadcastRoomBans(msg.roomKey, conn);
+              continue;
+            }
+
+            // Unsigned, from an older build: only the creator's own connection.
             if (!isRoomCreatorConnection({
               roomKey: msg.roomKey,
               storedKey: room.creatorKey,
               connectionKey: fullId,
             })) continue;
-
-            // Their list replaces ours outright: they are the record.
-            const before = new Set(normalizeRoomBans(room.bans).map((ban) => ban.id));
-            room.bans = normalizeRoomBans(msg.bans);
-            // Only a removal made since this device joined is news here. A
-            // newcomer gets the whole list the first time it meets the creator,
-            // and turning it into notices greeted every new member with the
-            // names of everyone ever removed. While the join is still under way
-            // there is no join time yet, and nothing before now counts.
-            const since = room.joinedAt || Date.now();
-            for (const ban of room.bans) {
-              if (!before.has(ban.id) && ban.at > since) appendRemovalNotice(msg.roomKey, ban.id, ban.name, ban.at);
-            }
-            // Anyone the creator let back in stops being filtered out.
-            for (const id of Object.keys(room.members || {})) {
-              if (isPeerBannedFromRoom(room.bans, { peerId: id })) delete room.members[id];
-            }
+            applyRoomBans(msg.roomKey, msg.bans);
+            // No signature to pass on, and the version stays, so an older
+            // signed list cannot undo this one.
+            room.bansSigned = { v: held.v, sig: "" };
             persistData();
             emitRoomUpdate(msg.roomKey);
             continue;
@@ -2531,6 +2612,7 @@ export async function handleChatRequest(req, sdk) {
           savedData.peerProfiles?.[peerId]?.username || "";
         // The name goes with the removal, for anyone in the room who never met them.
         room.bans = addRoomBan(room.bans, { id: peerId, key: connected?.fullId || "", name: removedName });
+        unsignRemovals(room);
         if (room.members?.[peerId]) delete room.members[peerId];
 
         appendRemovalNotice(rk, peerId, removedName);
@@ -2551,6 +2633,7 @@ export async function handleChatRequest(req, sdk) {
         }
 
         room.bans = removeRoomBan(room.bans, body.peerId);
+        unsignRemovals(room);
         broadcastRoomBans(rk);
         persistData();
         emitRoomUpdate(rk);

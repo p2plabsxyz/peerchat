@@ -138,8 +138,13 @@ describe("room creator moderation, wired up", () => {
     assert.match(p2p, /localKey = sdk\.publicKey \? b4a\.toString\(sdk\.publicKey, "hex"\)\.toLowerCase\(\) : ""/);
     assert.match(p2p, /isRoomCreatorConnection\(\{[\s\S]{0,160}connectionKey: fullId,/);
     assert.match(p2p, /acceptsCreatorKey\(\{[\s\S]{0,220}connectionKey: fullId,/);
-    // Their list replaces ours outright: they are the record.
-    assert.match(p2p, /room\.bans = normalizeRoomBans\(msg\.bans\)/);
+    // Their list replaces ours outright: they are the record. Unsigned, it
+    // has to come over the creator's own connection. Signed, the signature
+    // says it is theirs, whoever passed it on.
+    assert.match(p2p, /room\.bans = normalizeRoomBans\(bans\);/);
+    const receive = p2p.slice(p2p.indexOf('if (msg.type === "room-bans")'), p2p.indexOf('if (msg.type === "room-meta")'));
+    assert.match(receive, /if \(signed\.sig && checkSignedRemovals\(\{ topic: wireTopic\(msg\.roomKey\), creatorKey, bans: msg\.bans, signed \}\)\) \{\s+if \(signed\.v <= held\.v\) continue;\s+applyRoomBans\(msg\.roomKey, msg\.bans\);/);
+    assert.match(receive, /connectionKey: fullId,\s+\}\)\) continue;\s+applyRoomBans\(msg\.roomKey, msg\.bans\);/);
   });
 
   it("counts nothing a removed peer sends, including a removal list", async () => {
@@ -233,10 +238,10 @@ describe("room creator moderation, wired up", () => {
     // Everyone else says it when the removal reaches them, and only for bans
     // that are new to them and made since they joined, rather than the whole
     // list every time, or removals from before a newcomer was there.
-    const receive = p2p.slice(p2p.indexOf('if (msg.type === "room-bans")'), p2p.indexOf('if (msg.type === "room-meta")'));
-    assert.match(receive, /const before = new Set\(/);
-    assert.match(receive, /const since = room\.joinedAt \|\| Date\.now\(\);/);
-    assert.match(receive, /if \(!before\.has\(ban\.id\) && ban\.at > since\) appendRemovalNotice\(msg\.roomKey, ban\.id, ban\.name, ban\.at\)/);
+    const apply = p2p.slice(p2p.indexOf("function applyRoomBans("), p2p.indexOf("\n}\n", p2p.indexOf("function applyRoomBans(")));
+    assert.match(apply, /const before = new Set\(/);
+    assert.match(apply, /const since = room\.joinedAt \|\| Date\.now\(\);/);
+    assert.match(apply, /if \(!before\.has\(ban\.id\) && ban\.at > since\) appendRemovalNotice\(roomKey, ban\.id, ban\.name, ban\.at\)/);
     // A room being joined has its join time from the start, so it is never
     // filled in from a createdAt the creator's details moved back mid-join.
     const joinStart = p2p.indexOf('if (action === "join")');
