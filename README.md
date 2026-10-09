@@ -12,9 +12,20 @@ Chat inside [PeerSky Browser](https://github.com/p2plabsxyz/peersky-browser) on 
 
 ## Who this is for
 
-Small teams or group of friends who already trust each other and want something p2p without sign-up flows.
+Anyone who wants to talk without an account, a phone number or a company server in the middle, from friends and teams to journalists and the people they talk to.
 
-**Not** a replacement for apps built for journalists, activists, or **very confidential** communication. PeerChat has no verified identities, no perfect forward secrecy, and no professional security audit. If leaking a thread would be serious, use something designed for that threat model 
+**How it's encrypted**
+
+- Every room and every direct message has its own key: 32 random bytes made on a member's device. Room keys never travel over the network; you share them yourself in an invite. A direct message's key goes only to the other person, inside the encrypted connection, after their key has been proved.
+- Each message is encrypted on the sender's device with AES-256-GCM, using a key derived from the room key. Files are encrypted with AES-GCM too, before they are stored.
+- Every connection between two devices is encrypted again with the Noise protocol and XChaCha20-Poly1305, with fresh keys for each connection.
+- A peer gets nothing from a room until it proves it holds the key, and no server exists that could log, read or hand over messages.
+
+**Forward secrecy**
+
+Connections have it: each one uses fresh keys, so traffic recorded today can't be opened later, even with a device's long-term keys. Stored messages don't: a room keeps the same key for its whole life, so anyone who gets a room key, from a forwarded invite or a compromised device, can read every message in that room they can get a copy of, past and future. Signal changes keys with every message; PeerChat doesn't do that yet.
+
+**Also not there yet:** a way to confirm who is behind a key, like Signal's safety numbers, and an independent security audit.
 
 ## What it does
 
