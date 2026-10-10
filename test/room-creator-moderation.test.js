@@ -251,12 +251,19 @@ describe("room creator moderation, wired up", () => {
 
   it("keeps a removed person out of somebody else's history sync", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
-    assert.match(p2p, /isPeerIdRemovedFromRoom\(msg\.roomKey, normPeerId\(msg\.sender\)\)\) continue;/);
+    const author = p2p.slice(p2p.indexOf("function authorOf("), p2p.indexOf("function arrivesInTime("));
+    // Signed, a removed author's message is refused whoever brings it.
+    assert.match(author, /if \(via !== "live" && isAuthorRemoved\(msg\.roomKey, signed\.authorId, signed\.author\)\) return "";/);
+    // Unsigned, somebody else's history cannot name an author at all.
+    assert.match(author, /if \(via === "sync" && msg\.sender !== remoteId\) return "";/);
 
-    // Above the sync handlers, or their messages are appended before it looks.
-    const guard = p2p.indexOf("isPeerIdRemovedFromRoom(msg.roomKey, normPeerId(msg.sender))");
-    const syncHandler = p2p.indexOf('if (msg.type === "sync") {');
-    assert.ok(guard > -1 && syncHandler > -1 && guard < syncHandler);
+    // Before the message is tracked, or its later copies would be dropped as
+    // duplicates rather than refused, and before anything is appended.
+    const receive = p2p.slice(p2p.indexOf("async function receiveChatMessage("), p2p.indexOf("function passOn("));
+    const guard = receive.indexOf("authorOf(source, msg, via, signed)");
+    const track = receive.indexOf("trackId(msg.id)");
+    const append = receive.indexOf("appendToFeed(roomKey, entry)");
+    assert.ok(guard > -1 && track > guard && append > track);
   });
 
   it("fills a creator key in on the device that made the room", async () => {

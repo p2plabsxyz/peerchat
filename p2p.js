@@ -56,6 +56,16 @@ const MAX_SHARED_MEMBERS = 100;
 // as on the phone. Every entry from the start used to be read and sent.
 const MAX_SYNC_ENTRIES = 200;
 const DM_CONTROL_TYPES = new Set(["dm-invite", "dm-accept", "dm-reject", "dm-blocked"]);
+// Messages others pass on arrive on one connection from many people, so they
+// have their own, bigger budget there, and each person's own limit applies to
+// them whichever way they came. See passOn.
+const MAX_PASSED_PER_WINDOW = 1200;
+const MAX_AUTHOR_MESSAGES_PER_WINDOW = 120;
+// Passing on is for what is being said now. Anything older comes in history,
+// which starts at the right time for each person.
+const MAX_PASSED_MESSAGE_AGE_MS = 10 * 60 * 1000;
+const MAX_AUTHOR_RATES = 4096;
+const MAX_PROVEN_KEYS = 4096;
 
 import { earliestRoomCreatedAt } from "./lib/room-created-at.js";
 import {
@@ -104,6 +114,12 @@ import {
   roomRotates,
   takeKeyGift,
 } from "./lib/key-chain.js";
+import {
+  readSignedMessage,
+  readSignedReaction,
+  signMessage,
+  signReaction,
+} from "./lib/message-signature.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -165,10 +181,15 @@ const lastGoneAt = new Map();
 const MAX_PRESENCE_FRAMES_PER_WINDOW = 30;
 let localId = "";
 let localKey = "";
-// The key pair behind localKey, for signing the removal lists of rooms made
-// here. Null until it is read from the store, and for good when the store does
-// not hold the key this device connects with.
+// The key pair behind localKey, for signing what this device writes and the
+// removal lists of rooms made here. Null until it is read from the store, and
+// for good when the store does not hold the key this device connects with.
 let signingKeys = null;
+// How much each person has said lately, wherever it came from.
+const authorRates = new Map();
+// The whole key behind each short id, as connections proved them, so a key
+// ground to match somebody's id cannot sign as them.
+const provenKeys = new Map();
 let safeStore = null;
 let dataPath = null;
 let activeRoom = null;
@@ -890,6 +911,9 @@ function feedEntryToMsg(entry, roomKey) {
       decodeMessagePayload(raw),
       roomModerationFor(roomKey),
     );
+    // In a room whose keys rotate, the reply and the file's details are inside
+    // the body.
+    const file = payload.fileName ? payload : entry;
     const out = {
       id: entry.id,
       sender: entry.sender,
@@ -897,12 +921,12 @@ function feedEntryToMsg(entry, roomKey) {
       message: payload.text,
       ...(payload.fileKey && { fileKey: payload.fileKey }),
       timestamp: entry.ts,
-      replyTo: entry.replyTo || null,
+      replyTo: cleanReply(payload.replyTo) || entry.replyTo || null,
     };
     if (payload.preview) out.preview = payload.preview;
-    if (entry.fileName) out.fileName = entry.fileName;
-    if (entry.fileSize != null) out.fileSize = entry.fileSize;
-    if (entry.fileEnc === true) out.fileEnc = true;
+    if (file.fileName) out.fileName = file.fileName;
+    if (file.fileSize != null) out.fileSize = file.fileSize;
+    if (file.fileEnc === true) out.fileEnc = true;
     if (entry.fwd === true) out.forwarded = true;
     return out;
   }
@@ -958,6 +982,198 @@ async function syncRoomHistoryTo(conn, rk) {
 }
 
 
+// Who wrote a message or reaction, or "" when it does not count. Signed, it is
+// its author's wherever it came from, once the signature checks out and the key
+// is the one that id's connections proved. Unsigned, as an older build sends,
+// it counts straight from its author's own connection and from nowhere else:
+// somebody else's history used to name any author it liked, which is how a
+// message could be faked.
+function authorOf({ remoteId, fullId }, msg, via, signed) {
+  if (signed === false) return "";
+  if (signed) {
+    if (via === "live" && signed.author !== fullId) return "";
+    if (authorKeyConflicts(signed.authorId, signed.author)) return "";
+    if (via !== "live" && isAuthorRemoved(msg.roomKey, signed.authorId, signed.author)) return "";
+    if (via !== "live" && moderationIsKicked(signed.authorId, msg.roomKey)) return "";
+    return signed.authorId;
+  }
+  if (via === "pass") return "";
+  if (via === "sync" && msg.sender !== remoteId) return "";
+  return remoteId;
+}
+
+// History and passed-on messages from before this device joined are not its to
+// read, and passed-on ones are for what is being said now.
+function arrivesInTime(room, via, ts) {
+  if (via === "live") return true;
+  if (room && !room.isHost && room.joinedAt && ts < room.joinedAt) return false;
+  return via !== "pass" || ts >= Date.now() - MAX_PASSED_MESSAGE_AGE_MS;
+}
+
+function cleanReply(value) {
+  if (!value || typeof value !== "object") return null;
+  const id = clamp(value.id, 64);
+  const sender = clamp(value.sender, MAX_SENDER_LEN);
+  const text = clamp(value.text, 200);
+  if (!id || !sender || !text) return null;
+  return { id, sender, sn: clamp(value.sn, 50) || sender, text };
+}
+
+async function receiveReaction(source, msg, via) {
+  const roomKey = msg.roomKey;
+  if (!msg.id || !roomKey || !roomFeeds[roomKey]) return;
+  const signed = readSignedReaction(msg, wireTopic(roomKey));
+  const authorId = authorOf(source, msg, via, signed);
+  if (!authorId) return;
+  const header = signed ? signed.header : msg;
+  if (!header.msgId) return;
+  const ts = Number.isSafeInteger(header.ts) ? header.ts : Date.now();
+  if (!arrivesInTime(savedData.rooms[roomKey], via, ts)) return;
+  if (!trackId(msg.id)) return;
+  if (via === "pass" && !consumeAuthorRate(roomKey, authorId)) return;
+  const entry = {
+    type: "reaction", id: msg.id, msgId: clamp(header.msgId, 64),
+    emoji: clamp(header.emoji, 10), sender: authorId,
+    sn: clamp(header.sn, 50) || authorId, ts,
+    ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
+  };
+  await appendToFeed(roomKey, entry);
+  if (signed && via !== "sync") passOn(roomKey, entry, source.conn);
+}
+
+async function receiveChatMessage(source, msg, via) {
+  const roomKey = msg.roomKey;
+  if (!msg.id || !roomKey || !roomFeeds[roomKey]) return;
+  const room = savedData.rooms[roomKey];
+  const signed = readSignedMessage(msg, wireTopic(roomKey));
+  const authorId = authorOf(source, msg, via, signed);
+  if (!authorId) return;
+  const header = signed ? signed.header : msg;
+  const ts = Number.isSafeInteger(header.ts) ? header.ts : Date.now();
+  if (!arrivesInTime(room, via, ts)) return;
+  if (!trackId(msg.id)) return;
+  // A copy that comes again from another neighbour stops above, so this counts
+  // each message once.
+  if (via === "pass" && !consumeAuthorRate(roomKey, authorId)) return;
+
+  const decrypted = decryptIncomingChat(msg, via === "sync" ? "synced message" : via === "pass" ? "passed-on message" : "peer message");
+  if (!decrypted.ok) return;
+  const roomMod = roomModerationFor(roomKey);
+  const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), roomMod);
+  const sn = clamp(header.sn, 50) || (via === "live" ? savedData.peerProfiles[source.remoteId]?.username : "") || authorId;
+  if (via === "sync") {
+    const check = moderationCheckContent(payload.text, roomMod);
+    if (check.flagged) {
+      appendModerationNotice(roomKey, msg.id, sn, { action: "warn", reason: check.reason }, ts);
+      return;
+    }
+  } else {
+    try {
+      const modResult = moderationCheck(authorId, roomKey, payload.text, undefined, { roomModeration: roomMod });
+      if (!modResult.allowed) {
+        appendModerationNotice(roomKey, msg.id, sn, modResult, ts);
+        return;
+      }
+    } catch (modErr) {
+      console.warn("[chat] Moderation check error:", modErr.message);
+      // On error, allow the message through rather than silently dropping
+    }
+  }
+  // What the room shows: the text, a preview its filters let through, and in a
+  // room whose keys rotate the reply and file details from inside the body.
+  cacheDecryptedMessage(roomKey, msg.id, encodeMessagePayload(payload.text, payload.preview, payload.fileKey, payload));
+  const replyTo = cleanReply(header.replyTo);
+  const entry = {
+    id: msg.id, sender: authorId, sn,
+    ct: msg.ct, iv: msg.iv, tag: msg.tag, ts,
+    ...(Number.isSafeInteger(msg.e) && { e: msg.e }),
+    ...(replyTo && { replyTo }),
+    ...(header.fileName && { fileName: clamp(header.fileName, MAX_FILE_NAME_LEN) }),
+    ...(header.fileName && header.fileSize != null && { fileSize: header.fileSize }),
+    ...(header.fileName && header.fileEnc === true && { fileEnc: true }),
+    ...(header.fwd === true && { fwd: true }),
+    // Kept as it came, so it can go on and still check out.
+    ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
+  };
+  await appendToFeed(roomKey, entry);
+
+  if (via === "live" && room) {
+    if (!room.members) room.members = {};
+    room.members[source.remoteId] = {
+      username: msg.sn || savedData.peerProfiles[source.remoteId]?.username || source.remoteId,
+      joinedAt: room.members[source.remoteId]?.joinedAt || Date.now(),
+    };
+    debouncePersist();
+  }
+  if (signed && via !== "sync") passOn(roomKey, entry, source.conn);
+}
+
+// A signed message or reaction, sent on once to everyone else here who passes
+// messages on, but not back where it came from or to its author. A copy a
+// neighbour already has stops at its first check, so a message crosses the room
+// in a few steps. It goes in a wrapper an older build drops, and only to peers
+// whose handshake said they take it.
+function passOn(roomKey, entry, fromConn) {
+  if (!entry?.as) return;
+  const frame = JSON.stringify({ type: "pass", roomKey, m: entry }) + "\n";
+  for (const peer of peers) {
+    if (peer.conn === fromConn || peer.conn.destroyed || !peer.passes || !peerSharesRoom(peer, roomKey)) continue;
+    if (peer.fullId === entry.ak || isPeerRemovedFromRoom(roomKey, peer)) continue;
+    try { writeToConnection(peer.conn, frame); } catch {}
+  }
+}
+
+function consumePassRate(peer) {
+  const now = Date.now();
+  if (!peer.passRate || now >= peer.passRate.resetsAt) {
+    peer.passRate = { count: 1, resetsAt: now + RATE_WINDOW_MS };
+    return true;
+  }
+  if (peer.passRate.count >= MAX_PASSED_PER_WINDOW) return false;
+  peer.passRate.count += 1;
+  return true;
+}
+
+// Each person's limit, whichever connection their messages come through. A
+// limit per connection would block a neighbour who passes on a busy room.
+function consumeAuthorRate(roomKey, authorId) {
+  const key = `${roomKey}:${authorId}`;
+  const now = Date.now();
+  const rate = authorRates.get(key);
+  if (!rate || now >= rate.resetsAt) {
+    authorRates.delete(key);
+    authorRates.set(key, { count: 1, resetsAt: now + RATE_WINDOW_MS });
+    if (authorRates.size > MAX_AUTHOR_RATES) authorRates.delete(authorRates.keys().next().value);
+    return true;
+  }
+  if (rate.count >= MAX_AUTHOR_MESSAGES_PER_WINDOW) return false;
+  rate.count += 1;
+  return true;
+}
+
+function rememberProvenKey(id, key) {
+  if (!id || !key) return;
+  provenKeys.delete(id);
+  provenKeys.set(id, key);
+  if (provenKeys.size > MAX_PROVEN_KEYS) provenKeys.delete(provenKeys.keys().next().value);
+}
+
+// A short id is 32 bits, so a key can be ground to match somebody's. A
+// signature from any key but the one that id's connections proved, or ours for
+// our own id, is not theirs.
+function authorKeyConflicts(authorId, authorKey) {
+  if (authorId === localId) return authorKey !== localKey;
+  const proven = provenKeys.get(authorId);
+  if (proven && proven !== authorKey) return true;
+  return peers.some((peer) => peer.id === authorId && peer.fullId && peer.fullId !== authorKey && !peer.conn.destroyed);
+}
+
+function isAuthorRemoved(roomKey, authorId, authorKey) {
+  const bans = savedData.rooms?.[roomKey]?.bans;
+  if (!bans?.length) return false;
+  return isPeerBannedFromRoom(bans, { peerId: authorId, connectionKey: authorKey });
+}
+
 function decryptIncomingChat(msg, label) {
   if (!msg.ct || !msg.iv || !msg.tag) {
     console.warn(`[chat] Dropping ${label}: missing encrypted payload`);
@@ -1007,7 +1223,7 @@ function topicsFrameFor(conn) {
     if (proof) rooms.push({ topic, proof });
     if (rooms.length === MAX_SHARED_TOPICS) break;
   }
-  return JSON.stringify({ type: "topics", rooms }) + "\n";
+  return JSON.stringify({ type: "topics", rooms, pass: true }) + "\n";
 }
 
 function shareTopics(conn) {
@@ -1826,8 +2042,9 @@ export function initChat(sdk, options = {}) {
     let buf = "";
     let active = false;
     let pingTimer = null;
-    const peer = { conn, id: remoteId, fullId, rooms: [], lan: !!info.lan, handshake: false };
+    const peer = { conn, id: remoteId, fullId, rooms: [], lan: !!info.lan, handshake: false, passes: false };
     pendingPeers.set(conn, peer);
+    const source = { conn, remoteId, fullId };
 
     // Protomux fires onopen synchronously when the remote open frame is
     // already buffered - before chatTransports.set below has run - and every
@@ -1855,6 +2072,7 @@ export function initChat(sdk, options = {}) {
       active = true;
       pendingPeers.delete(conn);
       peers.push(peer);
+      rememberProvenKey(remoteId, fullId);
       broadcastPeerCountNow();
       broadcastGlobal("peer-status", { peerId: remoteId, isOnline: true });
       // Whether they are away comes again on this connection, once a room
@@ -1934,6 +2152,8 @@ export function initChat(sdk, options = {}) {
             const peerEntry = peerForConnection(conn) || pendingPeers.get(conn);
             if (peerEntry && Array.isArray(msg.rooms)) {
               peerEntry.handshake = true;
+              // A newer build passes messages on and takes them passed on. See passOn.
+              if (msg.pass === true) peerEntry.passes = true;
               const added = [];
               for (const entry of msg.rooms.slice(0, MAX_SHARED_TOPICS)) {
                 const topic = typeof entry?.topic === "string" ? entry.topic.toLowerCase() : "";
@@ -2405,17 +2625,21 @@ export function initChat(sdk, options = {}) {
             continue;
           }
 
-          if (msg.type === "sync-reaction") {
-            if (!msg.id || !msg.roomKey || !msg.msgId || !roomFeeds[msg.roomKey]) continue;
-            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-            const _srRoom = savedData.rooms[msg.roomKey];
-            if (_srRoom && !_srRoom.isHost && _srRoom.joinedAt && msg.ts && msg.ts < _srRoom.joinedAt) continue;
-            if (!trackId(msg.id)) continue;
-            appendToFeed(msg.roomKey, {
-              type: "reaction", id: msg.id, msgId: clamp(msg.msgId, 64),
-              emoji: clamp(msg.emoji, 10), sender: clamp(msg.sender, MAX_SENDER_LEN),
-              sn: clamp(msg.sn, 50), ts: msg.ts || Date.now(),
-            }).catch(() => {});
+          // A message or reaction somebody passed on, in a wrapper an older
+          // build drops. Only a signed one counts, and it is its author's.
+          if (msg.type === "pass") {
+            if (!msg.roomKey || moderationIsKicked(remoteId, msg.roomKey) || !consumePassRate(peer)) continue;
+            const inner = msg.m;
+            if (!inner || typeof inner !== "object" || Array.isArray(inner)) continue;
+            const passed = { ...inner, roomKey: msg.roomKey };
+            if (inner.type === "reaction") receiveReaction(source, passed, "pass").catch(() => {});
+            else if (inner.type === undefined) receiveChatMessage(source, passed, "pass").catch(() => {});
+            continue;
+          }
+
+          if (msg.type === "sync-reaction" || msg.type === "reaction") {
+            if (!msg.roomKey || moderationIsKicked(remoteId, msg.roomKey)) continue;
+            receiveReaction(source, msg, msg.type === "sync-reaction" ? "sync" : "live").catch(() => {});
             continue;
           }
 
@@ -2425,98 +2649,9 @@ export function initChat(sdk, options = {}) {
           // itself, as the phone always has. An older build still sends these.
           if (msg.type === "sync-system") continue;
 
-          // A removed person's old messages can still reach us through somebody
-          // else's history sync, which is how they kept appearing afterwards.
-          if ((msg.type === "sync" || msg.type === "sync-reaction") && msg.roomKey && msg.sender &&
-              isPeerIdRemovedFromRoom(msg.roomKey, normPeerId(msg.sender))) continue;
-
-          if (msg.type === "sync") {
-            if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
-            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-            const _syncRoom = savedData.rooms[msg.roomKey];
-            if (_syncRoom && !_syncRoom.isHost && _syncRoom.joinedAt && msg.ts && msg.ts < _syncRoom.joinedAt) continue;
-            if (!trackId(msg.id)) continue;
-            const decrypted = decryptIncomingChat(msg, "synced message");
-            if (!decrypted.ok) continue;
-            const _syncRoomMod = roomModerationFor(msg.roomKey);
-            const syncedPayload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _syncRoomMod);
-            const syncModeration = moderationCheckContent(syncedPayload.text, _syncRoomMod);
-            if (syncModeration.flagged) {
-              const syncPeerName = clamp(msg.sn, 50) || clamp(msg.sender, MAX_SENDER_LEN) || remoteId;
-              appendModerationNotice(msg.roomKey, msg.id, syncPeerName, {
-                action: "warn",
-                reason: syncModeration.reason,
-              }, msg.ts);
-              continue;
-            }
-            cacheDecryptedMessage(msg.roomKey, msg.id, (syncedPayload.preview || syncedPayload.fileKey) ? decrypted.plaintext : syncedPayload.text);
-            appendToFeed(msg.roomKey, {
-              id: msg.id, sender: clamp(msg.sender, MAX_SENDER_LEN), sn: clamp(msg.sn, 50),
-              ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
-              ...(Number.isSafeInteger(msg.e) && { e: msg.e }),
-              ...(msg.replyTo && { replyTo: msg.replyTo }),
-              ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
-              ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
-              ...(msg.fwd === true && { fwd: true }),
-            }).catch(() => {});
-            continue;
-          }
-
-          if (msg.type === "reaction") {
-            if (!msg.id || !msg.roomKey || !msg.msgId || !roomFeeds[msg.roomKey]) continue;
-            if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-            if (!trackId(msg.id)) continue;
-            appendToFeed(msg.roomKey, {
-              type: "reaction", id: msg.id, msgId: clamp(msg.msgId, 64),
-              emoji: clamp(msg.emoji, 10), sender: remoteId,
-              sn: clamp(msg.sn, 50) || remoteId, ts: msg.ts || Date.now(),
-            }).catch(() => {});
-            continue;
-          }
-
-          if (!msg.id || !msg.roomKey || !roomFeeds[msg.roomKey]) continue;
-          if (moderationIsKicked(remoteId, msg.roomKey)) continue;
-          if (!trackId(msg.id)) continue;
-
-          let moderatedPlaintext = "";
-          try {
-            const decrypted = decryptIncomingChat(msg, "peer message");
-            if (!decrypted.ok) continue;
-            const _peerRoomMod = roomModerationFor(msg.roomKey);
-            const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), _peerRoomMod);
-            moderatedPlaintext = (payload.preview || payload.fileKey) ? decrypted.plaintext : payload.text;
-            const modResult = moderationCheck(remoteId, msg.roomKey, payload.text, undefined, {
-              roomModeration: _peerRoomMod,
-            });
-            if (!modResult.allowed) {
-              const peerName = clamp(msg.sn, 50) || savedData.peerProfiles[remoteId]?.username || remoteId;
-              appendModerationNotice(msg.roomKey, msg.id, peerName, modResult, msg.ts);
-              continue;
-            }
-          } catch (modErr) {
-            console.warn("[chat] Moderation check error:", modErr.message);
-            // On error, allow the message through rather than silently dropping
-          }
-          cacheDecryptedMessage(msg.roomKey, msg.id, moderatedPlaintext);
-          appendToFeed(msg.roomKey, {
-            id: msg.id, sender: remoteId, sn: clamp(msg.sn, 50) || remoteId,
-            ct: msg.ct, iv: msg.iv, tag: msg.tag, ts: msg.ts,
-            ...(Number.isSafeInteger(msg.e) && { e: msg.e }),
-            ...(msg.replyTo && { replyTo: msg.replyTo }),
-            ...(msg.fileName && { fileName: clamp(msg.fileName, MAX_FILE_NAME_LEN) }),
-            ...(msg.fileSize != null && { fileSize: msg.fileSize }), ...(msg.fileEnc === true && { fileEnc: true }),
-            ...(msg.fwd === true && { fwd: true }),
-          }).catch((e) => console.error("[chat] Peer msg error:", e.message));
-
-          const room = savedData.rooms[msg.roomKey];
-          if (room) {
-            if (!room.members) room.members = {};
-            room.members[remoteId] = {
-              username: msg.sn || savedData.peerProfiles[remoteId]?.username || remoteId,
-              joinedAt: room.members[remoteId]?.joinedAt || Date.now(),
-            };
-            debouncePersist();
-          }
+          if (!msg.roomKey || moderationIsKicked(remoteId, msg.roomKey)) continue;
+          receiveChatMessage(source, msg, msg.type === "sync" ? "sync" : "live")
+            .catch((e) => console.error("[chat] Peer msg error:", e.message));
         } catch {}
       }
     }
@@ -2826,6 +2961,10 @@ export async function handleChatRequest(req, sdk) {
           type: "reaction", id, msgId: clamp(body.msgId, 64), emoji,
           sender: localId, sn: myName() || localId, ts: Date.now(),
         };
+        // Signed like a message, so it can go on through anyone.
+        Object.assign(entry, signReaction({
+          topic: wireTopic(roomKey), id, ts: entry.ts, msgId: entry.msgId, emoji: entry.emoji, sn: entry.sn,
+        }, signingKeys) || {});
         await appendToFeed(roomKey, entry);
         relayToRoom(roomKey, JSON.stringify({ ...entry, roomKey }) + "\n");
         return respond(200, { ok: true });
@@ -2885,14 +3024,6 @@ export async function handleChatRequest(req, sdk) {
           }
         }
 
-        // A file in a room with a chain is sealed with its own key, which goes
-        // inside the sealed message. See lib/key-chain.js.
-        const fileKey = body.fileEnc === true && roomChainFor(roomKey) &&
-          typeof body.fileKey === "string" && /^[0-9a-f]{64}$/.test(body.fileKey) ? body.fileKey : "";
-        const payload = encodeMessagePayload(message, preview, fileKey);
-        const { ct, iv, tag, e } = encryptMsg(payload, roomKey);
-        const ts = Date.now();
-        const sn = myName() || localId;
         const replyTo = body.replyTo ? {
           id: clamp(body.replyTo.id, 64),
           sender: clamp(body.replyTo.sender, MAX_SENDER_LEN),
@@ -2911,14 +3042,38 @@ export async function handleChatRequest(req, sdk) {
         // Sent on from another chat: shown as forwarded on every side. A build
         // without this shows it as an ordinary message.
         const forwarded = body.forwarded === true;
-        const entry = {
-          id, sender: localId, sn, ct, iv, tag, ts,
-          ...(e !== undefined && { e }),
+        // A file in a room with a chain is sealed with its own key, which goes
+        // inside the sealed message. See lib/key-chain.js.
+        const fileKey = body.fileEnc === true && roomChainFor(roomKey) &&
+          typeof body.fileKey === "string" && /^[0-9a-f]{64}$/.test(body.fileKey) ? body.fileKey : "";
+        // A room whose keys rotate keeps the reply and the file's name and size
+        // inside the sealed body. Any other room keeps them next to it, where an
+        // older build looks for them.
+        const details = {
           ...(replyTo && { replyTo }),
           ...(fileName && { fileName }),
           ...(fileSize != null && fileName && { fileSize }),
           ...(fileEnc && { fileEnc: true }),
+        };
+        const sealsDetails = roomRotates(roomKey);
+        const outside = sealsDetails ? {} : details;
+        const payload = encodeMessagePayload(message, preview, fileKey, sealsDetails && details);
+        const { ct, iv, tag, e } = encryptMsg(payload, roomKey);
+        const ts = Date.now();
+        const sn = myName() || localId;
+        // Signed, so it can go on through anyone and still prove who wrote it.
+        // See lib/message-signature.js.
+        const signed = signMessage(
+          { topic: wireTopic(roomKey), id, ts, e, sn, ...outside, fwd: forwarded },
+          { ct, iv, tag },
+          signingKeys,
+        );
+        const entry = {
+          id, sender: localId, sn, ct, iv, tag, ts,
+          ...(e !== undefined && { e }),
+          ...outside,
           ...(forwarded && { fwd: true }),
+          ...(signed || {}),
         };
 
         cacheDecryptedMessage(roomKey, id, payload);

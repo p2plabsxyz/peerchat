@@ -30,10 +30,13 @@ describe("forwarding messages", () => {
   it("marks a forwarded message on the way out, keeps the mark from peers, and shows it", async () => {
     const p2p = await read("p2p.js");
     assert.match(p2p, /const forwarded = body\.forwarded === true;/);
-    assert.match(p2p, /\.\.\.\(forwarded && \{ fwd: true \}\),\n {8}\};/);
+    assert.match(p2p, /\.\.\.\(forwarded && \{ fwd: true \}\),\n {10}\.\.\.\(signed \|\| \{\}\),\n {8}\};/);
+    // Signed with the rest, so nobody on the way can add or drop it.
+    assert.match(p2p, /\{ topic: wireTopic\(roomKey\), id, ts, e, sn, \.\.\.outside, fwd: forwarded \}/);
     assert.match(p2p, /\.\.\.\(forwarded && \{ forwarded: true \}\),/);
-    // Synced history and live messages from a peer both keep it.
-    assert.equal(p2p.match(/\.\.\.\(msg\.fwd === true && \{ fwd: true \}\),/g)?.length, 2);
+    // History, live and passed-on messages from a peer all keep it, from the
+    // signed header when there is one.
+    assert.match(p2p, /\.\.\.\(header\.fwd === true && \{ fwd: true \}\),/);
     assert.match(p2p, /if \(entry\.fwd === true\) out\.forwarded = true;/);
 
     const app = await read("app.js");
