@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { PEER_PRESENCE_GRACE_MS, createPresenceHold } from "../lib/presence.js";
+import { PEER_PRESENCE_GRACE_MS, createPresenceHold, presenceWithHeld } from "../lib/presence.js";
 
 // Hyperswarm redials all the time, and so does a phone waking or a laptop
 // opening its lid. Acting on every offline event made the peer count and the
@@ -76,5 +76,31 @@ describe("createPresenceHold", () => {
     hold.offline("", 0);
     hold.offline(null, 0);
     assert.equal(hold.nextExpiryAt(0), null);
+  });
+});
+
+// A list of who is here, made while somebody was between connections, used to
+// drop them from the screen and from away with it, so their dot blinked.
+describe("presenceWithHeld", () => {
+  it("keeps somebody between connections here, and away if they were", () => {
+    const shown = presenceWithHeld({
+      online: ["aa"],
+      idle: [],
+      held: ["bb", "cc"],
+      wasIdle: new Set(["bb"]),
+    });
+    assert.deepEqual([...shown.online].sort(), ["aa", "bb", "cc"]);
+    assert.deepEqual([...shown.idle], ["bb"]);
+  });
+
+  it("takes the server's word for everyone it counts", () => {
+    const shown = presenceWithHeld({
+      online: ["aa", "bb"],
+      idle: ["aa"],
+      held: [],
+      wasIdle: new Set(["bb"]),
+    });
+    assert.deepEqual([...shown.online].sort(), ["aa", "bb"]);
+    assert.deepEqual([...shown.idle], ["aa"]);
   });
 });

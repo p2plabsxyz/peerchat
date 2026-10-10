@@ -138,8 +138,13 @@ describe("room creator moderation, wired up", () => {
     assert.match(p2p, /localKey = sdk\.publicKey \? b4a\.toString\(sdk\.publicKey, "hex"\)\.toLowerCase\(\) : ""/);
     assert.match(p2p, /isRoomCreatorConnection\(\{[\s\S]{0,160}connectionKey: fullId,/);
     assert.match(p2p, /acceptsCreatorKey\(\{[\s\S]{0,220}connectionKey: fullId,/);
-    // Their list replaces ours outright: they are the record.
-    assert.match(p2p, /room\.bans = normalizeRoomBans\(msg\.bans\)/);
+    // Their list replaces ours outright: they are the record. Unsigned, it
+    // has to come over the creator's own connection. Signed, the signature
+    // says it is theirs, whoever passed it on.
+    assert.match(p2p, /room\.bans = normalizeRoomBans\(bans\);/);
+    const receive = p2p.slice(p2p.indexOf('if (msg.type === "room-bans")'), p2p.indexOf('if (msg.type === "room-meta")'));
+    assert.match(receive, /if \(signed\.sig && checkSignedRemovals\(\{ topic: wireTopic\(msg\.roomKey\), creatorKey, bans: msg\.bans, signed \}\)\) \{\s+if \(signed\.v <= held\.v\) continue;\s+applyRoomBans\(msg\.roomKey, msg\.bans\);/);
+    assert.match(receive, /connectionKey: fullId,\s+\}\)\) continue;\s+applyRoomBans\(msg\.roomKey, msg\.bans\);/);
   });
 
   it("counts nothing a removed peer sends, including a removal list", async () => {
@@ -221,7 +226,7 @@ describe("room creator moderation, wired up", () => {
 
   it("says a removal out loud in the room, on every peer that honours it", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
-    assert.match(p2p, /function appendRemovalNotice\(roomKey, peerId, username\)/);
+    assert.match(p2p, /function appendRemovalNotice\(roomKey, peerId, username, at = Date\.now\(\)\)/);
     // By name: "the creator" tells nobody in the room who that was.
     assert.match(p2p, /was removed from the room by \$\{by\}/);
     assert.match(p2p, /room\?\.createdByName \|\| room\?\.createdBy \|\| "whoever made the room"/);
@@ -231,20 +236,34 @@ describe("room creator moderation, wired up", () => {
     assert.match(action, /appendRemovalNotice\(rk, peerId, removedName\)/);
 
     // Everyone else says it when the removal reaches them, and only for bans
-    // that are new to them rather than the whole list every time.
-    const receive = p2p.slice(p2p.indexOf('if (msg.type === "room-bans")'), p2p.indexOf('if (msg.type === "room-meta")'));
-    assert.match(receive, /const before = new Set\(/);
-    assert.match(receive, /if \(!before\.has\(ban\.id\)\) appendRemovalNotice/);
+    // that are new to them and made since they joined, rather than the whole
+    // list every time, or removals from before a newcomer was there.
+    const apply = p2p.slice(p2p.indexOf("function applyRoomBans("), p2p.indexOf("\n}\n", p2p.indexOf("function applyRoomBans(")));
+    assert.match(apply, /const before = new Set\(/);
+    assert.match(apply, /const since = room\.joinedAt \|\| Date\.now\(\);/);
+    assert.match(apply, /if \(!before\.has\(ban\.id\) && ban\.at > since\) appendRemovalNotice\(roomKey, ban\.id, ban\.name, ban\.at\)/);
+    // A room being joined has its join time from the start, so it is never
+    // filled in from a createdAt the creator's details moved back mid-join.
+    const joinStart = p2p.indexOf('if (action === "join")');
+    const join = p2p.slice(joinStart, p2p.indexOf("await joinRoom(sdk, roomKey);", joinStart));
+    assert.match(join, /joinedAt: Date\.now\(\),/);
   });
 
   it("keeps a removed person out of somebody else's history sync", async () => {
     const p2p = await readFile(new URL("../p2p.js", import.meta.url), "utf8");
-    assert.match(p2p, /isPeerIdRemovedFromRoom\(msg\.roomKey, normPeerId\(msg\.sender\)\)\) continue;/);
+    const author = p2p.slice(p2p.indexOf("function authorOf("), p2p.indexOf("function arrivesInTime("));
+    // Signed, a removed author's message is refused whoever brings it.
+    assert.match(author, /if \(via !== "live" && isAuthorRemoved\(msg\.roomKey, signed\.authorId, signed\.author\)\) return "";/);
+    // Unsigned, somebody else's history cannot name an author at all.
+    assert.match(author, /if \(via === "sync" && msg\.sender !== remoteId\) return "";/);
 
-    // Above the sync handlers, or their messages are appended before it looks.
-    const guard = p2p.indexOf("isPeerIdRemovedFromRoom(msg.roomKey, normPeerId(msg.sender))");
-    const syncHandler = p2p.indexOf('if (msg.type === "sync") {');
-    assert.ok(guard > -1 && syncHandler > -1 && guard < syncHandler);
+    // Before the message is tracked, or its later copies would be dropped as
+    // duplicates rather than refused, and before anything is appended.
+    const receive = p2p.slice(p2p.indexOf("async function receiveChatMessage("), p2p.indexOf("function passOn("));
+    const guard = receive.indexOf("authorOf(source, msg, via, signed)");
+    const track = receive.indexOf("trackId(msg.id)");
+    const append = receive.indexOf("appendToFeed(roomKey, entry)");
+    assert.ok(guard > -1 && track > guard && append > track);
   });
 
   it("fills a creator key in on the device that made the room", async () => {

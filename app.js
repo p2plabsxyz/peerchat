@@ -22,7 +22,8 @@ import {
   sealsInFrames,
 } from "./lib/attachment-crypto.js";
 import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
-import { createPresenceHold } from "./lib/presence.js";
+import { createPresenceHold, presenceWithHeld } from "./lib/presence.js";
+import { collectLoadedMedia, restoreLoadedMedia } from "./lib/kept-media.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
@@ -38,7 +39,7 @@ import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 import { menuPosition } from "./lib/menu-position.js";
-import { findMentions, mentionQueryStart, mentionsPerson } from "./lib/mentions.js";
+import { findMentions, mentionQueryStart, mentionsPerson, personName } from "./lib/mentions.js";
 import { chatWithPerson } from "./lib/person-chat.js";
 import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
@@ -149,6 +150,33 @@ function roomMentionNames(roomKey) {
   return names;
 }
 
+// The person a mention names, by a name the room knows: you, someone with that
+// exact name, or the same person on another of their devices ("@ada" when only
+// "ada@mobile" is here).
+function mentionedPeerId(name, roomKey) {
+  const wanted = String(name || "").toLowerCase();
+  if (!wanted) return "";
+  const own = [S.profile?.username, S.profile?.displayName].filter(Boolean).map((n) => n.toLowerCase());
+  if (own.includes(wanted)) return S.profile?.id || "";
+  const names = (id, member) => [S.peerProfiles[id]?.username, member?.username]
+    .filter(Boolean).map((n) => n.toLowerCase());
+  const members = Object.entries(S.rooms[roomKey]?.members || {});
+  const exact = members.find(([id, member]) => names(id, member).includes(wanted));
+  if (exact) return exact[0];
+  const same = members.find(([id, member]) => names(id, member).some((n) => personName(n) === personName(wanted)));
+  return same ? same[0] : "";
+}
+
+// A mention opens the profile of whoever it names, as a sender's name does.
+// While picking messages to forward, the message takes the click first.
+$("messages")?.addEventListener("click", (e) => {
+  const mention = e.target.closest?.(".mention");
+  if (!mention) return;
+  const name = mention.dataset.mention || mention.textContent.replace(/^@/, "");
+  const id = mentionedPeerId(name, S.activeRoom);
+  if (id) showUserInfo(id, name);
+});
+
 function applyMarkdownFormatting(escapedText) {
   return applyInlineFormatting(escapedText);
 }
@@ -236,6 +264,7 @@ function expandLargeMedia(wrap) {
   const isVideo = mediaType === 'video';
   const el = document.createElement(isVideo ? 'video' : 'img');
   el.className = 'msg-file-img';
+  el.dataset.mediaKey = url;
   if (isVideo) {
     el.controls = true;
     el.preload = 'metadata';
@@ -588,7 +617,9 @@ function encAttrs(roomKey) {
 }
 
 function encryptedAttachmentHtml(url, msg) {
-  const roomKey = msg.roomKey || S.activeRoom;
+  // What opens the file: its own key in a room whose keys rotate, otherwise
+  // the room's.
+  const roomKey = msg.fileKey || msg.roomKey || S.activeRoom;
   const name = msg.fileName || "";
   const attrs = encAttrs(roomKey);
   const kind = isImageFile(name) ? "image" : isVideoFile(name) ? "video" : "file";
@@ -661,6 +692,7 @@ function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("[data-enc-src]")) {
     const url = el.getAttribute("data-enc-src");
     el.removeAttribute("data-enc-src");
+    el.dataset.mediaKey = url;
     const own = isOwnMessageMedia(el);
     resolveDecryptedUrl(url, roomRefs.key(el.getAttribute("data-file-room")), el.getAttribute("data-file-name"))
       .then((src) => (own ? (el.src = src) : screenIncomingMedia(el, src)))
@@ -672,6 +704,7 @@ function hydrateEncryptedMedia(root) {
   for (const el of root.querySelectorAll("img.msg-file-img[src], video.msg-file-img[src]")) {
     if (el.dataset.screened) continue;
     el.dataset.screened = "1";
+    if (!el.dataset.mediaKey) el.dataset.mediaKey = el.getAttribute("src") || "";
     if (isOwnMessageMedia(el)) continue;
     const src = el.getAttribute("src");
     if (src) void screenIncomingMedia(el, src);
@@ -1170,8 +1203,7 @@ async function loadRooms() {
   const prevRooms = _roomsLoaded ? S.rooms : null;
   const data = await chat.getRooms();
   S.peerProfiles = data.peerProfiles || {};
-  S.onlinePeers = new Set(data.onlinePeers || []);
-  S.idlePeers = new Set(data.idlePeers || []);
+  takePresenceLists(data.onlinePeers, data.idlePeers);
   S.pendingDMs = data.pendingDMs || {};
   S.blockedPeers = data.blockedPeers || [];
   const next = {};
@@ -1359,7 +1391,8 @@ function makeRoomEl(r) {
     <div class="room-meta">
       <span class="room-time">${r.lastMessage ? formatTime(r.lastMessage.timestamp) : ""}</span>
       <span class="room-state">
-        ${r.unreadCount > 0 ? `<span class="badge">${r.unreadMentions > 0 ? "@" : ""}${r.unreadCount}</span>` : ""}
+        ${r.unreadMentions > 0 ? `<span class="badge" title="${r.unreadMentions} unread mention${r.unreadMentions === 1 ? "" : "s"}">${r.unreadMentions} @</span>` : ""}
+        ${r.unreadCount > 0 ? `<span class="badge${r.isMuted ? " badge-muted" : ""}" title="${r.unreadCount} unread message${r.unreadCount === 1 ? "" : "s"}">${r.unreadCount}</span>` : ""}
         ${r.isMuted ? '<img src="./assets/svg/mute.svg" class="room-icon" alt="Muted" title="Muted" />' : ""}
         ${r.isPinned ? '<img src="./assets/svg/pin.svg" class="room-icon" alt="Pinned" title="Pinned" />' : ""}
       </span>
@@ -1584,6 +1617,7 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
   const container = $("messages");
   const savedScroll = container.scrollTop;
   const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+  const loadedMedia = collectLoadedMedia(container.querySelectorAll(".msg-file-img"));
   container.innerHTML = "";
   const dz = document.createElement("div");
   dz.id = "dropzone";
@@ -1625,6 +1659,8 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
     m.roomKey = m.roomKey || roomKey;
     container.appendChild(makeMsgEl(m));
   }
+  // Before the scroll is set, so the pane already has its pictures' heights.
+  restoreLoadedMedia(container.querySelectorAll(".msg-file-img, [data-large-type]"), loadedMedia);
   if (scrollToBottom) {
     const divider = document.getElementById("unread-divider");
     // Only when the unread run starts above the last screenful. Two new
@@ -1656,6 +1692,22 @@ function mergeWithHistory(existing, incoming) {
 
 const presenceHold = createPresenceHold();
 let presenceTimer = null;
+
+// Every list of who is here comes through this. A list made mid-redial would
+// otherwise undo the hold: the room list's refresh took the server's lists as
+// they were, and somebody between connections went grey or green and back.
+function takePresenceLists(onlineIds, idleIds) {
+  for (const id of onlineIds || []) presenceHold.online(id);
+  const shown = presenceWithHeld({
+    online: onlineIds || [],
+    idle: idleIds || [],
+    held: presenceHold.heldIds(),
+    wasIdle: S.idlePeers,
+  });
+  S.onlinePeers = shown.online;
+  S.idlePeers = shown.idle;
+  schedulePresencePrune();
+}
 
 // Nothing else fires when a held peer finally drops off, so without this the
 // count would stay as it was until some unrelated event moved it.
@@ -2169,7 +2221,9 @@ function refreshActiveChatForPeer(peerId, username, peerAvatar) {
   if (!msgs?.length) return;
   let changed = false;
   for (const m of msgs) {
-    if (peerIdEq(m.sender, peerId)) { m.senderName = username; changed = true; }
+    // Only a new name. Each connection announces the same one again, and a
+    // rebuild for every one of them blinked the pictures in the room.
+    if (peerIdEq(m.sender, peerId) && m.senderName !== username) { m.senderName = username; changed = true; }
   }
   if (changed) renderMessages(S.activeRoom, false);
 }
@@ -2186,7 +2240,10 @@ async function refreshActiveRoom() {
       }
       const { messages: fresh } = await chat.getHistory(S.activeRoom);
       const _existing = S.messages[S.activeRoom] || [];
-      if (fresh && fresh.length > _existing.length) {
+      // Counted as the buffer is, as the sync check does: raw history carries
+      // reactions that never reach the pane, so a room with one rebuilt itself
+      // after every sync with every peer, and its pictures blinked.
+      if (fresh && fresh.filter(chatMessageRenders).length > _existing.length) {
         const firstRender = _existing.length === 0;
         S.messages[S.activeRoom] = extractReactions(S.activeRoom, mergeWithHistory(_existing, fresh));
         renderMessages(S.activeRoom, firstRender);
@@ -2387,13 +2444,7 @@ function connectGlobalSSE() {
     touch();
     try {
       const { peers: ids, idle } = JSON.parse(ev.data);
-      S.idlePeers = new Set(Array.isArray(idle) ? idle : []);
-      const next = new Set(ids || []);
-      for (const id of next) presenceHold.online(id);
-      // A snapshot taken mid-redial would otherwise undo the hold.
-      for (const id of presenceHold.heldIds()) next.add(id);
-      S.onlinePeers = next;
-      schedulePresencePrune();
+      takePresenceLists(ids, Array.isArray(idle) ? idle : []);
       loadRooms().then(() => {
         renderRoomList();
         updateRoomPeerCount(S.activeRoom);
@@ -3842,24 +3893,36 @@ async function refuseIfExplicit(file) {
   if (!decision.allowed) throw new Error(decision.reason);
 }
 
+// A key of the file's own, for a room whose keys rotate. It goes inside the
+// sealed message, so the file opens only for someone who can read that.
+function newFileKey() {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function uploadAndSendFile(file) {
   const roomKey = S.activeRoom;
   const base = await getRoomDriveUrl(roomKey);
   if (!base) { alert("Could not initialize file storage."); return; }
   const path = opaqueAttachmentPath();
+  // Sealed as if the file were a room of its own, whose key is fileKey. Any
+  // other room seals its files with the room key, as before.
+  const fileKey = S.rooms[roomKey]?.rotates ? newFileKey() : "";
+  const sealKey = fileKey || roomKey;
   try {
     // A big file goes up as a stream, sealed a frame at a time as it is read.
     // Handed over whole, the browser would hold all of it first.
     const framed = sealsInFrames(file.size);
     const body = framed
-      ? sealAttachmentStream(file, roomKey)
-      : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), roomKey);
+      ? sealAttachmentStream(file, sealKey)
+      : await encryptAttachment(new Uint8Array(await file.arrayBuffer()), sealKey);
     const uploadResp = await fetch(base + path, { method: "PUT", body, ...(framed && { duplex: "half" }) });
     if (!uploadResp.ok) throw new Error(await uploadResp.text().catch(() => "") || "the drive did not take it");
     const fileUrl = base + path;
     const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
     if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
-    const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true });
+    const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true, ...(fileKey && { fileKey }) });
     if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
   } catch (err) { alert(describeUploadFailure(file.name, err.message)); }

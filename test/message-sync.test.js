@@ -57,3 +57,30 @@ describe("shouldRerenderMessages", () => {
     );
   });
 });
+
+// Each rebuild of the pane collapsed every picture and opened it again. Two
+// things rebuilt it for nothing whenever a connection came up, and a rebuild
+// now keeps the pictures that had loaded.
+describe("rebuilding the pane", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+
+  it("does not rebuild for the reactions in a room's raw history", () => {
+    const refresh = app.slice(app.indexOf("async function refreshActiveRoom()"), app.indexOf("async function refreshActiveRoom()") + 1200);
+    assert.match(refresh, /fresh\.filter\(chatMessageRenders\)\.length > _existing\.length/);
+  });
+
+  it("does not rebuild for a name that did not change", () => {
+    assert.match(app, /if \(peerIdEq\(m\.sender, peerId\) && m\.senderName !== username\) \{ m\.senderName = username; changed = true; \}/);
+  });
+
+  it("puts loaded pictures back before the scroll is set", () => {
+    const render = app.slice(app.indexOf("function renderMessages("), app.indexOf("function mergeWithHistory("));
+    assert.ok(render.indexOf("collectLoadedMedia(") < render.indexOf('container.innerHTML = "";'));
+    assert.ok(render.indexOf("restoreLoadedMedia(") < render.indexOf("if (scrollToBottom) {"));
+    // Each picture says which file it shows, decrypted, off a drive or opened by hand.
+    assert.match(app, /el\.removeAttribute\("data-enc-src"\);\s+el\.dataset\.mediaKey = url;/);
+    assert.match(app, /if \(!el\.dataset\.mediaKey\) el\.dataset\.mediaKey = el\.getAttribute\("src"\) \|\| "";/);
+    assert.match(app, /el\.className = 'msg-file-img';\s+el\.dataset\.mediaKey = url;/);
+  });
+});
