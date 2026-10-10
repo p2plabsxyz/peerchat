@@ -28,7 +28,10 @@ describe("direct message keys", () => {
       p2p.indexOf('if (action === "block-peer")'),
     );
 
-    assert.match(action, /findDirectRoomKey\(toIdNorm\) \|\| randomBytes\(32\)\.toString\("hex"\)/);
+    // Random, and drawn until it carries the mark of a room whose keys
+    // rotate (lib/key-chain.js), with the chain that goes with it.
+    assert.match(action, /findDirectRoomKey\(toIdNorm\) \|\| makeRotatingRoomKey\(\)/);
+    assert.match(action, /\.\.\.\(roomRotates\(dmRoomKey\) && \{ chain: newKeyChain\(\) \}\)/);
     // The renderer never picks the key, so nothing on that side can weaken it.
     assert.doesNotMatch(action, /body\.roomKey/);
 

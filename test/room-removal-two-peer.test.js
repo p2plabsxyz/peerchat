@@ -213,8 +213,8 @@ describe("removing somebody over a real connection", () => {
     assert.equal((await roomOf(THEIR_ROOM)).removedByCreator, true);
   });
 
-  // A device that joined after somebody was removed never met them. It used to
-  // say "c0ffee11 was removed" with nothing else to go on.
+  // Somebody removed while this device was in the room, who never connected to
+  // it. It used to say "c0ffee11 was removed" with nothing else to go on.
   it("names somebody this device never met, as the creator knew them", async () => {
     const theirKey = pair.clientStream.publicKey.toString("hex").toLowerCase();
     transport.send(JSON.stringify({
@@ -230,5 +230,28 @@ describe("removing somebody over a real connection", () => {
     const { messages } = await call("get-history", "GET", null, THEIR_ROOM);
     const notice = messages.filter((message) => message.moderationNotice).at(-1);
     assert.match(notice.text, /^Carol was removed from the room by Bob$/);
+  });
+
+  // A device that joins a room is handed the creator's whole removal list.
+  // Every entry in it became a notice, so a newcomer's first sight of P2P
+  // Republic was the names of everyone ever removed from it.
+  it("tells a newcomer nothing about removals from before it joined", async () => {
+    const notices = async () => (await call("get-history", "GET", null, THEIR_ROOM)).messages
+      .filter((message) => message.moderationNotice)
+      .map((message) => message.text);
+    const shown = await notices();
+    transport.send(JSON.stringify({
+      type: "room-bans", room: wireRoom(THEIR_ROOM),
+      bans: [
+        { id: "c0ffee11", key: "", at: Date.now(), name: "Carol" },
+        // A day before this device joined, and one from before removals had a time.
+        { id: "d00d0001", key: "", at: Date.now() - 86_400_000, name: "Dave" },
+        { id: "d00d0002", key: "", name: "Erin" },
+      ],
+    }) + "\n");
+    await settle();
+    assert.deepEqual(await notices(), shown);
+    // They are still removed, only not announced.
+    assert.deepEqual((await roomOf(THEIR_ROOM)).bans.map((ban) => ban.id).sort(), ["c0ffee11", "d00d0001", "d00d0002"]);
   });
 });

@@ -76,4 +76,25 @@ describe("the app uses those rules", () => {
     assert.match(p2p, /mentionsPerson\(msgText, /);
     assert.doesNotMatch(p2p, /msgText\.includes\("@" \+ uname\)/);
   });
+
+  it("shows mentions and messages in bubbles of their own, and greys a muted room's count", () => {
+    const state = app.slice(app.indexOf('<span class="room-state">'), app.indexOf('assets/svg/mute.svg'));
+    const mention = state.indexOf("${r.unreadMentions} @</span>");
+    const count = state.indexOf("${r.unreadCount}</span>");
+    assert.ok(mention > -1 && count > mention, "the mention bubble, then the count");
+    assert.match(state, /r\.isMuted \? " badge-muted" : ""/);
+    assert.doesNotMatch(state, /r\.unreadMentions > 0 \? "@" : ""/);
+    const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+    assert.match(css, /\.badge\.badge-muted \{ background: var\(--muted\);/);
+  });
+
+  it("opens the profile of whoever a mention names", () => {
+    const listener = app.slice(app.indexOf('$("messages")?.addEventListener("click"'), app.indexOf("function applyMarkdownFormatting("));
+    assert.match(listener, /e\.target\.closest\?\.\("\.mention"\)/);
+    assert.match(listener, /if \(id\) showUserInfo\(id, name\);/);
+    const lookup = app.slice(app.indexOf("function mentionedPeerId("), app.indexOf('$("messages")?.addEventListener("click"'));
+    // Exact name first, then the same person on another of their devices.
+    assert.match(lookup, /personName\(n\) === personName\(wanted\)/);
+    assert.match(lookup, /if \(own\.includes\(wanted\)\) return S\.profile\?\.id/);
+  });
 });
