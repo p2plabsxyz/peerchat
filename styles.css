@@ -244,6 +244,9 @@ html, body {
   min-width: 18px; height: 18px;
   border-radius: 9px; padding: 0 5px;
 }
+/* Mentions and messages have bubbles of their own, "1 @" then "2". A muted
+   room greys its count, as most apps do, and still shows a mention. */
+.badge.badge-muted { background: var(--muted); color: var(--surface-mix); }
 .room-item .room-dots {
   position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   background: none; border: none; color: var(--muted);

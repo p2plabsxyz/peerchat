@@ -1391,7 +1391,8 @@ function makeRoomEl(r) {
     <div class="room-meta">
       <span class="room-time">${r.lastMessage ? formatTime(r.lastMessage.timestamp) : ""}</span>
       <span class="room-state">
-        ${r.unreadCount > 0 ? `<span class="badge">${r.unreadMentions > 0 ? "@" : ""}${r.unreadCount}</span>` : ""}
+        ${r.unreadMentions > 0 ? `<span class="badge" title="${r.unreadMentions} unread mention${r.unreadMentions === 1 ? "" : "s"}">${r.unreadMentions} @</span>` : ""}
+        ${r.unreadCount > 0 ? `<span class="badge${r.isMuted ? " badge-muted" : ""}" title="${r.unreadCount} unread message${r.unreadCount === 1 ? "" : "s"}">${r.unreadCount}</span>` : ""}
         ${r.isMuted ? '<img src="./assets/svg/mute.svg" class="room-icon" alt="Muted" title="Muted" />' : ""}
         ${r.isPinned ? '<img src="./assets/svg/pin.svg" class="room-icon" alt="Pinned" title="Pinned" />' : ""}
       </span>
