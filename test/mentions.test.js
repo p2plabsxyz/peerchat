@@ -76,4 +76,14 @@ describe("the app uses those rules", () => {
     assert.match(p2p, /mentionsPerson\(msgText, /);
     assert.doesNotMatch(p2p, /msgText\.includes\("@" \+ uname\)/);
   });
+
+  it("opens the profile of whoever a mention names", () => {
+    const listener = app.slice(app.indexOf('$("messages")?.addEventListener("click"'), app.indexOf("function applyMarkdownFormatting("));
+    assert.match(listener, /e\.target\.closest\?\.\("\.mention"\)/);
+    assert.match(listener, /if \(id\) showUserInfo\(id, name\);/);
+    const lookup = app.slice(app.indexOf("function mentionedPeerId("), app.indexOf('$("messages")?.addEventListener("click"'));
+    // Exact name first, then the same person on another of their devices.
+    assert.match(lookup, /personName\(n\) === personName\(wanted\)/);
+    assert.match(lookup, /if \(own\.includes\(wanted\)\) return S\.profile\?\.id/);
+  });
 });

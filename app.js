@@ -39,7 +39,7 @@ import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
 import { describeUploadFailure } from "./lib/upload-failure.js";
 import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from "./lib/link-safety.js";
 import { menuPosition } from "./lib/menu-position.js";
-import { findMentions, mentionQueryStart, mentionsPerson } from "./lib/mentions.js";
+import { findMentions, mentionQueryStart, mentionsPerson, personName } from "./lib/mentions.js";
 import { chatWithPerson } from "./lib/person-chat.js";
 import { forwardableText, forwardTexts } from "./lib/forwarding.js";
 
@@ -149,6 +149,33 @@ function roomMentionNames(roomKey) {
   }
   return names;
 }
+
+// The person a mention names, by a name the room knows: you, someone with that
+// exact name, or the same person on another of their devices ("@ada" when only
+// "ada@mobile" is here).
+function mentionedPeerId(name, roomKey) {
+  const wanted = String(name || "").toLowerCase();
+  if (!wanted) return "";
+  const own = [S.profile?.username, S.profile?.displayName].filter(Boolean).map((n) => n.toLowerCase());
+  if (own.includes(wanted)) return S.profile?.id || "";
+  const names = (id, member) => [S.peerProfiles[id]?.username, member?.username]
+    .filter(Boolean).map((n) => n.toLowerCase());
+  const members = Object.entries(S.rooms[roomKey]?.members || {});
+  const exact = members.find(([id, member]) => names(id, member).includes(wanted));
+  if (exact) return exact[0];
+  const same = members.find(([id, member]) => names(id, member).some((n) => personName(n) === personName(wanted)));
+  return same ? same[0] : "";
+}
+
+// A mention opens the profile of whoever it names, as a sender's name does.
+// While picking messages to forward, the message takes the click first.
+$("messages")?.addEventListener("click", (e) => {
+  const mention = e.target.closest?.(".mention");
+  if (!mention) return;
+  const name = mention.dataset.mention || mention.textContent.replace(/^@/, "");
+  const id = mentionedPeerId(name, S.activeRoom);
+  if (id) showUserInfo(id, name);
+});
 
 function applyMarkdownFormatting(escapedText) {
   return applyInlineFormatting(escapedText);
