@@ -1216,6 +1216,26 @@ async function loadRooms() {
   }
   S.rooms = next;
   _roomsLoaded = true;
+  if (S.activeRoom && data.movedRooms?.[S.activeRoom]) followMovedRooms(data.movedRooms);
+}
+
+// A room that moved to a new key when its creator removed somebody: the page
+// goes on in the room it went to, with what was being typed. See
+// lib/room-move.js.
+function followMovedRooms(movedRooms) {
+  for (const [from, to] of Object.entries(movedRooms || {})) {
+    const draft = loadDraft(from);
+    if (draft) { saveDraft(to, draft); saveDraft(from, ""); }
+    try {
+      if (localStorage.getItem(ACTIVE_ROOM_KEY) === from) localStorage.setItem(ACTIVE_ROOM_KEY, to);
+    } catch {}
+    if (S.activeRoom !== from || !S.rooms[to]) continue;
+    const input = $("message-input");
+    if (input?.value) saveDraft(to, input.value);
+    // Not the old room's draft any more, so openRoom does not keep it there.
+    S.activeRoom = null;
+    openRoom(to);
+  }
 }
 
 function cleanupStaleSelfEntries() {
@@ -2547,6 +2567,18 @@ function connectGlobalSSE() {
     await refreshActiveRoom();
   });
 
+  // The room moved to a new key: the list shows the new one, and an open page
+  // goes on there.
+  es.addEventListener("room-moved", async (ev) => {
+    touch();
+    try {
+      const { from, to } = JSON.parse(ev.data);
+      await loadRooms();
+      renderRoomList();
+      followMovedRooms({ [from]: to });
+    } catch {}
+  });
+
   es.addEventListener("dm-invite", (ev) => {
     touch();
     try {
@@ -3341,9 +3373,13 @@ async function openDM(peerId, peerUsername, peerKey = "") {
 async function removeRoomMember(peerId, memberName) {
   const roomKey = S.activeRoom;
   if (!roomKey) return;
+  // Every room but P2P Republic, whose key ships with the app, moves to a new
+  // key when somebody is removed. See lib/room-move.js.
+  const movesKey = roomKey !== PRE_JOINED_ROOM_KEY;
   const confirmed = confirm(
     `Remove ${memberName} from this room?\n\n` +
-    "They will not be able to come back. Everyone running PeerChat will stop passing their messages on.",
+    "They will not be able to come back. Everyone running PeerChat will stop passing their messages on." +
+    (movesKey ? " The room also moves to a new key they never get, so invites from before stop working." : ""),
   );
   if (!confirmed) return;
 

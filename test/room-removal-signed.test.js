@@ -70,11 +70,11 @@ async function eventually(check, label) {
 
 // Somebody in both rooms, with what this device sends them.
 const open = [];
-async function connect() {
+async function connect(roomKeys = [THEIRS, MINE]) {
   const pair = await securePair();
   const peer = { pair, frames: [] };
   open.push(peer);
-  swarm.emit("connection", pair.serverStream, { topics: [deriveTopic(THEIRS), deriveTopic(MINE)] });
+  swarm.emit("connection", pair.serverStream, { topics: roomKeys.map(deriveTopic) });
   let buffer = "";
   await new Promise((opened) => {
     peer.transport = attachChatTransport(pair.clientStream, (raw) => {
@@ -88,7 +88,7 @@ async function connect() {
   });
   peer.send = (frame) => peer.transport.send(JSON.stringify(frame) + "\n");
   peer.lists = (roomKey) => peer.frames.filter((frame) => frame.type === "room-bans" && frame.room === wireRoom(roomKey));
-  peer.transport.send(topicsFrame(pair.clientStream, [THEIRS, MINE]));
+  peer.transport.send(topicsFrame(pair.clientStream, roomKeys));
   await eventually(() => peer.frames.find((frame) => frame.type === "room-meta"), "the rooms opening");
   return peer;
 }
@@ -168,10 +168,17 @@ describe("signed removal lists over real connections", () => {
     const sent = await eventually(() => watcher.lists(MINE).find((frame) => frame.bans?.some((ban) => ban.id === "deadbeef")), "the new list");
     assert.equal(checkSignedRemovals({ topic: wireRoom(MINE), creatorKey: DEVICE_KEY, bans: sent.bans, signed: sent.signed }), true);
 
-    // And again, later, when someone is let back in.
+    // The room moved to a new key with the removal (see room-move.test.js),
+    // so letting somebody back in is a list in the new room, signed again.
+    const moved = removed.body.movedTo;
+    assert.match(moved, /^[0-9a-f]{64}$/);
+    const inMoved = await connect([moved]);
+    // The new room's list, signed for it, as anyone in it gets on connecting.
+    const there = await eventually(() => inMoved.lists(moved).find((frame) => frame.signed?.sig), "the list in the new room");
+    assert.ok(there.signed.v > sent.signed.v);
     await request("restore-room-member", "POST", { roomKey: MINE, peerId: "deadbeef" });
-    const after = await eventually(() => watcher.lists(MINE).find((frame) => frame.signed?.v > sent.signed.v), "the list after");
+    const after = await eventually(() => inMoved.lists(moved).find((frame) => frame.signed?.v > there.signed.v), "the list after");
     assert.deepEqual(after.bans, []);
-    assert.equal(checkSignedRemovals({ topic: wireRoom(MINE), creatorKey: DEVICE_KEY, bans: after.bans, signed: after.signed }), true);
+    assert.equal(checkSignedRemovals({ topic: wireRoom(moved), creatorKey: DEVICE_KEY, bans: after.bans, signed: after.signed }), true);
   });
 });

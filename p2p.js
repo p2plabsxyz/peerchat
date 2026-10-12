@@ -75,6 +75,7 @@ import {
   isRoomCreatorConnection,
   normalizeCreatorKey,
   normalizeRoomBans,
+  PINNED_CREATOR_KEYS,
   removeRoomBan,
   resolveCreatorKey,
 } from "./lib/room-moderation.js";
@@ -122,7 +123,12 @@ import {
 } from "./lib/message-signature.js";
 import {
   checkCreatorProof,
+  checkMove,
+  knownBefore,
   makeCreatorRoomKey,
+  normalizeMove,
+  noteKnownKey,
+  signMove,
 } from "./lib/room-move.js";
 
 // Left next to the chat file by a restore from another of this person's
@@ -750,6 +756,221 @@ function applyPendingBans(roomKey, exceptConn = null) {
   broadcastRoomBans(roomKey, exceptConn);
 }
 
+/**
+ * Rooms that move to a new key when somebody is removed. See lib/room-move.js.
+ *
+ * The old room stays here, under its old key, for two things only: its history,
+ * shown with the new room's, and anyone who was offline when it moved, who
+ * hears where it went when they come back, if this device saw them in it
+ * before. Nobody new is let in, and nothing is sent in it from here.
+ */
+const MAX_MOVES = 32;
+const MAX_MOVE_FUTURE_MS = 5 * 60_000;
+
+// Where a room's people are now: the end of its moves.
+function finalRoomKey(roomKey) {
+  let key = roomKey;
+  for (let i = 0; i < MAX_MOVES; i++) {
+    const next = savedData.rooms?.[key]?.movedTo?.to;
+    if (!next || !savedData.rooms[next]) return key;
+    key = next;
+  }
+  return key;
+}
+
+// The moves from a room to where its people are now, oldest first.
+function movesFrom(roomKey) {
+  const moves = [];
+  let key = roomKey;
+  for (let i = 0; i < MAX_MOVES; i++) {
+    const hop = normalizeMove(savedData.rooms?.[key]?.movedTo);
+    if (!hop) break;
+    moves.push(hop);
+    key = hop.to;
+  }
+  return moves;
+}
+
+// The rooms a room moved from, oldest first, whose history is its own.
+function roomsBefore(roomKey) {
+  const before = [];
+  let key = savedData.rooms?.[roomKey]?.movedFrom;
+  for (let i = 0; i < MAX_MOVES && key && savedData.rooms[key]; i++) {
+    before.unshift(key);
+    key = savedData.rooms[key].movedFrom;
+  }
+  return before;
+}
+
+// Somebody seen in a room, by key, with when this device first saw them.
+function noteKnown(roomKey, key) {
+  const room = savedData.rooms?.[roomKey];
+  if (!room || room.isDM || room.movedTo || !key) return;
+  if (!room.knownKeys) room.knownKeys = {};
+  if (noteKnownKey(room.knownKeys, key)) debouncePersist();
+}
+
+// Whether removing somebody moves this room: a room of people made here, not
+// a direct message, and not one whose creator key ships with the app, since
+// its key ships with the app too.
+function movesOnRemoval(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  return !!room && !room.isDM && !room.movedTo && !PINNED_CREATOR_KEYS[roomKey] &&
+    !!signingKeys && !!localKey && isRoomCreator(roomKey);
+}
+
+// Whether a moved room opens to this peer: somebody this device saw in it
+// before it moved, or another of this person's own devices, and not removed.
+// Anyone else, the person removed under a new key included, gets nothing.
+function movedRoomWelcomes(roomKey, peer) {
+  const room = savedData.rooms?.[roomKey];
+  const hop = normalizeMove(room?.movedTo);
+  if (!hop || !peer) return false;
+  const final = finalRoomKey(roomKey);
+  if (isPeerRemovedFromRoom(roomKey, peer) || isPeerRemovedFromRoom(final, peer)) return false;
+  return peer.sibling === true || knownBefore(room.knownKeys, peer.fullId, hop.at);
+}
+
+// Where a room went, to somebody in it who takes moves.
+function sendMoves(conn, roomKey) {
+  const peer = peerForConnection(conn) || pendingPeers.get(conn);
+  const moves = movesFrom(roomKey);
+  if (!peer?.moves || !moves.length) return;
+  try { writeToConnection(conn, JSON.stringify({ type: "room-moved", roomKey, moves }) + "\n"); } catch {}
+}
+
+// A move on to everyone else in the old room this device saw there before it
+// moved. Anyone it did not is let out of the old room on this side.
+function passMovesOn(roomKey, exceptConn = null) {
+  for (const peer of peers) {
+    if (peer.conn === exceptConn || peer.conn.destroyed || !peerSharesRoom(peer, roomKey)) continue;
+    if (movedRoomWelcomes(roomKey, peer)) sendMoves(peer.conn, roomKey);
+    else peer.rooms = peer.rooms.filter((key) => key !== roomKey);
+  }
+}
+
+// The new room in place of the old one: everything this device knew of the old
+// one, the chain the move brought, joined. False when there was nothing to do.
+function adoptMove(fromKey, hop) {
+  const from = savedData.rooms[fromKey];
+  if (!from || from.movedTo) return false;
+  from.movedTo = hop;
+  const existing = savedData.rooms[hop.to];
+  if (existing) {
+    // Here already, from another of this person's devices.
+    if (!existing.movedFrom) existing.movedFrom = fromKey;
+  } else {
+    const joinedAt = from.joinedAt || from.createdAt || Date.now();
+    const creatorKey = resolveCreatorKey(fromKey, from.creatorKey);
+    const members = {};
+    for (const [id, member] of Object.entries(from.members || {})) {
+      // Members already, so the new room does not greet them again.
+      members[id] = { ...member, joinedAt: member?.joinedAt || joinedAt };
+    }
+    savedData.rooms[hop.to] = {
+      roomKey: hop.to,
+      isHost: from.isHost === true,
+      name: from.name, bio: from.bio || "", link: from.link || "", avatar: from.avatar || null,
+      createdAt: from.createdAt || Date.now(),
+      joinedAt,
+      createdBy: from.createdBy || "", createdByName: from.createdByName || "",
+      creatorKey,
+      creatorProof: hop.proof,
+      chain: hop.chain,
+      movedFrom: fromKey,
+      isPinned: !!from.isPinned, isMuted: !!from.isMuted,
+      unreadCount: from.unreadCount || 0, unreadMentions: from.unreadMentions || 0,
+      lastReadTs: from.lastReadTs || 0,
+      lastMessage: from.lastMessage || null,
+      members,
+      moderation: from.moderation ? { ...from.moderation } : { ...DEFAULT_ROOM_MODERATION },
+      bans: normalizeRoomBans(from.bans),
+      bansSigned: { v: normalizeSignedRemovals(from.bansSigned).v, sig: "" },
+      // Whoever was seen in the old room counts in the new one, so a later
+      // move reaches them too.
+      knownKeys: { ...(from.knownKeys || {}) },
+    };
+    // Our own join is not news in a room we were already in.
+    trackId(`${wireTopic(hop.to)}-${localId}-join-${joinedAt}`);
+  }
+  from.unreadCount = 0;
+  from.unreadMentions = 0;
+  if (activeRoom === fromKey) activeRoom = hop.to;
+  persistData();
+
+  appendToFeedWhenOpen(hop.to, {
+    id: `moved-${wireTopic(hop.to)}`,
+    type: "system",
+    moderationNotice: true,
+    text: "This room has a new key, so people removed from it cannot follow. Invites from before no longer work.",
+    ts: hop.at,
+  });
+  if (chatSdk) {
+    joinRoom(chatSdk, hop.to)
+      .then(() => {
+        announceRoomJoin(hop.to);
+        emitRoomUpdate(hop.to);
+      })
+      .catch((error) => console.error(`[chat] Join moved room ${hop.to.slice(0, 8)}: ${error.message}`));
+  }
+  broadcastGlobal("room-moved", { from: fromKey, to: hop.to });
+  emitRoomUpdate(hop.to);
+  return true;
+}
+
+// Written once the room's feed is open, which for a room just moved to is a
+// moment after it is made.
+function appendToFeedWhenOpen(roomKey, entry) {
+  if (!trackId(entry.id)) return;
+  const write = () => appendToFeed(roomKey, entry).catch(() => {});
+  if (roomFeeds[roomKey]) return write();
+  if (!chatSdk) return;
+  openFeed(chatSdk, roomKey).then(write).catch(() => {});
+}
+
+// Moves somebody in a room passed on: each checked against the creator key of
+// the room it leaves, taken, and passed on, until one does not check out.
+function takeMoves(roomKey, moves, conn) {
+  let key = roomKey;
+  for (const raw of moves.slice(0, MAX_MOVES)) {
+    const room = savedData.rooms[key];
+    const hop = normalizeMove(raw);
+    if (!room || room.isDM || !hop) return;
+    if (room.movedTo) {
+      if (room.movedTo.to !== hop.to) return;
+      key = hop.to;
+      continue;
+    }
+    const creatorKey = resolveCreatorKey(key, room.creatorKey);
+    if (!creatorKey || hop.at > Date.now() + MAX_MOVE_FUTURE_MS) return;
+    if (!checkMove({ fromTopic: wireTopic(key), creatorKey, move: hop, topicOf: wireTopic })) return;
+    // Removed here: not ours to follow, whoever passed it on.
+    if (isRemovedFromRoom(key)) return;
+    if (!adoptMove(key, hop)) return;
+    passMovesOn(key, conn);
+    key = hop.to;
+  }
+}
+
+// The creator's side of a removal: the room moves to a new key, made from this
+// device's, and everyone still in it is told.
+function moveRoom(roomKey) {
+  if (!movesOnRemoval(roomKey)) return "";
+  const { roomKey: next, creatorProof } = makeCreatorRoomKey(localKey);
+  const hop = signMove({
+    fromTopic: wireTopic(roomKey),
+    topicOf: wireTopic,
+    to: next,
+    proof: creatorProof,
+    chain: newKeyChain(),
+    at: Date.now(),
+    keyPair: signingKeys,
+  });
+  if (!hop || !adoptMove(roomKey, hop)) return "";
+  passMovesOn(roomKey);
+  return next;
+}
+
 // A room's current key, for somebody now in it on this connection. Never an
 // earlier hour's: whoever joins reads from now on, not what came before.
 function sendRoomChain(conn, roomKey) {
@@ -906,7 +1127,8 @@ function roomUpdatePayload(roomKey) {
 }
 
 function emitRoomUpdate(roomKey) {
-  const payload = roomUpdatePayload(roomKey);
+  // A room that moved shows as the room it went to.
+  const payload = roomUpdatePayload(finalRoomKey(roomKey));
   if (payload) broadcastGlobal("room-update", payload);
 }
 
@@ -1090,6 +1312,7 @@ async function receiveReaction(source, msg, via) {
     ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
   };
   await appendToFeed(roomKey, entry);
+  if (signed) noteKnown(roomKey, signed.author);
   if (signed && via !== "sync") passOn(roomKey, entry, source.conn);
 }
 
@@ -1148,6 +1371,7 @@ async function receiveChatMessage(source, msg, via) {
     ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
   };
   await appendToFeed(roomKey, entry);
+  if (signed) noteKnown(roomKey, signed.author);
 
   if (via === "live" && room) {
     if (!room.members) room.members = {};
@@ -1275,7 +1499,9 @@ function topicsFrameFor(conn) {
     if (proof) rooms.push({ topic, proof });
     if (rooms.length === MAX_SHARED_TOPICS) break;
   }
-  return JSON.stringify({ type: "topics", rooms, pass: true }) + "\n";
+  // pass: takes messages passed on. move: takes a room's move to a new key.
+  // An older build ignores both and never gets either.
+  return JSON.stringify({ type: "topics", rooms, pass: true, move: true }) + "\n";
 }
 
 function shareTopics(conn) {
@@ -1778,14 +2004,18 @@ async function setUpFeed(sdk, roomKey) {
     try {
       const entry = await feed.get(feed.length - 1);
       const msg = feedEntryToMsg(entry, roomKey);
+      // Something new in a room that moved, from somebody who has not moved
+      // yet, shows in the room it went to, with its own room's key for files.
+      const shown = finalRoomKey(roomKey);
+      if (shown !== roomKey && msg.type !== "system" && msg.type !== "reaction") msg.roomKey = roomKey;
 
-      for (const s of roomSseClients[roomKey] || []) {
+      for (const s of roomSseClients[shown] || []) {
         try { s.write(`data: ${JSON.stringify(msg)}\n\n`); } catch {}
       }
 
-      broadcastGlobal("message", { roomKey, ...msg });
+      broadcastGlobal("message", { ...msg, roomKey: shown });
 
-      const room = savedData.rooms[roomKey];
+      const room = savedData.rooms[shown];
       if (room) {
         const isSystem = msg.type === "system";
         const isReaction = msg.type === "reaction";
@@ -1814,7 +2044,7 @@ async function setUpFeed(sdk, roomKey) {
         }
 
         // What you wrote on another of your devices is not news to you.
-        if (!isSystem && !isReaction && roomKey !== activeRoom && !isOwnSender(msg.sender)) {
+        if (!isSystem && !isReaction && shown !== activeRoom && !isOwnSender(msg.sender)) {
           room.unreadCount = (room.unreadCount || 0) + 1;
           const uname = savedData.profile?.username;
           const names = Object.values(room.members || {}).map((member) => member?.username);
@@ -1822,10 +2052,10 @@ async function setUpFeed(sdk, roomKey) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
           }
         }
-        if (isReaction && roomKey !== activeRoom && !isOwnSender(msg.sender)) {
+        if (isReaction && shown !== activeRoom && !isOwnSender(msg.sender)) {
           room.unreadCount = (room.unreadCount || 0) + 1;
         }
-        emitRoomUpdate(roomKey);
+        emitRoomUpdate(shown);
         debouncePersist();
       }
     } catch (err) {
@@ -1840,7 +2070,8 @@ async function setUpFeed(sdk, roomKey) {
 // only send them a second request.
 function sharedRoomEntry(roomKey) {
   const room = savedData.rooms[roomKey];
-  if (!room || !isValidRoomKey(roomKey) || isRemovedFromRoom(roomKey)) return null;
+  // A room that moved is where it went now.
+  if (!room || room.movedTo || !isValidRoomKey(roomKey) || isRemovedFromRoom(roomKey)) return null;
   if (room.isDM && (room.pendingAcceptance || room.blockedByPeer || !room.dmWith)) return null;
   return {
     roomKey,
@@ -2224,6 +2455,8 @@ export function initChat(sdk, options = {}) {
               peerEntry.handshake = true;
               // A newer build passes messages on and takes them passed on. See passOn.
               if (msg.pass === true) peerEntry.passes = true;
+              // And takes a room's move to a new key. See lib/room-move.js.
+              if (msg.move === true) peerEntry.moves = true;
               const added = [];
               for (const entry of msg.rooms.slice(0, MAX_SHARED_TOPICS)) {
                 const topic = typeof entry?.topic === "string" ? entry.topic.toLowerCase() : "";
@@ -2232,8 +2465,16 @@ export function initChat(sdk, options = {}) {
                 const rk = discoveryKeys.get(topic);
                 if (!rk || peerSharesRoom(peerEntry, rk)) continue;
                 if (!checkRoomProof(rk, conn.handshakeHash, conn.remotePublicKey, entry.proof)) continue;
+                // A room that moved opens only to somebody seen in it before.
+                // Held here in case they prove to be another of this person's
+                // devices once their profile comes.
+                if (savedData.rooms[rk]?.movedTo && !movedRoomWelcomes(rk, peerEntry)) {
+                  (peerEntry.closedRooms ||= new Set()).add(rk);
+                  continue;
+                }
                 peerEntry.rooms.push(rk);
                 added.push(rk);
+                noteKnown(rk, peerEntry.fullId);
               }
               if (added.length) {
                 // Our proofs before anything of ours about these rooms, or the
@@ -2243,6 +2484,8 @@ export function initChat(sdk, options = {}) {
                 // The other side ignores rooms already open, so it settles.
                 shareTopics(conn);
                 shareRoomsWith(conn, added);
+                // Back after a room moved: where it went.
+                for (const rk of added) sendMoves(conn, rk);
                 if (!peerEntry.presenceShared) {
                   peerEntry.presenceShared = true;
                   sharePresence(conn);
@@ -2282,6 +2525,16 @@ export function initChat(sdk, options = {}) {
                 // And a chat it asked for before it had proved itself here.
                 for (const [rk, pending] of Object.entries(savedData.pendingDMs || {})) {
                   if (pending?.fromKey === fullId) acceptSiblingDM(rk);
+                }
+                // And where any room it is still in under an old key went.
+                const reopened = [...(entry?.closedRooms || [])].filter((rk) => movedRoomWelcomes(rk, entry));
+                for (const rk of reopened) {
+                  entry.closedRooms.delete(rk);
+                  if (!peerSharesRoom(entry, rk)) entry.rooms.push(rk);
+                }
+                if (reopened.length) {
+                  shareRoomsWith(conn, reopened);
+                  for (const rk of reopened) sendMoves(conn, rk);
                 }
               }
             }
@@ -2509,6 +2762,15 @@ export function initChat(sdk, options = {}) {
           if (msg.roomKey && isValidRoomKey(msg.roomKey)) {
             const peerRecord = peerForConnection(conn);
             if (peerRecord && isPeerRemovedFromRoom(msg.roomKey, peerRecord)) continue;
+          }
+
+          // Where a room went when somebody was removed from it, from anyone
+          // in it. Each move is checked against the creator key of the room it
+          // leaves. See lib/room-move.js.
+          if (msg.type === "room-moved") {
+            if (!msg.roomKey || !Array.isArray(msg.moves)) continue;
+            takeMoves(msg.roomKey, msg.moves, conn);
+            continue;
           }
 
           // A room's current key, from somebody in it. Only a room whose key
@@ -2760,6 +3022,30 @@ export function initChat(sdk, options = {}) {
   }
 }
 
+// A room's messages as a page reads them, with those of the rooms it moved from
+// before its own. A message from an older room keeps that room's key, which is
+// what opens its files. Each room's from before this device joined it is left
+// out, as always.
+async function roomHistory(roomKey) {
+  const messages = [];
+  const chain = [...roomsBefore(roomKey), roomKey];
+  for (const key of chain) {
+    const feed = roomFeeds[key];
+    const room = savedData.rooms[key];
+    if (!feed) continue;
+    const joinedAt = (room && !room.isHost && room.joinedAt) ? room.joinedAt : 0;
+    for (let i = 0; i < feed.length; i++) {
+      try {
+        const msg = feedEntryToMsg(await feed.get(i), key);
+        if (joinedAt && msg.timestamp && msg.timestamp < joinedAt) continue;
+        if (key !== roomKey && msg.type !== "system" && msg.type !== "reaction") msg.roomKey = key;
+        messages.push(msg);
+      } catch {}
+    }
+  }
+  return messages;
+}
+
 function respond(status, data) {
   return new Response(JSON.stringify(data), {
     status,
@@ -2770,7 +3056,10 @@ function respond(status, data) {
 export async function handleChatRequest(req, sdk) {
   const urlObj = new URL(req.url);
   const action = urlObj.searchParams.get("action");
-  const roomKey = urlObj.searchParams.get("roomKey");
+  const requested = urlObj.searchParams.get("roomKey");
+  // A room that moved to a new key answers as the room it went to, so a page
+  // still showing the old one carries on in the new one.
+  const roomKey = requested && savedData.rooms[requested] ? finalRoomKey(requested) : requested;
 
   try {
     if (req.method === "POST") {
@@ -2910,7 +3199,7 @@ export async function handleChatRequest(req, sdk) {
 
       if (action === "remove-room-member") {
         const body = await req.json().catch(() => ({}));
-        const rk = body.roomKey;
+        const rk = body.roomKey && savedData.rooms[body.roomKey] ? finalRoomKey(body.roomKey) : body.roomKey;
         if (!rk || !isValidRoomKey(rk)) return respond(400, { error: "Invalid room key" });
         const room = savedData.rooms[rk];
         if (!room) return respond(404, { error: "Room not found" });
@@ -2939,12 +3228,15 @@ export async function handleChatRequest(req, sdk) {
         broadcastRoomBans(rk);
         persistData();
         emitRoomUpdate(rk);
-        return respond(200, { bans: room.bans });
+        // And the room moves to a new key, which the person removed never
+        // hears. See lib/room-move.js.
+        const movedTo = moveRoom(rk);
+        return respond(200, { bans: room.bans, ...(movedTo && { movedTo }) });
       }
 
       if (action === "restore-room-member") {
         const body = await req.json().catch(() => ({}));
-        const rk = body.roomKey;
+        const rk = body.roomKey && savedData.rooms[body.roomKey] ? finalRoomKey(body.roomKey) : body.roomKey;
         if (!rk || !isValidRoomKey(rk)) return respond(400, { error: "Invalid room key" });
         const room = savedData.rooms[rk];
         if (!room) return respond(404, { error: "Room not found" });
@@ -3274,7 +3566,11 @@ export async function handleChatRequest(req, sdk) {
           id: leaveId, ts: leaveTs,
         }) + "\n";
         relayToRoom(roomKey, leaveMsg);
+        // The rooms it moved from go with it: they were only kept for its
+        // history and for anyone who missed the move.
+        const before = roomsBefore(roomKey);
         await dropRoomLocally(sdk, roomKey);
+        for (const key of before) await dropRoomLocally(sdk, key);
         return respond(200, { ok: true });
       }
 
@@ -3342,7 +3638,13 @@ export async function handleChatRequest(req, sdk) {
 
       if (action === "get-rooms") {
         const rooms = [];
+        // Where each room that moved went, for a page still on an old key.
+        const movedRooms = {};
         for (const [k, r] of Object.entries(savedData.rooms)) {
+          if (r.movedTo) {
+            movedRooms[k] = finalRoomKey(k);
+            continue;
+          }
           rooms.push({
             roomKey: k,
             name: shownRoomName(k, r),
@@ -3374,7 +3676,7 @@ export async function handleChatRequest(req, sdk) {
         }
         prunePeers();
         const onlinePeers = [...new Set(peers.map((p) => p.id))];
-        return respond(200, { rooms, peerProfiles: savedData.peerProfiles || {}, onlinePeers, idlePeers: idleOnlineIds(onlinePeers), pendingDMs: savedData.pendingDMs || {}, blockedPeers: listBlockedPeers() });
+        return respond(200, { rooms, movedRooms, peerProfiles: savedData.peerProfiles || {}, onlinePeers, idlePeers: idleOnlineIds(onlinePeers), pendingDMs: savedData.pendingDMs || {}, blockedPeers: listBlockedPeers() });
       }
 
       if (action === "get-history") {
@@ -3384,18 +3686,12 @@ export async function handleChatRequest(req, sdk) {
           if (savedData.rooms[roomKey]) return respond(200, { messages: [] });
           return respond(404, { error: "Room not found" });
         }
-        const room = savedData.rooms[roomKey];
-        const joinedAt = (room && !room.isHost && room.joinedAt) ? room.joinedAt : 0;
         const messages = [];
         const dedupIds = new Set();
-        for (let i = 0; i < feed.length; i++) {
-          try {
-            const msg = feedEntryToMsg(await feed.get(i), roomKey);
-            if (msg.id && dedupIds.has(msg.id)) continue;
-            if (msg.id) dedupIds.add(msg.id);
-            if (joinedAt && msg.timestamp && msg.timestamp < joinedAt) continue;
-            messages.push(msg);
-          } catch {}
+        for (const msg of await roomHistory(roomKey)) {
+          if (msg.id && dedupIds.has(msg.id)) continue;
+          if (msg.id) dedupIds.add(msg.id);
+          messages.push(msg);
         }
         messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         return respond(200, { messages });
@@ -3408,14 +3704,8 @@ export async function handleChatRequest(req, sdk) {
 
         const stream = new PassThrough();
         stream.write(`event: identity\ndata: ${JSON.stringify({ id: localId })}\n\n`);
-        const _rcvRoom = savedData.rooms[roomKey];
-        const _rcvJoinedAt = (_rcvRoom && !_rcvRoom.isHost && _rcvRoom.joinedAt) ? _rcvRoom.joinedAt : 0;
-        for (let i = 0; i < feed.length; i++) {
-          try {
-            const _entry = feedEntryToMsg(await feed.get(i), roomKey);
-            if (_rcvJoinedAt && _entry.timestamp && _entry.timestamp < _rcvJoinedAt) continue;
-            stream.write(`data: ${JSON.stringify(_entry)}\n\n`);
-          } catch {}
+        for (const _entry of await roomHistory(roomKey)) {
+          stream.write(`data: ${JSON.stringify(_entry)}\n\n`);
         }
         const hb = setInterval(() => { try { stream.write("event: heartbeat\ndata: {}\n\n"); } catch {} }, KEEPALIVE_MS);
         if (!roomSseClients[roomKey]) roomSseClients[roomKey] = [];
@@ -3442,6 +3732,7 @@ export async function handleChatRequest(req, sdk) {
         stream.write(`event: online-peers\ndata: ${JSON.stringify({ peers: onlineIds, idle: idleOnlineIds(onlineIds) })}\n\n`);
 
         for (const k of Object.keys(savedData.rooms)) {
+          if (savedData.rooms[k].movedTo) continue;
           const p = roomUpdatePayload(k);
           if (p) stream.write(`event: room-update\ndata: ${JSON.stringify(p)}\n\n`);
         }
