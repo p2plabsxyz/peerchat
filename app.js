@@ -1216,7 +1216,9 @@ async function loadRooms() {
   }
   S.rooms = next;
   _roomsLoaded = true;
-  if (S.activeRoom && data.movedRooms?.[S.activeRoom]) followMovedRooms(data.movedRooms);
+  // Every move, not only the open room's: one that came while this page was
+  // closed takes its draft and the saved room along, so the page opens there.
+  if (data.movedRooms && Object.keys(data.movedRooms).length) followMovedRooms(data.movedRooms);
 }
 
 // A room that moved to a new key when its creator removed somebody: the page

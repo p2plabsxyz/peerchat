@@ -150,3 +150,19 @@ describe("who a device has seen in a room", () => {
     }), { [key(1)]: [10, 20] });
   });
 });
+
+describe("the page, after a room moved", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
+  const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
+
+  it("follows every move as it loads the rooms, so one that came while it was closed opens in the new room", () => {
+    // loadRooms runs before the saved room is opened again.
+    const load = between("async function loadRooms", "function followMovedRooms");
+    assert.match(load, /if \(data\.movedRooms && Object\.keys\(data\.movedRooms\)\.length\) followMovedRooms\(data\.movedRooms\);/);
+    // And the saved room and draft go along with no room open yet.
+    const follow = between("function followMovedRooms", "function cleanupStaleSelfEntries");
+    assert.ok(follow.indexOf("localStorage.setItem(ACTIVE_ROOM_KEY, to)") > 0);
+    assert.ok(follow.indexOf("localStorage.setItem(ACTIVE_ROOM_KEY, to)") < follow.indexOf("if (S.activeRoom !== from"));
+  });
+});
