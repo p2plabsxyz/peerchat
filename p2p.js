@@ -2350,8 +2350,15 @@ function siblingFor(conn) {
 }
 
 function sendRoomsToSibling(conn, rooms) {
-  if (!rooms.length || !siblingFor(conn)) return;
-  try { writeToConnection(conn, JSON.stringify({ type: "link-rooms", rooms }) + "\n"); } catch {}
+  const sibling = siblingFor(conn);
+  if (!sibling) return;
+  // Never a room that device was removed from, under its key now or one from
+  // before a move: a stolen phone removed from a room would get the new key
+  // from its owner's desktop.
+  const allowed = rooms.filter((entry) =>
+    ![...roomsBefore(entry.roomKey), entry.roomKey].some((rk) => isPeerRemovedFromRoom(rk, sibling)));
+  if (!allowed.length) return;
+  try { writeToConnection(conn, JSON.stringify({ type: "link-rooms", rooms: allowed }) + "\n"); } catch {}
 }
 
 // A room joined here goes to this person's other devices that are online.

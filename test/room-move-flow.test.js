@@ -9,8 +9,9 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import crypto from "hypercore-crypto";
 
-import { handleChatRequest, initChat, deriveTopic } from "../p2p.js";
+import { exportChatTransfer, handleChatRequest, initChat, deriveTopic } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
+import { makeProfileProof } from "../lib/device-link.js";
 import { checkMove, makeCreatorRoomKey, signMove } from "../lib/room-move.js";
 import { newKeyChain } from "../lib/key-chain.js";
 import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
@@ -28,6 +29,7 @@ const SAM = pair(64);
 const OLDER = pair(65);
 const NEWCOMER = pair(66);
 const UNKNOWN = pair(67);
+const PHONE = pair(68);
 const idOf = (keyPair) => keyPair.publicKey.toString("hex").slice(0, 8);
 
 const swarm = new EventEmitter();
@@ -251,5 +253,41 @@ describe("a move taken from the creator, by somebody in the room", () => {
     relay.send({ type: "room-moved", room: wireRoom(other), moves: [forged] });
     await sleep(300);
     assert.equal((await rooms()).movedRooms[other], undefined);
+  });
+});
+
+describe("a room that moves, and the person's own devices", () => {
+  let roomKey, kept, link;
+  const proveSibling = (peer) => peer.send({
+    type: "profile", peerId: idOf(PHONE), username: "Ada@mobile", bio: "", avatar: null, rooms: [wireRoom(kept)],
+    link: makeProfileProof(link, { username: "Ada", bio: "", avatar: null, at: 1 }, PHONE.publicKey.toString("hex")),
+  });
+  const offered = (peer) => peer.of("link-rooms").flatMap((frame) => frame.rooms.map((room) => room.roomKey));
+
+  before(async () => {
+    roomKey = (await call("create-key", "POST", { name: "Family" })).roomKey;
+    kept = (await call("create-key", "POST", { name: "Kept" })).roomKey;
+    for (const key of [roomKey, kept]) await call("join", "POST", {}, key);
+    link = exportChatTransfer({ targetType: "mobile" }).link;
+  });
+
+  it("never gives a removed device of theirs the new key, even when it proves it is theirs", async () => {
+    const phone = await connect(PHONE, [roomKey, kept]);
+    await opened(phone, kept);
+    proveSibling(phone);
+    await eventually(() => offered(phone).includes(roomKey) && offered(phone).includes(kept), "the rooms, before");
+    // Removed, as a phone that was stolen would be.
+    const moved = (await call("remove-room-member", "POST", { roomKey, peerId: idOf(PHONE) })).movedTo;
+    assert.match(moved, /^[0-9a-f]{64}$/);
+    await phone.close();
+
+    const back = await connect(PHONE, [roomKey, kept]);
+    await opened(back, kept);
+    proveSibling(back);
+    await eventually(() => offered(back).includes(kept), "the rooms, after");
+    await sleep(200);
+    assert.equal(offered(back).includes(moved), false);
+    assert.equal(offered(back).includes(roomKey), false);
+    assert.equal(back.of("room-moved").length, 0);
   });
 });
