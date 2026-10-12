@@ -64,6 +64,19 @@ const MAX_AUTHOR_MESSAGES_PER_WINDOW = 120;
 // Passing on is for what is being said now. Anything older comes in history,
 // which starts at the right time for each person.
 const MAX_PASSED_MESSAGE_AGE_MS = 10 * 60 * 1000;
+// Ids first: a newer build hears only the id of each new message from most of
+// its connections, and asks one of them for the message itself. See passOn.
+const HAVE_BATCH_MS = 50;
+const MAX_IDS_PER_FRAME = 256;
+const MAX_HAVE_IDS_PER_WINDOW = 6000;
+const MAX_WANT_IDS_PER_WINDOW = 6000;
+// How long an asked-for message has to arrive before the next neighbour that
+// has it is asked, and how long to keep trying at all.
+const WANT_RETRY_MS = 3000;
+const WANT_GIVE_UP_MS = 30_000;
+const MAX_WANTED = 4096;
+const MAX_REMEMBERED_PASSES = 4096;
+const MAX_IDS_HEARD_PER_PEER = 2048;
 const MAX_AUTHOR_RATES = 4096;
 const MAX_PROVEN_KEYS = 4096;
 
@@ -200,6 +213,11 @@ const authorRates = new Map();
 // The whole key behind each short id, as connections proved them, so a key
 // ground to match somebody's id cannot sign as them.
 const provenKeys = new Map();
+// Messages this device passed on lately, by id, for anyone who asks for one,
+// and the ones it asked for, with who else has them.
+const recentPasses = new Map();
+const wantedIds = new Map();
+let wantTimer = null;
 let safeStore = null;
 let dataPath = null;
 let activeRoom = null;
@@ -1389,13 +1407,140 @@ async function receiveChatMessage(source, msg, via) {
 // neighbour already has stops at its first check, so a message crosses the room
 // in a few steps. It goes in a wrapper an older build drops, and only to peers
 // whose handshake said they take it.
+//
+// Ids first: to a peer whose handshake said it takes them (have: true), only the
+// message's id goes, in a batch, and the peer asks for the message itself if it
+// does not have it yet (want), from whichever neighbour told it first. Sending
+// the whole message on every connection meant a device took in a copy from
+// each of its connections, about a hundred in a big room. Now it takes the
+// message once, and an id from the rest. An older build gets the whole message
+// as before.
 function passOn(roomKey, entry, fromConn) {
   if (!entry?.as) return;
+  rememberPass(roomKey, entry);
   const frame = JSON.stringify({ type: "pass", roomKey, m: entry }) + "\n";
   for (const peer of peers) {
     if (peer.conn === fromConn || peer.conn.destroyed || !peer.passes || !peerSharesRoom(peer, roomKey)) continue;
     if (peer.fullId === entry.ak || isPeerRemovedFromRoom(roomKey, peer)) continue;
+    if (peer.haves) {
+      if (!peer.heardIds?.has(entry.id)) announceId(peer, roomKey, entry.id);
+      continue;
+    }
     try { writeToConnection(peer.conn, frame); } catch {}
+  }
+}
+
+// Kept for ten minutes, as long as a message is passed on at all, for anyone
+// who asks for it by id.
+function rememberPass(roomKey, entry) {
+  const now = Date.now();
+  recentPasses.delete(entry.id);
+  recentPasses.set(entry.id, { roomKey, entry, at: now });
+  for (const [id, kept] of recentPasses) {
+    if (recentPasses.size <= MAX_REMEMBERED_PASSES && now - kept.at < MAX_PASSED_MESSAGE_AGE_MS) break;
+    recentPasses.delete(id);
+  }
+}
+
+function announceId(peer, roomKey, id) {
+  if (!peer.haveQueue) peer.haveQueue = new Map();
+  const ids = peer.haveQueue.get(roomKey) || [];
+  ids.push(id);
+  peer.haveQueue.set(roomKey, ids);
+  if (peer.haveTimer) return;
+  peer.haveTimer = setTimeout(() => {
+    peer.haveTimer = null;
+    const queue = peer.haveQueue;
+    peer.haveQueue = new Map();
+    if (peer.conn.destroyed) return;
+    for (const [rk, list] of queue) {
+      for (let i = 0; i < list.length; i += MAX_IDS_PER_FRAME) {
+        try { writeToConnection(peer.conn, JSON.stringify({ type: "have", roomKey: rk, ids: list.slice(i, i + MAX_IDS_PER_FRAME) }) + "\n"); } catch {}
+      }
+    }
+  }, HAVE_BATCH_MS);
+  peer.haveTimer.unref?.();
+}
+
+// A budget of ids per connection a minute, for what neighbours say they have
+// and what they ask for.
+function consumeIdRate(peer, field, count, max) {
+  const now = Date.now();
+  if (!peer[field] || now >= peer[field].resetsAt) peer[field] = { count: 0, resetsAt: now + RATE_WINDOW_MS };
+  if (peer[field].count + count > max) return false;
+  peer[field].count += count;
+  return true;
+}
+
+const isMessageId = (id) => typeof id === "string" && id.length > 0 && id.length <= 128;
+
+// Ids a neighbour has: anything new is asked for, from the first one to say
+// so, and the rest are kept as the next to ask.
+function takeHaves(peer, roomKey, ids) {
+  const list = ids.filter(isMessageId).slice(0, MAX_IDS_PER_FRAME);
+  if (!list.length || !consumeIdRate(peer, "haveRate", list.length, MAX_HAVE_IDS_PER_WINDOW)) return;
+  if (!peer.heardIds) peer.heardIds = new Set();
+  const ask = [];
+  const now = Date.now();
+  for (const id of list) {
+    peer.heardIds.add(id);
+    if (peer.heardIds.size > MAX_IDS_HEARD_PER_PEER) peer.heardIds.delete(peer.heardIds.values().next().value);
+    if (seenIds.has(id)) continue;
+    const wanted = wantedIds.get(id);
+    if (wanted) {
+      if (!wanted.sources.includes(peer)) wanted.sources.push(peer);
+      continue;
+    }
+    if (wantedIds.size >= MAX_WANTED) continue;
+    wantedIds.set(id, { roomKey, sources: [peer], asked: 0, askedAt: now, since: now });
+    ask.push(id);
+  }
+  if (ask.length) sendWant(peer, roomKey, ask);
+  if (wantedIds.size && !wantTimer) {
+    wantTimer = setInterval(retryWants, 1000);
+    wantTimer.unref?.();
+  }
+}
+
+function sendWant(peer, roomKey, ids) {
+  try { writeToConnection(peer.conn, JSON.stringify({ type: "want", roomKey, ids }) + "\n"); } catch {}
+}
+
+// A message asked for that has not come: the next neighbour that has it is
+// asked, until none is left or it has been too long.
+function retryWants() {
+  const now = Date.now();
+  for (const [id, wanted] of wantedIds) {
+    if (seenIds.has(id) || now - wanted.since > WANT_GIVE_UP_MS) {
+      wantedIds.delete(id);
+      continue;
+    }
+    if (now - wanted.askedAt < WANT_RETRY_MS) continue;
+    let next = wanted.asked + 1;
+    while (next < wanted.sources.length && (wanted.sources[next].conn.destroyed || !peerSharesRoom(wanted.sources[next], wanted.roomKey))) next += 1;
+    if (next >= wanted.sources.length) {
+      wantedIds.delete(id);
+      continue;
+    }
+    wanted.asked = next;
+    wanted.askedAt = now;
+    sendWant(wanted.sources[next], wanted.roomKey, [id]);
+  }
+  if (!wantedIds.size && wantTimer) {
+    clearInterval(wantTimer);
+    wantTimer = null;
+  }
+}
+
+// Messages a neighbour asked this device for, which it passed on lately.
+function answerWants(peer, roomKey, ids) {
+  const list = ids.filter(isMessageId).slice(0, MAX_IDS_PER_FRAME);
+  if (!list.length || !consumeIdRate(peer, "wantRate", list.length, MAX_WANT_IDS_PER_WINDOW)) return;
+  if (isPeerRemovedFromRoom(roomKey, peer)) return;
+  for (const id of list) {
+    const kept = recentPasses.get(id);
+    if (!kept || kept.roomKey !== roomKey) continue;
+    try { writeToConnection(peer.conn, JSON.stringify({ type: "pass", roomKey, m: kept.entry }) + "\n"); } catch {}
   }
 }
 
@@ -1499,9 +1644,10 @@ function topicsFrameFor(conn) {
     if (proof) rooms.push({ topic, proof });
     if (rooms.length === MAX_SHARED_TOPICS) break;
   }
-  // pass: takes messages passed on. move: takes a room's move to a new key.
-  // An older build ignores both and never gets either.
-  return JSON.stringify({ type: "topics", rooms, pass: true, move: true }) + "\n";
+  // pass: takes messages passed on. have: takes their ids first and asks for
+  // what it lacks. move: takes a room's move to a new key. An older build
+  // ignores all three and never gets any of them.
+  return JSON.stringify({ type: "topics", rooms, pass: true, have: true, move: true }) + "\n";
 }
 
 function shareTopics(conn) {
@@ -2455,6 +2601,8 @@ export function initChat(sdk, options = {}) {
               peerEntry.handshake = true;
               // A newer build passes messages on and takes them passed on. See passOn.
               if (msg.pass === true) peerEntry.passes = true;
+              // Takes ids first, and asks for what it lacks. See passOn.
+              if (msg.have === true) peerEntry.haves = true;
               // And takes a room's move to a new key. See lib/room-move.js.
               if (msg.move === true) peerEntry.moves = true;
               const added = [];
@@ -2980,12 +3128,24 @@ export function initChat(sdk, options = {}) {
           // A message or reaction somebody passed on, in a wrapper an older
           // build drops. Only a signed one counts, and it is its author's.
           if (msg.type === "pass") {
-            if (!msg.roomKey || moderationIsKicked(remoteId, msg.roomKey) || !consumePassRate(peer)) continue;
             const inner = msg.m;
             if (!inner || typeof inner !== "object" || Array.isArray(inner)) continue;
+            // One this device asked for comes outside the budget for the ones
+            // nobody asked for. See passOn.
+            const asked = isMessageId(inner.id) && wantedIds.get(inner.id)?.sources.includes(peer);
+            if (!msg.roomKey || moderationIsKicked(remoteId, msg.roomKey) || (!asked && !consumePassRate(peer))) continue;
+            if (asked) wantedIds.delete(inner.id);
             const passed = { ...inner, roomKey: msg.roomKey };
             if (inner.type === "reaction") receiveReaction(source, passed, "pass").catch(() => {});
             else if (inner.type === undefined) receiveChatMessage(source, passed, "pass").catch(() => {});
+            continue;
+          }
+
+          // Ids a neighbour has, and ids a neighbour asks for. See passOn.
+          if (msg.type === "have" || msg.type === "want") {
+            if (!msg.roomKey || !Array.isArray(msg.ids) || moderationIsKicked(remoteId, msg.roomKey)) continue;
+            if (msg.type === "have") takeHaves(peer, msg.roomKey, msg.ids);
+            else answerWants(peer, msg.roomKey, msg.ids);
             continue;
           }
 
