@@ -3131,10 +3131,13 @@ export function initChat(sdk, options = {}) {
             const inner = msg.m;
             if (!inner || typeof inner !== "object" || Array.isArray(inner)) continue;
             // One this device asked for comes outside the budget for the ones
-            // nobody asked for. See passOn.
-            const asked = isMessageId(inner.id) && wantedIds.get(inner.id)?.sources.includes(peer);
+            // nobody asked for, once from each neighbour asked. It stops being
+            // asked for only once a copy that checks out is kept, so a forged
+            // answer does not end the asking. See passOn.
+            const wanted = isMessageId(inner.id) ? wantedIds.get(inner.id) : null;
+            const asked = !!wanted && wanted.sources.includes(peer) && !wanted.answered?.has(peer);
             if (!msg.roomKey || moderationIsKicked(remoteId, msg.roomKey) || (!asked && !consumePassRate(peer))) continue;
-            if (asked) wantedIds.delete(inner.id);
+            if (asked) (wanted.answered ||= new Set()).add(peer);
             const passed = { ...inner, roomKey: msg.roomKey };
             if (inner.type === "reaction") receiveReaction(source, passed, "pass").catch(() => {});
             else if (inner.type === undefined) receiveChatMessage(source, passed, "pass").catch(() => {});

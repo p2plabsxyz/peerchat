@@ -165,6 +165,18 @@ describe("ids first", () => {
     assert.equal((await shown()).filter((text) => text === "Heard about").length, 1);
   });
 
+  it("keeps asking when the first answer does not check out", async () => {
+    const message = written(pair(82), "The real one");
+    const forged = { ...message, as: "00".repeat(64) };
+    alice.send({ type: "have", room: wireRoom(ROOM), ids: [message.id] });
+    await eventually(() => alice.ids("want").includes(message.id), "the first ask");
+    bob.send({ type: "have", room: wireRoom(ROOM), ids: [message.id] });
+    alice.send({ type: "pass", room: wireRoom(ROOM), m: forged });
+    await eventually(() => bob.ids("want").includes(message.id), "the second ask", 120);
+    bob.send({ type: "pass", room: wireRoom(ROOM), m: message });
+    await eventually(async () => (await shown()).includes("The real one"), "the real message");
+  });
+
   it("asks the next neighbour that has it when the first does not answer", async () => {
     const far = await connect(FAR);
     const message = written(pair(81), "Second try");
