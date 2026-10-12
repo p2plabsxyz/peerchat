@@ -120,6 +120,10 @@ import {
   signMessage,
   signReaction,
 } from "./lib/message-signature.js";
+import {
+  checkCreatorProof,
+  makeCreatorRoomKey,
+} from "./lib/room-move.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -696,6 +700,54 @@ function signedRemovalsFor(roomKey) {
 // The version stays, so the next one is later.
 function unsignRemovals(room) {
   room.bansSigned = { v: normalizeSignedRemovals(room.bansSigned).v, sig: "" };
+}
+
+// The secret that shows who made a room, when this device holds one that
+// checks out against the creator key it trusts. See lib/room-move.js.
+function creatorProofFor(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  const creatorKey = resolveCreatorKey(roomKey, room?.creatorKey);
+  return room?.creatorProof && creatorKey && checkCreatorProof(roomKey, creatorKey, room.creatorProof)
+    ? room.creatorProof
+    : "";
+}
+
+// The creator key from anyone in the room, when it comes with the secret that
+// made the room's key out of it. Before this, only the creator's own connection
+// could say who made a room, so in a room bigger than one device's connections
+// most members never learned it, and dropped every removal list as unchecked.
+// True when the room learned something.
+function takeCreatorProof(roomKey, room, announcedKey, proof) {
+  if (room.isDM) return false;
+  const key = normalizeCreatorKey(announcedKey);
+  if (!key || !checkCreatorProof(roomKey, key, proof)) return false;
+  const held = resolveCreatorKey(roomKey, room.creatorKey);
+  if (held && held !== key) return false;
+  let changed = false;
+  if (!room.creatorKey) { room.creatorKey = key; changed = true; }
+  if (!room.creatorProof) { room.creatorProof = proof.toLowerCase(); changed = true; }
+  // The short id is a label, and whoever said it first may have been wrong.
+  if (room.createdBy !== key.slice(0, 8)) { room.createdBy = key.slice(0, 8); changed = true; }
+  return changed;
+}
+
+// A signed removal list that came before this device knew who made the room,
+// checked now that it does. It used to be dropped, and the next one came only
+// with the next removal.
+function applyPendingBans(roomKey, exceptConn = null) {
+  const room = savedData.rooms?.[roomKey];
+  const pending = room?.pendingBans;
+  const creatorKey = resolveCreatorKey(roomKey, room?.creatorKey);
+  if (!pending || !creatorKey) return;
+  delete room.pendingBans;
+  const signed = normalizeSignedRemovals(pending.signed);
+  if (signed.v <= normalizeSignedRemovals(room.bansSigned).v) return;
+  if (!checkSignedRemovals({ topic: wireTopic(roomKey), creatorKey, bans: pending.bans, signed })) return;
+  applyRoomBans(roomKey, pending.bans);
+  room.bansSigned = signed;
+  persistData();
+  emitRoomUpdate(roomKey);
+  broadcastRoomBans(roomKey, exceptConn);
 }
 
 // A room's current key, for somebody now in it on this connection. Never an
@@ -1360,6 +1412,10 @@ function sendRoomMeta(conn, rk) {
   const hasRealName = room.name && room.name !== rk.slice(0, 8) + "...";
   if (!hasRealName && !room.isHost) return;
 
+  // Without the secret that made the room's key, a creator key counts only
+  // from the creator's own connection, so only the creator sends one. With it,
+  // anyone in the room can, and the other side checks it against the key.
+  const creatorProof = creatorProofFor(rk);
   try {
     writeToConnection(conn, JSON.stringify({
       type: "room-meta",
@@ -1370,13 +1426,21 @@ function sendRoomMeta(conn, rk) {
       avatar: room.avatar || null,
       createdAt: Number.isSafeInteger(room.createdAt) ? room.createdAt : 0,
       createdBy: room.createdBy || (room.isHost ? localId : ""),
-      // Announced by the creator alone. A peer passing this along cannot prove
-      // it, so the other side will not take it from them.
-      creatorKey: room.isHost ? localKey : "",
+      creatorKey: room.isHost ? localKey : creatorProof ? resolveCreatorKey(rk, room.creatorKey) : "",
+      ...(creatorProof && { creatorProof }),
       createdByName: room.createdByName || (room.isHost ? (myName() || localId) : ""),
       moderation: room.moderation || null,
     }) + "\n");
   } catch {}
+}
+
+// Room details to everyone else in the room, for the creator key this device
+// just learned, so it goes on through the room.
+function broadcastRoomMeta(roomKey, exceptConn = null) {
+  for (const peer of peers) {
+    if (peer.conn === exceptConn || peer.conn.destroyed || !peerSharesRoom(peer, roomKey)) continue;
+    sendRoomMeta(peer.conn, roomKey);
+  }
 }
 
 // Packed by size, not by count. One frame carrying every member's data-url
@@ -1790,6 +1854,7 @@ function sharedRoomEntry(roomKey) {
     createdBy: room.createdBy || (room.isHost ? localId : ""),
     createdByName: room.createdByName || "",
     creatorKey: room.creatorKey || (room.isHost ? localKey : ""),
+    ...(creatorProofFor(roomKey) && { creatorProof: creatorProofFor(roomKey) }),
     // The person's own other device reads the room's history as this one does.
     ...(roomChainFor(roomKey) && { chain: roomChainFor(roomKey) }),
   };
@@ -1856,6 +1921,10 @@ function addRooms(rooms) {
       // A copied chat file carries keys the keychain here cannot open.
       existing.roomKey = room.roomKey;
       if (room.creatorKey && !existing.creatorKey) existing.creatorKey = room.creatorKey;
+      if (room.creatorProof && !existing.creatorProof &&
+          checkCreatorProof(room.roomKey, resolveCreatorKey(room.roomKey, existing.creatorKey), room.creatorProof)) {
+        existing.creatorProof = room.creatorProof;
+      }
       if (room.chain && roomRotates(room.roomKey)) existing.chain = earlierKeyChain(existing.chain, room.chain);
       continue;
     }
@@ -1875,6 +1944,7 @@ function addRooms(rooms) {
       lastMessage: null, members: {},
       moderation: { ...DEFAULT_ROOM_MODERATION },
       creatorKey: room.creatorKey,
+      ...(room.creatorProof && checkCreatorProof(room.roomKey, room.creatorKey, room.creatorProof) && { creatorProof: room.creatorProof }),
       bans: [],
       ...(room.chain && roomRotates(room.roomKey) && { chain: room.chain }),
       ...(room.isDM ? { isDM: true, dmWith: room.dmWith } : {}),
@@ -2482,6 +2552,17 @@ export function initChat(sdk, options = {}) {
               continue;
             }
 
+            // Signed, but this device does not know who made the room yet:
+            // kept, and checked once it does. See applyPendingBans.
+            if (signed.sig && !creatorKey) {
+              const pendingV = normalizeSignedRemovals(room.pendingBans?.signed).v;
+              if (signed.v > held.v && signed.v > pendingV) {
+                room.pendingBans = { bans: normalizeRoomBans(msg.bans), signed };
+                debouncePersist();
+              }
+              continue;
+            }
+
             // Unsigned, from an older build: only the creator's own connection.
             if (!isRoomCreatorConnection({
               roomKey: msg.roomKey,
@@ -2531,8 +2612,12 @@ export function initChat(sdk, options = {}) {
               updated = true;
             }
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
-            // Only from the creator, and only once. The connection is what
-            // proves it: whoever announces has to be the key they announce.
+            const knewCreator = !!resolveCreatorKey(msg.roomKey, room.creatorKey);
+            // From anyone, with the secret that made the room's key out of the
+            // creator's. See lib/room-move.js.
+            if (takeCreatorProof(msg.roomKey, room, msg.creatorKey, msg.creatorProof)) updated = true;
+            // Otherwise only from the creator, and only once. The connection is
+            // what proves it: whoever announces has to be the key they announce.
             if (acceptsCreatorKey({
               roomKey: msg.roomKey,
               storedKey: room.creatorKey,
@@ -2542,6 +2627,11 @@ export function initChat(sdk, options = {}) {
             })) {
               room.creatorKey = normalizeCreatorKey(msg.creatorKey);
               updated = true;
+            }
+            if (!knewCreator && resolveCreatorKey(msg.roomKey, room.creatorKey)) {
+              applyPendingBans(msg.roomKey);
+              // On through the room, to everyone this device can show it to.
+              if (creatorProofFor(msg.roomKey)) broadcastRoomMeta(msg.roomKey, conn);
             }
             if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
 
@@ -2689,10 +2779,15 @@ export async function handleChatRequest(req, sdk) {
         if (body.avatar != null && body.avatar !== "" && sanitizeAvatar(body.avatar) === null) {
           return respond(400, { error: "Invalid room image" });
         }
-        // Marked, with a chain, so its keys rotate. See lib/key-chain.js.
-        const key = makeRotatingRoomKey();
+        // Marked, with a chain, so its keys rotate (lib/key-chain.js), and made
+        // from this device's key, so anyone in the room can check who made it
+        // (lib/room-move.js).
+        const { roomKey: key, creatorProof } = localKey
+          ? makeCreatorRoomKey(localKey)
+          : { roomKey: makeRotatingRoomKey(), creatorProof: "" };
         savedData.rooms[key] = {
           chain: newKeyChain(),
+          ...(creatorProof && { creatorProof }),
           roomKey: key, isHost: true,
           name: clamp(body.name, MAX_NAME_LEN) || "New Room",
           bio: clamp(body.bio, MAX_BIO_LEN),
