@@ -150,6 +150,15 @@ import {
   normalizeRoomDetails,
   signRoomDetails,
 } from "./lib/room-details.js";
+import { lastMessageOf, previewNeedsName } from "./lib/message-preview.js";
+import {
+  newestHits,
+  queryMatcher,
+  SEARCH_SCAN_PER_ROOM,
+  SEARCH_SCAN_TOTAL,
+  searchHit,
+  searchQuery,
+} from "./lib/message-search.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -2234,8 +2243,24 @@ async function setUpFeed(sdk, roomKey) {
   const feed = await openRoomFeed(sdk, roomKey);
   roomFeeds[roomKey] = feed;
 
+  // A last message kept as a file's address, from before the chat list named
+  // files, is read again here and gets the file's name.
+  const last = savedData.rooms[roomKey]?.lastMessage;
+  const stale = previewNeedsName(last);
+  let lastEntry = null;
   for (let i = 0; i < feed.length; i++) {
-    try { const e = await feed.get(i); if (e.id) seenIds.add(e.id); } catch {}
+    try {
+      const e = await feed.get(i);
+      if (e.id) seenIds.add(e.id);
+      if (stale && !e.type && e.ts === last.timestamp && e.sender === last.sender) lastEntry = e;
+    } catch {}
+  }
+  const room = savedData.rooms[roomKey];
+  if (room && lastEntry) {
+    try {
+      room.lastMessage = lastMessageOf(feedEntryToMsg(lastEntry, roomKey));
+      debouncePersist();
+    } catch {}
   }
 
   feed.on("append", async () => {
@@ -2264,14 +2289,8 @@ async function setUpFeed(sdk, roomKey) {
           emitRoomUpdate(roomKey);
         }
         const msgText = typeof msg.message === "string" ? msg.message : "";
-        if (!isSystem && !isReaction && msgText) {
-          room.lastMessage = {
-            sender: msg.sender,
-            senderName: msg.senderName,
-            message: msgText.slice(0, 120),
-            timestamp: msg.timestamp,
-          };
-        }
+        // A file shows by its name, or as a photo or video, not its address.
+        if (!isSystem && !isReaction && msgText) room.lastMessage = lastMessageOf(msg);
         if (isReaction && msg.emoji) {
           room.lastMessage = {
             sender: msg.sender,
@@ -3321,6 +3340,62 @@ async function roomHistory(roomKey) {
   return messages;
 }
 
+// A stored message as a search reads it: its words and file details, opened
+// here. The preview card is left out, and so is the copy a new message keeps
+// for the room to show, which is not the search's to take.
+function searchableEntry(entry, roomKey) {
+  if (!entry || entry.type) return null;
+  if (!(entry.ct && entry.iv && entry.tag)) {
+    return { id: entry.id, sender: entry.sender, senderName: entry.sn || entry.sender, message: entry.message, timestamp: entry.timestamp || entry.ts };
+  }
+  const payload = decodeMessagePayload(decryptMsg(entry.ct, entry.iv, entry.tag, roomKey, entry.e));
+  const file = payload.fileName ? payload : entry;
+  return {
+    id: entry.id, sender: entry.sender, senderName: entry.sn || entry.sender,
+    message: payload.text, timestamp: entry.ts,
+    ...(file.fileName && { fileName: file.fileName }),
+    ...(file.fileEnc === true && { fileEnc: true }),
+  };
+}
+
+// Every chat searched at once, from the chat list. Only what this device keeps
+// is read, so a search goes to nobody. Each chat's newest entries are read,
+// the most recently active chats first, with a limit in all, and the newest
+// matches come back. A room that moved is searched with the rooms it moved
+// from, and each message from before this device joined is left out, as the
+// chat itself leaves it out. See lib/message-search.js.
+async function searchHistory(query) {
+  const matcher = queryMatcher(query);
+  if (!matcher) return [];
+  const lastActive = (room) => room.lastMessage?.timestamp || room.createdAt || 0;
+  const rooms = Object.entries(savedData.rooms)
+    .filter(([, room]) => !room.movedTo)
+    .sort(([, a], [, b]) => lastActive(b) - lastActive(a));
+  let budget = SEARCH_SCAN_TOTAL;
+  let hits = [];
+  for (const [roomKey] of rooms) {
+    if (budget <= 0) break;
+    let left = Math.min(SEARCH_SCAN_PER_ROOM, budget);
+    for (const key of [roomKey, ...roomsBefore(roomKey).reverse()]) {
+      const feed = roomFeeds[key];
+      const room = savedData.rooms[key];
+      if (!feed) continue;
+      const joinedAt = room && !room.isHost && room.joinedAt ? room.joinedAt : 0;
+      for (let i = feed.length - 1; i >= 0 && left > 0; i--) {
+        left--;
+        budget--;
+        let msg = null;
+        try { msg = searchableEntry(await feed.get(i, { wait: false }), key); } catch {}
+        if (!msg || (joinedAt && msg.timestamp && msg.timestamp < joinedAt)) continue;
+        const hit = searchHit(msg, matcher);
+        if (hit) hits.push({ ...hit, roomKey });
+      }
+    }
+    if (hits.length > 200) hits = newestHits(hits);
+  }
+  return newestHits(hits);
+}
+
 function respond(status, data) {
   return new Response(JSON.stringify(data), {
     status,
@@ -3899,6 +3974,15 @@ export async function handleChatRequest(req, sdk) {
         }) + "\n";
         relayToRoom(roomKey, requestMsg);
         return respond(200, { ok: true });
+      }
+
+      // The chat list's search, over the history kept here. See searchHistory.
+      // The words come in the body: PeerSky notes each address it is asked
+      // for in its log, and what somebody searches their chats for stays out.
+      if (action === "search-messages") {
+        const body = await req.json().catch(() => ({}));
+        const query = searchQuery(body.q);
+        return respond(200, { query, results: query ? await searchHistory(query) : [] });
       }
     }
 

@@ -56,4 +56,21 @@ describe("message requests", () => {
     assert.match(row, /\.request-actions \{ display: flex/);
     assert.match(app, /actions\.className = "request-actions"/);
   });
+
+  // Joining the conversation takes a few seconds, and an Accept that showed
+  // nothing in that time looked as if it had not worked.
+  it("shows an accepted request on its way until the conversation is there", () => {
+    const accept = app.slice(app.indexOf("async function acceptDM("), app.indexOf("async function rejectDM("));
+    assert.match(accept, /acceptingDMs\.add\(roomKey\);\s*renderRequestsList\(\);/);
+    assert.match(accept, /finally \{\s*acceptingDMs\.delete\(roomKey\);/);
+    // With nobody else waiting the conversation opens, and the window closes
+    // once it has.
+    assert.match(accept, /if \(!Object\.keys\(S\.pendingDMs \|\| \{\}\)\.length && S\.rooms\[result\.roomKey\]\) await openRoom\(result\.roomKey\);/);
+    assert.ok(accept.indexOf("await openRoom(") < accept.indexOf('$("requests-modal")?.classList.remove("open")'));
+
+    const list = app.slice(app.indexOf("function renderRequestsList()"), app.indexOf("async function blockRequest("));
+    assert.match(list, /if \(acceptingDMs\.has\(roomKey\)\) \{/);
+    assert.match(list, /<span class="spinner" aria-hidden="true"><\/span>Opening…/);
+    assert.match(list, /for \(const button of \[block, decline, accept\]\) button\.disabled = true;/);
+  });
 });

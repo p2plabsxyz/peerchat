@@ -46,7 +46,7 @@
         </div>
         <div id="sidebar-body">
           <button type="button" id="requests-btn" class="requests-btn" hidden></button>
-          <input type="text" id="room-search" placeholder="Search rooms…" autocomplete="off" spellcheck="false" />
+          <input type="text" id="room-search" placeholder="Search rooms and messages" aria-label="Search rooms and messages" autocomplete="off" spellcheck="false" />
           <div id="room-list"></div>
           <footer class="chat-footer">
             <a href="./about.html">About</a>
@@ -116,6 +116,7 @@
             <button data-action="react">React</button>
             <button data-action="reply">Reply</button>
             <button data-action="copy-msg">Copy Text</button>
+            <button data-action="download" style="display:none">Download</button>
             <button data-action="select">Select</button>
             <button data-action="info">Info</button>
           </div>
@@ -136,10 +137,10 @@
           <input type="text" id="new-room-name" placeholder="Room name" maxlength="80" required />
           <textarea id="new-room-bio" placeholder="Description (optional)" maxlength="300" rows="2"></textarea>
           <input type="url" id="new-room-link" placeholder="Link (optional)" maxlength="512" />
-          <p class="modal-note">Room name, picture, description, and link cannot be edited after creation.</p>
+          <p class="modal-note">You can change these later, and everyone in the room sees the change.</p>
           <hr />
           <h4>Moderation</h4>
-          <p class="modal-note">Settings are fixed once the room is created.</p>
+          <p class="modal-note">You can change these later too.</p>
           <div class="field toggle-row">
             <label>Abuse filter</label>
             <label class="toggle"><input type="checkbox" id="mod-abuse-filter" checked /><span class="slider"></span></label>
@@ -187,8 +188,8 @@
         <form id="join-room-form">
           <input type="text" id="join-room-key" placeholder="Paste room key (64 hex chars)" maxlength="64" required />
           <p class="muted small join-modal-hint">
-            For room details or to find keys from your archive, see <strong>peerchat-rooms</strong> under Hyperdrives in
-            <a href="peersky://settings/archive">Settings → Archive</a>.
+            For room details or to find keys kept on this computer, see <strong>peerchat-rooms</strong> under Hyperdrives in
+            <a href="peersky://settings/p2p-data">Settings → P2P data</a>.
           </p>
           <div class="modal-actions">
             <button type="button" class="btn-secondary" data-close>Cancel</button>
@@ -218,7 +219,50 @@
           <input type="text" id="ri-member-search" placeholder="Search members..." />
           <div id="ri-member-list"></div>
         </div>
-        <div class="modal-actions"><button type="button" class="btn-secondary" data-close>Close</button></div>
+        <div class="modal-actions">
+          <button type="button" id="ri-edit" class="btn-secondary" style="display:none">Edit room</button>
+          <button type="button" class="btn-secondary" data-close>Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit Room: only the person who made the room sees this -->
+    <div id="edit-room-modal" class="modal">
+      <div class="modal-content">
+        <h3>Edit Room</h3>
+        <form id="edit-room-form">
+          <div class="avatar-upload-row">
+            <img id="edit-room-avatar-preview" class="avatar-lg avatar-upload-preview" />
+            <label class="btn-secondary btn-sm avatar-upload-label" for="edit-room-avatar-input">Change Picture</label>
+            <input type="file" id="edit-room-avatar-input" accept="image/*" style="display:none" />
+          </div>
+          <input type="text" id="edit-room-name" placeholder="Room name" maxlength="80" required />
+          <textarea id="edit-room-bio" placeholder="Description (optional)" maxlength="300" rows="2"></textarea>
+          <input type="url" id="edit-room-link" placeholder="Link (optional)" maxlength="512" />
+          <hr />
+          <h4>Moderation</h4>
+          <div class="field toggle-row">
+            <label>Abuse filter</label>
+            <label class="toggle"><input type="checkbox" id="edit-mod-abuse-filter" /><span class="slider"></span></label>
+          </div>
+          <div class="field toggle-row">
+            <label>Profanity &amp; slurs</label>
+            <label class="toggle"><input type="checkbox" id="edit-mod-nsfw-filter" /><span class="slider"></span></label>
+          </div>
+          <div class="field">
+            <label>Spam rate limit (msgs per 10s)</label>
+            <select id="edit-mod-spam-limit" class="mod-select">
+              <option value="5">5</option>
+              <option value="10">10 (default)</option>
+              <option value="15">15</option>
+            </select>
+          </div>
+          <p class="modal-note">Everyone in the room sees the change.</p>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" data-close>Cancel</button>
+            <button type="submit" id="edit-room-confirm">Save</button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -322,7 +366,7 @@
     <!-- Media Viewer -->
     <div id="media-viewer" class="media-viewer">
       <button id="media-viewer-close" class="media-viewer-close" title="Close"><img src="./assets/svg/x.svg" alt="Close" width="24" height="24" /></button>
-      <button id="media-viewer-dl" class="media-viewer-dl" title="Save image"><img src="./assets/svg/download.svg" alt="Save" width="24" height="24" /></button>
+      <button id="media-viewer-dl" class="media-viewer-dl" title="Download"><img src="./assets/svg/download.svg" alt="Download" width="24" height="24" /></button>
       <div id="media-viewer-body" class="media-viewer-body"></div>
     </div>
 

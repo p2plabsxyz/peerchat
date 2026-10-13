@@ -112,7 +112,7 @@ describe("media moderation", () => {
     // a batch in the room when the third file is refused.
     // Anchor on the real call, not the bare name, so a comment cannot fool it.
     const scanAt = handler.indexOf("await scanMediaFile(file)");
-    const uploadAt = handler.indexOf("await uploadAndSendFile(file)");
+    const uploadAt = handler.indexOf("await uploadAndSendFile(file, roomKey, { forwarded })");
     assert.ok(scanAt > -1 && uploadAt > scanAt, "the upload must come after the scan");
     assert.match(handler, /screenUploadBatch/);
     assert.match(handler, /isTooManyFiles/);
@@ -148,13 +148,17 @@ describe("media moderation", () => {
     // Drag-and-drop used to call uploadAndSendFile directly and skip the screen
     // entirely. Now the picker and the drop path share one function, and the
     // upload call lives only inside it.
-    assert.match(app, /async function screenAndUploadFiles\(selected\)/);
+    assert.match(app, /async function screenAndUploadFiles\(selected, \{ roomKey = S\.activeRoom, forwarded = false \} = \{\}\)/);
     const drop = app.slice(app.indexOf('msgArea.addEventListener("drop"'), app.indexOf("$(\"set-avatar-input\")"));
     assert.match(drop, /screenAndUploadFiles\(\[\.\.\.\(e\.dataTransfer\?\.files \|\| \[\]\)\]\)/);
     assert.doesNotMatch(drop, /uploadAndSendFile\(/);
     // ... and it takes every dropped file, not just the first.
     assert.doesNotMatch(drop, /files\?\.\[0\]/);
-    assert.equal((app.match(/await uploadAndSendFile\(file\)/g) || []).length, 1, "uploads happen in exactly one place");
+    assert.equal((app.match(/await uploadAndSendFile\(/g) || []).length, 1, "uploads happen in exactly one place");
+    // A forwarded file goes through it as well, into the chat it goes to.
+    const forward = app.slice(app.indexOf("async function forwardSelected"), app.indexOf("async function forwardedFile"));
+    assert.match(forward, /screenAndUploadFiles\(\[await forwardedFile\(item\.file, fromRoom\)\], \{ roomKey: targetRoomKey, forwarded: true \}\)/);
+    assert.doesNotMatch(forward, /uploadAndSendFile\(/);
 
     // A profile or room picture is broadcast to every peer, so both go through
     // the check too, before they are even resized.
@@ -173,9 +177,11 @@ describe("media moderation", () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
     const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
 
-    const guard = fn.indexOf("if (!S.rooms[S.activeRoom]?.isDM)");
+    // Asked of the chat the files go to, which for a forwarded file is not the
+    // one on screen.
+    const guard = fn.indexOf("if (!S.rooms[roomKey]?.isDM)");
     const scan = fn.indexOf("await scanMediaFile(file)");
-    const upload = fn.indexOf("await uploadAndSendFile(file)");
+    const upload = fn.indexOf("await uploadAndSendFile(file, roomKey, { forwarded })");
     assert.ok(guard > -1, "the direct message case has to be asked about");
     assert.ok(guard < scan, "the scan sits inside the guard");
     assert.ok(scan < upload, "and still runs before anything is uploaded");

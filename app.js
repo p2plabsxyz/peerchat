@@ -21,10 +21,11 @@ import {
   sealedAttachmentLength,
   sealsInFrames,
 } from "./lib/attachment-crypto.js";
-import { shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
+import { holdInView, shouldScrollToUnread, stickToBottom } from "./lib/scroll.js";
 import { createPresenceHold, presenceWithHeld } from "./lib/presence.js";
 import { collectLoadedMedia, restoreLoadedMedia } from "./lib/kept-media.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
+import { joinsGroup } from "./lib/message-groups.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
@@ -41,7 +42,16 @@ import { assessLink, describeLinkRisk, extractFirstLink, LINK_SUSPICIOUS } from 
 import { menuPosition } from "./lib/menu-position.js";
 import { findMentions, mentionQueryStart, mentionsPerson, personName } from "./lib/mentions.js";
 import { chatWithPerson } from "./lib/person-chat.js";
-import { forwardableText, forwardTexts } from "./lib/forwarding.js";
+import { forwardGapMs, forwardItems, isForwardable } from "./lib/forwarding.js";
+import { fileKind, lastMessageOf, previewText } from "./lib/message-preview.js";
+import {
+  findMatch,
+  queryMatcher,
+  roomMatchesQuery,
+  searchableText,
+  searchQuery,
+  searchTimeLabel,
+} from "./lib/message-search.js";
 
 const S = {
   profile: null,
@@ -265,6 +275,8 @@ function expandLargeMedia(wrap) {
   const el = document.createElement(isVideo ? 'video' : 'img');
   el.className = 'msg-file-img';
   el.dataset.mediaKey = url;
+  // The name it downloads as from the picture viewer.
+  if (fileName) el.dataset.fileName = fileName;
   if (isVideo) {
     el.controls = true;
     el.preload = 'metadata';
@@ -345,6 +357,54 @@ async function downloadHyperFile(url, filename, roomKey = null) {
     console.error("[chat] Download:", err);
     alert("Could not download this file. Use Open (name or icon) to open it in a new tab.");
   }
+}
+
+// Hands a file to the browser as a download, which PeerSky lists with its
+// other downloads and saves where they go.
+function downloadFrom(href, fileName) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = sanitizeDownloadFilename(fileName);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function downloadBlob(blob, fileName) {
+  const href = URL.createObjectURL(blob);
+  downloadFrom(href, fileName);
+  // Long enough for the download to have started.
+  setTimeout(() => URL.revokeObjectURL(href), 60_000);
+}
+
+// A picture or video from a message, downloaded under the name it was sent
+// with. A sealed one is opened here first, or was already for the chat to
+// show it, so what is saved is the picture itself and never its sealed bytes.
+async function saveMediaFile({ url, fileName, roomKey = null }) {
+  const name = fileName || displayNameFromHyperPath(url);
+  try {
+    if (roomKey) {
+      downloadFrom(await resolveDecryptedUrl(url, roomKey, name), name);
+      return;
+    }
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    downloadBlob(await resp.blob(), name);
+  } catch (err) {
+    console.error("[chat] Download:", err);
+    alert(`Could not download ${name}.`);
+  }
+}
+
+// A message's file from its menu: a picture or video as above, any other file
+// the way its own download button saves it.
+function downloadAttachment(msg) {
+  const kind = attachmentKind(msg?.message, msg);
+  if (!kind) return;
+  const url = msg.message.trim();
+  const roomKey = kind === "encrypted" ? (msg.fileKey || msg.roomKey || S.activeRoom) : null;
+  if (fileKind(msg.fileName) === "file") return downloadHyperFile(url, msg.fileName, roomKey);
+  return saveMediaFile({ url, fileName: msg.fileName, roomKey });
 }
 
 // The save dialog where there is one: a file to write to, false when it was
@@ -712,14 +772,15 @@ function hydrateEncryptedMedia(root) {
 }
 
 function legacyAttachmentHtml(url, msg) {
+  const name = esc(msg.fileName || "");
   if (isImageFile(url)) {
     return shouldAutoInline(msg.fileSize)
-      ? `<img class="msg-file-img" src="${esc(url)}" alt="image" loading="lazy" />`
+      ? `<img class="msg-file-img" src="${esc(url)}" data-file-name="${name}" alt="image" loading="lazy" />`
       : largeMediaHtml(url, msg.fileName, msg.fileSize, "image");
   }
   if (isVideoFile(url)) {
     return shouldAutoInline(msg.fileSize)
-      ? `<video class="msg-file-img" src="${esc(url)}" controls preload="metadata" muted></video>`
+      ? `<video class="msg-file-img" src="${esc(url)}" data-file-name="${name}" controls preload="metadata" muted></video>`
       : largeMediaHtml(url, msg.fileName, msg.fileSize, "video");
   }
   return fileAttachHtml(url, msg.fileName, msg.fileSize);
@@ -977,7 +1038,7 @@ function resizeImage(file, maxPx = 369) {
 }
 
 // One attachment drive per room, named from the room key so nothing in the
-// archive listing identifies the room.
+// P2P data lists identifies the room.
 async function getRoomDriveUrl(roomKey) {
   if (roomDriveUrls.has(roomKey)) return roomDriveUrls.get(roomKey);
   try {
@@ -1332,32 +1393,155 @@ function resizeMessageField() {
   el.style.overflowY = el.scrollHeight > maxPx ? "auto" : "hidden";
 }
 
-function roomMatchesSidebarQuery(r, q) {
-  if (!q) return true;
-  const name = (r.name || "").toLowerCase();
-  const key = (r.roomKey || "").toLowerCase();
-  const lm = r.lastMessage;
-  const tail = lm
-    ? `${lm.senderName || lm.sender || ""} ${lm.message || ""}`.toLowerCase()
-    : "";
-  return name.includes(q) || key.includes(q) || tail.includes(q);
-}
-
 function renderRoomList() {
   // One place, so the count cannot drift from what is actually waiting: every
   // path that accepts, declines, blocks or loads rooms ends up here.
   renderRequestsButton();
   const list = $("room-list");
   list.innerHTML = "";
-  const q = ($("room-search")?.value || "").trim().toLowerCase();
+  const query = homeQuery();
   const sorted = Object.values(S.rooms).sort((a, b) => {
     if (a.isPinned && !b.isPinned) return -1;
     if (!a.isPinned && b.isPinned) return 1;
     return (b.lastMessage?.timestamp || b.createdAt || 0) - (a.lastMessage?.timestamp || a.createdAt || 0);
   });
-  const rows = q ? sorted.filter((r) => roomMatchesSidebarQuery(r, q)) : sorted;
-  for (const r of rows) list.appendChild(makeRoomEl(r));
+  if (query) renderHomeSearch(list, sorted, query);
+  else for (const r of sorted) list.appendChild(makeRoomEl(r));
   updateTabTitle();
+}
+
+/**
+ * Searching from the chat list, as other messengers do: the chats whose name
+ * matches, then messages from every chat. The page holds only the chats opened
+ * since it loaded, so the backend reads the history kept on this computer
+ * (search-messages in p2p.js). Nothing is asked of anyone else.
+ */
+
+// The last answer: what it was for, the messages found, and whether the search
+// failed. It stays on screen while the next words are searched for.
+const homeSearch = { query: "", results: [], failed: false, activeId: "" };
+let homeSearchTimer = null;
+let homeSearchRunning = false;
+
+function homeQuery() {
+  return searchQuery($("room-search")?.value || "");
+}
+
+function scheduleHomeSearch() {
+  clearTimeout(homeSearchTimer);
+  const query = homeQuery();
+  if (!query) Object.assign(homeSearch, { query: "", results: [], failed: false, activeId: "" });
+  renderRoomList();
+  if (query) homeSearchTimer = setTimeout(runHomeSearch, 200);
+}
+
+// One search at a time. Words typed while one runs are searched for when it
+// ends, and only the answer for what the box says now is kept.
+async function runHomeSearch() {
+  if (homeSearchRunning) return;
+  homeSearchRunning = true;
+  try {
+    for (let query = homeQuery(); query && query !== homeSearch.query; query = homeQuery()) {
+      let results = [];
+      let failed = false;
+      try {
+        results = (await chat.searchMessages(query)).results || [];
+      } catch (err) {
+        console.warn("[chat] Search:", err);
+        failed = true;
+      }
+      if (homeQuery() === query) Object.assign(homeSearch, { query, results, failed });
+    }
+  } finally {
+    homeSearchRunning = false;
+  }
+  renderRoomList();
+}
+
+function renderHomeSearch(list, rooms, query) {
+  const matcher = queryMatcher(query);
+  const chats = rooms.filter((r) => roomMatchesQuery(r, query));
+  if (chats.length) {
+    list.appendChild(searchHeading("Chats"));
+    for (const r of chats) list.appendChild(makeRoomEl(r, matcher));
+  }
+  const answered = homeSearch.query === query;
+  const hits = homeSearch.results.filter((hit) => S.rooms[hit.roomKey]);
+  if (hits.length) {
+    list.appendChild(searchHeading("Messages"));
+    for (const hit of hits) list.appendChild(makeSearchHitEl(hit));
+  }
+  if (!answered && !hits.length) list.appendChild(searchNote("Searching messages…"));
+  else if (answered && homeSearch.failed) list.appendChild(searchNote("Messages could not be searched."));
+  else if (answered && !chats.length && !hits.length) list.appendChild(searchNote("No chats or messages found."));
+}
+
+function searchHeading(text) {
+  return Object.assign(document.createElement("div"), { className: "search-heading", textContent: text });
+}
+
+function searchNote(text) {
+  return Object.assign(document.createElement("p"), { className: "search-note muted small", textContent: text });
+}
+
+// Text with what was searched for picked out.
+function markMatch(text, matcher) {
+  const found = findMatch(text, matcher);
+  if (!found) return esc(text);
+  return esc(text.slice(0, found.start)) + `<mark>${esc(text.slice(found.start, found.end))}</mark>` + esc(text.slice(found.end));
+}
+
+// A message the search found: the chat it is in, who sent it, the words around
+// what was found, and when. A file shows by its name. A click opens the chat
+// at the message.
+function makeSearchHitEl(hit) {
+  const room = S.rooms[hit.roomKey];
+  const name = room.name || hit.roomKey.slice(0, 8) + "...";
+  const sender = isOwnId(hit.sender) ? "You" : (S.peerProfiles[hit.sender]?.username || hit.senderName || hit.sender);
+  const { before = "", match = "", after = "" } = hit.snippet || {};
+  const el = document.createElement("div");
+  const opened = homeSearch.activeId === `${hit.roomKey}:${hit.id}` && S.activeRoom === hit.roomKey;
+  el.className = "room-item search-hit" + (opened ? " active" : "");
+  el.innerHTML = `
+    <img class="room-avatar" src="${esc(avatar(name, 36, room.avatar))}" alt="" />
+    <div class="room-info">
+      <span class="room-name">${esc(name)}</span>
+      <span class="room-preview search-snippet"><span class="search-sender">${esc(sender)}:</span> ${esc(before)}<mark>${esc(match)}</mark>${esc(after)}</span>
+    </div>
+    <div class="room-meta"><span class="room-time">${esc(searchTimeLabel(hit.timestamp))}</span></div>
+  `;
+  el.addEventListener("click", () => openFoundMessage(hit));
+  return el;
+}
+
+// The chat a found message is in, opened at the message, which is picked out
+// for a moment. The search stays, so the next one is a click away.
+async function openFoundMessage(hit) {
+  homeSearch.activeId = `${hit.roomKey}:${hit.id}`;
+  if (S.activeRoom !== hit.roomKey) {
+    await openRoom(hit.roomKey);
+  } else {
+    // Searching inside the chat may be hiding it.
+    if (messageSearchQuery.trim()) closeMessageSearchPanel();
+    renderRoomList();
+  }
+  if (S.activeRoom !== hit.roomKey) return;
+  // After the frame where the chat is put at its newest message.
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  showMessage(hit.id);
+}
+
+function showMessage(id) {
+  const container = $("messages");
+  const el = container?.querySelector(`.message[data-msg-id="${CSS.escape(String(id))}"]`);
+  if (!el) return false;
+  holdInView(container, el);
+  // From the start again when it is still picked out from a click before.
+  el.classList.remove("msg-found");
+  void el.offsetWidth;
+  el.classList.add("msg-found");
+  setTimeout(() => el.classList.remove("msg-found"), 2600);
+  return true;
 }
 
 function resetMessageSearch() {
@@ -1395,19 +1579,23 @@ function toggleMessageSearchPanel() {
   else closeMessageSearchPanel();
 }
 
-function makeRoomEl(r) {
+// matcher, when the list is a search: the part of the name it found is picked
+// out.
+function makeRoomEl(r, matcher = null) {
   const el = document.createElement("div");
   el.className = "room-item" + (S.activeRoom === r.roomKey ? " active" : "");
   el.dataset.key = r.roomKey;
 
+  // A file reads as its name, or as a photo or video. See lib/message-preview.js.
   const preview = r.lastMessage
-    ? `${r.lastMessage.senderName || r.lastMessage.sender}: ${r.lastMessage.message}`
+    ? `${r.lastMessage.senderName || r.lastMessage.sender}: ${previewText(r.lastMessage)}`
     : "No messages yet";
+  const name = r.name || r.roomKey.slice(0, 8) + "...";
 
   el.innerHTML = `
     <img class="room-avatar" src="${esc(avatar(r.name, 36, r.avatar))}" />
     <div class="room-info">
-      <span class="room-name">${esc(r.name || r.roomKey.slice(0, 8) + "...")}</span>
+      <span class="room-name">${matcher ? markMatch(name, matcher) : esc(name)}</span>
       <span class="room-preview">${esc(preview.slice(0, 60))}</span>
     </div>
     <div class="room-meta">
@@ -1624,10 +1812,11 @@ async function openRoom(roomKey) {
   }
 }
 
+// A file is found by its name, not by the address it is kept at.
 function messageMatchesSearch(m, q) {
   if (!q) return true;
   if (m.type === "system") return (systemText(m) || "").toLowerCase().includes(q);
-  return (m.message || "").toLowerCase().includes(q);
+  return searchableText(m).toLowerCase().includes(q);
 }
 
 function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
@@ -1679,7 +1868,9 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
       container.appendChild(sep);
     }
     m.roomKey = m.roomKey || roomKey;
-    container.appendChild(makeMsgEl(m));
+    const el = makeMsgEl(m);
+    groupWithPrevious(container.lastElementChild, el);
+    container.appendChild(el);
   }
   // Before the scroll is set, so the pane already has its pictures' heights.
   restoreLoadedMedia(container.querySelectorAll(".msg-file-img, [data-large-type]"), loadedMedia);
@@ -1827,11 +2018,27 @@ function makeLinkWarningNote(text) {
   return note;
 }
 
+// Joins a message to the one shown just before it when they are back to back
+// from one person (lib/message-groups.js). Anything shown between them, such as
+// a notice or a date, keeps them apart. A time is left off only when the next
+// message in the group shows the same one.
+function groupWithPrevious(prev, el) {
+  if (!prev?.classList.contains("message")) return;
+  const of = (node) => ({ sender: node.dataset.sender, ts: Number(node.dataset.ts) });
+  if (!joinsGroup(of(prev), of(el))) return;
+  prev.classList.add("msg-followed");
+  el.classList.add("msg-grouped");
+  const time = (node) => node.querySelector(":scope > .msg-time")?.textContent;
+  if (time(prev) === time(el)) prev.classList.add("msg-same-time");
+}
+
 function makeMsgEl(msg) {
   const self = isOwnId(msg.sender);
   const el = document.createElement("div");
   el.className = `message ${self ? "msg-right" : "msg-left"}`;
   el.dataset.msgId = msg.id || "";
+  el.dataset.sender = self ? "self" : (msg.sender || "");
+  el.dataset.ts = String(Number(msg.timestamp) || 0);
 
   const displayName = self ? "You" : (S.peerProfiles[msg.sender]?.username || msg.senderName || msg.sender);
 
@@ -1868,6 +2075,10 @@ function makeMsgEl(msg) {
   textNode.innerHTML = linkify(msg.message, msg);
   wireCodeCopy(textNode);
   bubble.appendChild(textNode);
+  // A picture or video on its own gets a bubble that fits it.
+  if (textNode.childElementCount === 1 && textNode.firstElementChild.matches(".msg-file-img") && !textNode.textContent.trim()) {
+    bubble.classList.add("msg-bubble-media");
+  }
 
   const previewCard = makePreviewCard(msg.preview);
   if (previewCard) bubble.appendChild(previewCard);
@@ -1939,6 +2150,11 @@ function scrollToMsg(id) {
 function showMsgMenu(e, msg) {
   const menu = $("msg-menu");
   menu._msg = msg;
+  // A file downloads. Its text is only the address of its sealed copy, which
+  // opens nothing, so there is no text to copy.
+  const file = !!attachmentKind(msg.message, msg);
+  menu.querySelector('[data-action="download"]').style.display = file ? "" : "none";
+  menu.querySelector('[data-action="copy-msg"]').style.display = file ? "none" : "";
   openMenuAt(menu, e.clientX, e.clientY);
 }
 
@@ -1955,6 +2171,7 @@ $("msg-menu")?.addEventListener("click", (e) => {
   }
   if (action === "reply") setReply(msg);
   if (action === "copy-msg") copyText(msg.message);
+  if (action === "download") downloadAttachment(msg);
   if (action === "select") startSelecting(msg);
   if (action === "info") showMsgInfo(e, msg);
 });
@@ -1965,14 +2182,21 @@ $("msg-menu")?.addEventListener("click", (e) => {
 let selectMode = false;
 const selectedMsgIds = new Set();
 
+// Picking starts where the reader is, a search in the chat included, with the
+// message picked from still in view.
 function startSelecting(msg) {
   if (!S.activeRoom) return;
   selectMode = true;
   selectedMsgIds.clear();
-  if (msg?.id && forwardableText(msg)) selectedMsgIds.add(msg.id);
+  if (msg?.id && isForwardable(msg)) selectedMsgIds.add(msg.id);
   $("chat-active")?.classList.add("selecting");
   updateSelectBar();
   renderMessages(S.activeRoom, false);
+  if (msg?.id) {
+    requestAnimationFrame(() => {
+      $("messages")?.querySelector(`.message[data-msg-id="${CSS.escape(String(msg.id))}"]`)?.scrollIntoView({ block: "nearest" });
+    });
+  }
 }
 
 function stopSelecting({ render = true } = {}) {
@@ -1988,10 +2212,10 @@ function toggleSelectedMsg(msg, el) {
   if (!msg?.id) return;
   if (selectedMsgIds.has(msg.id)) {
     selectedMsgIds.delete(msg.id);
-  } else if (forwardableText(msg)) {
+  } else if (isForwardable(msg)) {
     selectedMsgIds.add(msg.id);
   } else {
-    showForwardNote("Files and pictures stay in the chat they were sent to. Only text can be forwarded.");
+    showForwardNote("Notices from the app cannot be forwarded.");
     return;
   }
   el.classList.toggle("selected", selectedMsgIds.has(msg.id));
@@ -2016,7 +2240,8 @@ function renderForwardList(query = "") {
   const q = query.trim().toLowerCase();
   const rooms = Object.entries(S.rooms)
     .filter(([, room]) => !q || String(room.name || "").toLowerCase().includes(q))
-    .sort(([, a], [, b]) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+    // Most recent first, as in the room list.
+    .sort(([, a], [, b]) => (b.lastMessage?.timestamp || b.createdAt || 0) - (a.lastMessage?.timestamp || a.createdAt || 0));
   list.innerHTML = "";
   if (!rooms.length) {
     const empty = document.createElement("p");
@@ -2039,15 +2264,24 @@ function renderForwardList(query = "") {
 
 async function forwardSelected(targetRoomKey) {
   const fromRoom = S.activeRoom;
-  const texts = forwardTexts(S.messages[fromRoom], selectedMsgIds);
+  const items = forwardItems(S.messages[fromRoom], selectedMsgIds);
   closeAllModals();
   stopSelecting({ render: false });
-  if (!texts.length || !S.rooms[targetRoomKey]) return;
+  if (!items.length || !S.rooms[targetRoomKey]) return;
   await openRoom(targetRoomKey);
-  for (const text of texts) {
+  // A few seconds apart, under the chat's spam limit, so many at once never
+  // get the sender kicked.
+  const gap = forwardGapMs(S.rooms[targetRoomKey]?.moderation?.spamRateLimit);
+  if (items.length > 2) showForwardNote(`Forwarding ${items.length} messages, a moment apart so the chat's spam limit is not reached.`);
+  for (const [index, item] of items.entries()) {
+    if (index > 0) await new Promise((resolve) => setTimeout(resolve, gap));
     try {
-      const resp = await chat.sendMessage(targetRoomKey, { message: text, forwarded: true });
-      if (resp.sent) appendMessage(targetRoomKey, resp.sent);
+      if (item.text) {
+        const resp = await chat.sendMessage(targetRoomKey, { message: item.text, forwarded: true });
+        if (resp.sent) appendMessage(targetRoomKey, resp.sent);
+      } else if (!(await screenAndUploadFiles([await forwardedFile(item.file, fromRoom)], { roomKey: targetRoomKey, forwarded: true }))) {
+        return;
+      }
     } catch (err) {
       // A room's filters apply to what is forwarded into it, as to anything
       // typed there. The rest wait rather than go out of order.
@@ -2056,6 +2290,16 @@ async function forwardSelected(targetRoomKey) {
     }
   }
   playSound("send");
+  if (items.length > 2) showForwardNote(`${items.length} messages forwarded.`);
+}
+
+// A file to forward, opened with the key it was sealed with, to go out sealed
+// again for the chat it goes to.
+async function forwardedFile({ url, fileName, fileKey, roomKey }, fromRoom) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${fileName} could not be opened to forward it.`);
+  const blob = await decryptedBlob(resp, fileKey || roomKey || fromRoom, mimeFromName(fileName));
+  return new File([blob], fileName, { type: blob.type });
 }
 
 $("select-cancel")?.addEventListener("click", () => stopSelecting());
@@ -2107,8 +2351,9 @@ function appendSystemMsg(roomKey, text) {
   if (!S.messages[roomKey]) S.messages[roomKey] = [];
   S.messages[roomKey].push({ type: "system", text, id: `sys-${Date.now()}-${Math.random().toString(36).slice(2)}`, timestamp: Date.now() });
   if (roomKey !== S.activeRoom) return;
+  // Searching: drawn again where the reader is, not at the newest.
   if (messageSearchQuery.trim()) {
-    renderMessages(roomKey);
+    renderMessages(roomKey, false);
     return;
   }
   const container = $("messages");
@@ -2177,8 +2422,10 @@ function appendMessage(roomKey, msg) {
   S.messages[roomKey].push(msg);
 
   if (roomKey === S.activeRoom) {
+    // Searching: drawn again where the reader is, so a message arriving does
+    // not take them away from one the search found.
     if (messageSearchQuery.trim()) {
-      renderMessages(roomKey);
+      renderMessages(roomKey, false);
       return true;
     }
     const container = $("messages");
@@ -2194,6 +2441,7 @@ function appendMessage(roomKey, msg) {
       msg.roomKey = msg.roomKey || roomKey;
       el = makeMsgEl(msg);
       el.classList.add("msg-animate");
+      groupWithPrevious(container.lastElementChild, el);
     }
     container.appendChild(el);
     // A message with an image grows after paint; hold the bottom until it settles.
@@ -2349,14 +2597,8 @@ function connectGlobalSSE() {
         applyDMComposerGate(rk);
       }
       const msgText = typeof msg.message === "string" ? msg.message : "";
-      if (!isSystem && msgText) {
-        room.lastMessage = {
-          sender: msg.sender,
-          senderName: msg.senderName,
-          message: msgText.slice(0, 120),
-          timestamp: msg.timestamp,
-        };
-      }
+      // As the backend keeps it: a file by its name, not its address.
+      if (!isSystem && msgText) room.lastMessage = lastMessageOf(msg);
 
       // What you wrote on another of your devices is not news to you.
       if (!isSystem && !isOwnId(msg.sender)) {
@@ -2413,7 +2655,9 @@ function connectGlobalSSE() {
       room.unreadCount = prevUnread;
       room.unreadMentions = prevMentions;
       if (prevLastMessage) room.lastMessage = prevLastMessage;
-      if (prevModeration) room.moderation = prevModeration;
+      // A change of settings comes signed by the creator and shows; an older
+      // update without any keeps the ones already here.
+      if (!data.moderation && prevModeration) room.moderation = prevModeration;
 
       renderRoomList();
 
@@ -3097,7 +3341,80 @@ $("chat-header-main")?.addEventListener("click", () => {
     }
   }
 
+  // Only the person who made the room can change it. See lib/room-details.js.
+  const editBtn = $("ri-edit");
+  if (editBtn) {
+    editBtn.style.display = room.isCreator && !room.isDM && !room.removedByCreator ? "" : "none";
+    editBtn.onclick = () => openEditRoom(S.activeRoom);
+  }
+
   openModal("room-info-modal");
+});
+
+// The room's details as they are now, to change. undefined keeps the picture.
+let editingRoomKey = null;
+let pendingEditAvatar;
+
+function openEditRoom(roomKey) {
+  const room = S.rooms[roomKey];
+  if (!room) return;
+  editingRoomKey = roomKey;
+  pendingEditAvatar = undefined;
+  const moderation = room.moderation || {};
+  $("edit-room-name").value = room.name || "";
+  $("edit-room-bio").value = room.bio || "";
+  $("edit-room-link").value = room.link || "";
+  $("edit-room-avatar-preview").src = avatar(room.name || roomKey.slice(0, 8), 64, room.avatar);
+  $("edit-mod-abuse-filter").checked = moderation.abuseFilter !== false;
+  $("edit-mod-nsfw-filter").checked = moderation.nsfwFilter !== false;
+  $("edit-mod-spam-limit").value = String(moderation.spamRateLimit || 10);
+  $("room-info-modal")?.classList.remove("open");
+  openModal("edit-room-modal");
+  queueMicrotask(() => $("edit-room-name")?.focus());
+}
+
+$("edit-room-avatar-input")?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    await refuseIfExplicit(file);
+    pendingEditAvatar = await resizeImage(file);
+    $("edit-room-avatar-preview").src = pendingEditAvatar;
+  } catch (err) { alert(err.message); }
+});
+
+let savingRoom = false;
+$("edit-room-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const roomKey = editingRoomKey;
+  if (savingRoom || !roomKey) return;
+  const name = $("edit-room-name").value.trim();
+  if (!name) { alert("Room name required."); return; }
+  const confirmBtn = $("edit-room-confirm");
+  savingRoom = true;
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = "Saving…"; }
+  try {
+    const body = {
+      name,
+      bio: $("edit-room-bio").value.trim(),
+      link: $("edit-room-link").value.trim(),
+      moderation: {
+        abuseFilter: $("edit-mod-abuse-filter").checked,
+        nsfwFilter: $("edit-mod-nsfw-filter").checked,
+        spamRateLimit: parseInt($("edit-mod-spam-limit").value || "10", 10) || 10,
+      },
+    };
+    if (pendingEditAvatar !== undefined) body.avatar = pendingEditAvatar;
+    await chat.updateRoom(roomKey, body);
+    await loadRooms();
+    renderRoomList();
+    closeAllModals();
+  } catch (err) { alert(err.message); }
+  finally {
+    savingRoom = false;
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = "Save"; }
+  }
 });
 
 let _uiCurrentPeerId = null;
@@ -3399,20 +3716,31 @@ async function removeRoomMember(peerId, memberName) {
 
 // Answering one request is not finishing with the window. Closing it meant
 // reopening it for the next person waiting; the new conversation is in the chat
-// list to open whenever they are done here.
+// list to open whenever they are done here. With nobody else waiting, the
+// conversation opens. Joining it takes a few seconds, and the request shows it
+// is on its way until then rather than looking as if nothing happened.
+const acceptingDMs = new Set();
+
 async function acceptDM(roomKey) {
+  if (acceptingDMs.has(roomKey)) return;
+  acceptingDMs.add(roomKey);
+  renderRequestsList();
   try {
     const result = await chat.acceptDM({ roomKey });
     if (result.roomKey) {
       delete S.pendingDMs?.[result.roomKey];
       await loadRooms();
       renderRoomList();
-      renderRequestsButton();
-      renderRequestsList();
+      if (!Object.keys(S.pendingDMs || {}).length && S.rooms[result.roomKey]) await openRoom(result.roomKey);
     }
   } catch (err) {
     alert("Error: " + err.message);
+  } finally {
+    acceptingDMs.delete(roomKey);
   }
+  renderRequestsButton();
+  renderRequestsList();
+  if (!Object.keys(S.pendingDMs || {}).length && S.rooms[roomKey]) $("requests-modal")?.classList.remove("open");
 }
 
 async function rejectDM(roomKey) {
@@ -3501,6 +3829,13 @@ function renderRequestsList() {
     accept.type = "button";
     accept.textContent = "Accept";
     accept.addEventListener("click", () => acceptDM(roomKey));
+
+    // Accepted and on its way: a spinner until the conversation is there.
+    if (acceptingDMs.has(roomKey)) {
+      accept.innerHTML = '<span class="spinner" aria-hidden="true"></span>Opening…';
+      accept.setAttribute("aria-busy", "true");
+      for (const button of [block, decline, accept]) button.disabled = true;
+    }
 
     const actions = document.createElement("div");
     actions.className = "request-actions";
@@ -3779,24 +4114,20 @@ function closeAllModals() {
   document.querySelectorAll(".modal.open").forEach((m) => m.classList.remove("open"));
 }
 
+// A search inside a chat stays open until its button or Escape closes it, or
+// another chat opens. Closing it on any click outside it lost the place: the
+// chat went back to its newest message as soon as a message it found was
+// picked to forward, reacted to or opened.
 document.addEventListener("click", (e) => {
   if (e.target.classList.contains("modal")) closeAllModals();
   if (e.target.hasAttribute("data-close")) closeAllModals();
-  const msp = $("chat-message-search-panel");
-  if (
-    msp && !msp.hidden
-    && !e.target.closest("#chat-message-search-panel")
-    && !e.target.closest("#chat-search-btn")
-  ) {
-    closeMessageSearchPanel();
-  }
   const ep = $("emoji-panel");
   if (ep?.classList.contains("open") && !e.target.closest("#emoji-panel") && !e.target.closest("#emoji-btn")) {
     closeEmojiPanel();
   }
 });
 
-$("room-search")?.addEventListener("input", () => renderRoomList());
+$("room-search")?.addEventListener("input", () => scheduleHomeSearch());
 
 $("chat-search-btn")?.addEventListener("click", (e) => {
   e.preventDefault();
@@ -3809,9 +4140,32 @@ $("message-search")?.addEventListener("input", () => {
   if (S.activeRoom) renderMessages(S.activeRoom);
 });
 
+// Escape closes what is on top first: the picture viewer, then a window, then
+// picking, the search in the chat and the emoji panel. In the chat list's
+// search box it clears the search.
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (selectMode && !document.querySelector(".modal.open")) {
+    $("msg-menu")?.classList.remove("open");
+    const mv = $("media-viewer");
+    if (mv?.classList.contains("open")) {
+      mv.classList.remove("open");
+      $("media-viewer-body").innerHTML = "";
+      e.preventDefault();
+      return;
+    }
+    if (document.querySelector(".modal.open")) {
+      closeAllModals();
+      e.preventDefault();
+      return;
+    }
+    const roomSearch = $("room-search");
+    if (document.activeElement === roomSearch && roomSearch.value) {
+      roomSearch.value = "";
+      scheduleHomeSearch();
+      e.preventDefault();
+      return;
+    }
+    if (selectMode) {
       stopSelecting();
       e.preventDefault();
       return;
@@ -3825,15 +4179,6 @@ document.addEventListener("keydown", (e) => {
     if ($("emoji-panel")?.classList.contains("open")) {
       closeEmojiPanel();
       e.preventDefault();
-      return;
-    }
-    $("msg-menu")?.classList.remove("open");
-    const mv = $("media-viewer");
-    if (mv?.classList.contains("open")) {
-      mv.classList.remove("open");
-      $("media-viewer-body").innerHTML = "";
-    } else {
-      closeAllModals();
     }
   }
 });
@@ -3880,19 +4225,19 @@ $("file-input")?.addEventListener("change", async (e) => {
 // The one function every attachment path funnels through: the picker, and
 // drag-and-drop, which used to go straight to the upload and skip the screen
 // entirely. Screening at each entry point is how a new one gets missed.
-async function screenAndUploadFiles(selected) {
-  if (!S.activeRoom) return;
+async function screenAndUploadFiles(selected, { roomKey = S.activeRoom, forwarded = false } = {}) {
+  if (!roomKey) return false;
   // A dropped folder arrives as a 0-byte pseudo-file, not its contents. There
   // is no directory upload here; refuse it rather than upload an empty entry.
   const files = (selected || []).filter((file) => file && file.size > 0);
   if (files.length === 0) {
     if ((selected || []).length > 0) alert("Folders cannot be sent. Pick the files inside it instead.");
-    return;
+    return false;
   }
 
   if (isTooManyFiles(files.length)) {
     alert(describeTooManyFiles(files.length));
-    return;
+    return false;
   }
 
   const sendBtn = $("send-btn");
@@ -3901,9 +4246,9 @@ async function screenAndUploadFiles(selected) {
   if (sendBtn) sendBtn.disabled = true;
   try {
     // A room shows a picture to everyone in it at once, which is what the
-    // screen is for. A direct message reaches one person, who can block the
-    // sender, so it goes the way mobile sends it: unscreened.
-    if (!S.rooms[S.activeRoom]?.isDM) {
+    // screen is for, forwarded ones too. A direct message reaches one person,
+    // who can block the sender, so it goes the way mobile sends it: unscreened.
+    if (!S.rooms[roomKey]?.isDM) {
       // Every file is checked before any of them is uploaded, so a refusal
       // never leaves half a batch in the room.
       const screened = await Promise.all(files.map(async (file) => ({
@@ -3914,10 +4259,13 @@ async function screenAndUploadFiles(selected) {
       const decision = screenUploadBatch(screened);
       if (!decision.allowed) {
         alert(decision.reason);
-        return;
+        return false;
       }
     }
-    for (const file of files) await uploadAndSendFile(file);
+    for (const file of files) {
+      if (!(await uploadAndSendFile(file, roomKey, { forwarded }))) return false;
+    }
+    return true;
   } finally {
     if (attachBtn) attachBtn.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
@@ -3939,10 +4287,9 @@ function newFileKey() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function uploadAndSendFile(file) {
-  const roomKey = S.activeRoom;
+async function uploadAndSendFile(file, roomKey = S.activeRoom, { forwarded = false } = {}) {
   const base = await getRoomDriveUrl(roomKey);
-  if (!base) { alert("Could not initialize file storage."); return; }
+  if (!base) { alert("Could not initialize file storage."); return false; }
   const path = opaqueAttachmentPath();
   // Sealed as if the file were a room of its own, whose key is fileKey. Any
   // other room seals its files with the room key, as before.
@@ -3960,10 +4307,18 @@ async function uploadAndSendFile(file) {
     const fileUrl = base + path;
     const stored = Number((await fetch(fileUrl, { method: "HEAD" })).headers.get("content-length"));
     if (stored && stored !== sealedAttachmentLength(file.size)) throw new Error("the file on the drive is not the whole file");
-    const resp = await chat.sendMessage(roomKey, { message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true, ...(fileKey && { fileKey }) });
+    const resp = await chat.sendMessage(roomKey, {
+      message: fileUrl, fileName: file.name, fileSize: file.size, fileEnc: true,
+      ...(fileKey && { fileKey }),
+      ...(forwarded && { forwarded: true }),
+    });
     if (resp.sent) appendMessage(roomKey, resp.sent);
     playSound("send");
-  } catch (err) { alert(describeUploadFailure(file.name, err.message)); }
+    return true;
+  } catch (err) {
+    alert(describeUploadFailure(file.name, err.message));
+    return false;
+  }
 }
 
 const msgArea = $("messages");
@@ -4021,12 +4376,17 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-function openMediaViewer(src, type, hint) {
+// fileName: the name a picture or video from a message was sent with, which it
+// downloads as. A profile or room picture has none and goes by hint.
+function openMediaViewer(src, type, hint, fileName = "") {
   const overlay = $("media-viewer");
   if (!overlay) return;
   overlay.dataset.mediaSrc = src;
   overlay.dataset.mediaType = type || "image";
   overlay.dataset.mediaFilename = hint || "";
+  overlay.dataset.fileName = fileName;
+  const download = $("media-viewer-dl");
+  if (download) download.title = type === "video" ? "Download video" : "Download picture";
   const body = $("media-viewer-body");
   body.innerHTML = "";
   if (type === "video") {
@@ -4050,33 +4410,28 @@ $("media-viewer")?.addEventListener("click", (e) => {
   }
 });
 
+// What the viewer shows is already opened, so it downloads as it is: one
+// download, which PeerSky asks about and lists like any other.
 $("media-viewer-dl")?.addEventListener("click", async () => {
   const overlay = $("media-viewer");
   const src = overlay?.dataset.mediaSrc;
   if (!src) return;
   try {
-    const resp = await fetch(src);
-    const blob = await resp.blob();
-    const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg";
-    const rawHint = (overlay?.dataset.mediaFilename || "").trim().replace(/[/\\?%*:|"<>]/g, "_").slice(0, 60);
-    const fname = rawHint ? `peerchat-${rawHint}.${ext}` : `peerchat-image.${ext}`;
-    // One save dialog, ever. The download link below is only for when no dialog
-    // could open; once one has, writing there either works or says why. Falling
-    // back after a failed write asked where to save a second time.
-    const handle = await pickSaveFile(fname);
-    if (handle === false) return;
-    if (handle) {
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
+    let fname = overlay.dataset.fileName || "";
+    // A sealed one, opened for the chat to show it.
+    if (fname && /^blob:/i.test(src)) {
+      downloadFrom(src, fname);
       return;
     }
-    const obj = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = obj; a.download = fname;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(obj), 2500);
-  } catch (err) { alert("Could not save image: " + err.message); }
+    const resp = await fetch(src);
+    const blob = await resp.blob();
+    if (!fname) {
+      const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg";
+      const rawHint = (overlay.dataset.mediaFilename || "").trim().replace(/[/\\?%*:|"<>]/g, "_").slice(0, 60);
+      fname = rawHint ? `peerchat-${rawHint}.${ext}` : `peerchat-image.${ext}`;
+    }
+    downloadBlob(blob, fname);
+  } catch (err) { alert("Could not download this: " + err.message); }
 });
 
 document.addEventListener("click", (e) => {
@@ -4097,7 +4452,8 @@ document.addEventListener("click", (e) => {
     e.stopPropagation();
     const tag = img.tagName.toLowerCase();
     const imgHint = S.activeRoom ? (S.rooms[S.activeRoom]?.name || "") : "";
-    openMediaViewer(img.src, tag === "video" ? "video" : "image", imgHint);
+    const fileName = img.dataset.fileName || (img.dataset.mediaKey ? displayNameFromHyperPath(img.dataset.mediaKey) : "");
+    openMediaViewer(img.src, tag === "video" ? "video" : "image", imgHint, fileName);
     return;
   }
   const av = e.target.closest(".modal.open img.avatar-lg");

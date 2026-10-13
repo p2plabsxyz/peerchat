@@ -39,6 +39,7 @@ export const chat = {
   createRoom: (body) => apiRequest("create-key", { body }),
   joinRoom: (roomKey) => apiRequest("join", { roomKey, post: true }),
   getHistory: (roomKey) => apiRequest("get-history", { roomKey }),
+  searchMessages: (query) => apiRequest("search-messages", { body: { q: query } }),
   setActive: (roomKey) => apiRequest("set-active", { roomKey, post: true }),
   markRead: (roomKey) => apiRequest("mark-read", { roomKey, post: true }),
   sendMessage: (roomKey, body) => apiRequest("send", { roomKey, body }),
