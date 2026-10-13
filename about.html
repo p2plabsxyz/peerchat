@@ -57,10 +57,12 @@
         <li>Every message and reaction is signed by whoever wrote it and passed on from device to device, so it reaches people its author is not connected to, and nobody on the way can fake or change one. An older build ignores the signature and never gets a message passed on.</li>
         <li>Messages encrypted with AES-256-GCM before they’re stored in the feed. In a room or direct message made on this version or later, the key changes every hour and can’t be worked back, so a key someone gets later can’t read what came before; in an older one, it is derived from the room key. The swarm topic is derived separately, so the value the room is announced under is not the value the messages are encrypted with.</li>
         <li><strong>Reactions:</strong> emoji reactions on messages are stored in the same Hypercore (as reaction events) and sync across peers.</li>
-        <li>Attachments are encrypted, each with a key of its own in a room made on this version or later and with a key derived from the room key in an older one, and stored in a per-room Hyperdrive (<code>peerchat-…</code> in Settings → Archive); the link alone yields ciphertext. <strong>No app-enforced upload size limit</strong>—only disk, memory while uploading, and the network.</li>
+        <li>Attachments are encrypted, each with a key of its own in a room made on this version or later and with a key derived from the room key in an older one, and stored in a per-room Hyperdrive (<code>peerchat-…</code> in Settings → P2P data); the link alone yields ciphertext. <strong>No app-enforced upload size limit</strong>—only disk, memory while uploading, and the network.</li>
         <li><strong>Direct Messages (DMs):</strong> click a peer's avatar to send a private message; the recipient gets an accept/decline popup. The conversation gets its own random room key, minted by whoever opens it and handed over inside the request. See below.</li>
         <li><strong>Link previews:</strong> when a message contains a link, the sender fetches that page’s title and description once and ships them inside the encrypted message. Readers see a small text card without ever connecting to the site, so opening a room never tells the linked host who read it. Turn it off in Settings.</li>
         <li><strong>Moderation</strong> runs locally on every peer, with per-room settings chosen by whoever created the room. See below.</li>
+        <li><strong>Edit room:</strong> whoever made a room can change its name, description, link, picture and settings later, and everyone in the room takes the change. It is signed by the creator, so it can come from anyone in the room and nobody else can make one.</li>
+        <li><strong>Forwarding:</strong> pick messages and forward them to another chat, pictures, videos and files too. Several go a moment apart, so the chat's spam limit is never reached.</li>
         <li><strong>Works with the internet down:</strong> rooms are joined on an isolated LAN swarm as well as the public one (<code>@p2plabs/hyperdht-mdns</code>, no public bootstrap), so peers on the same network keep talking. It needs a network, not an internet connection.</li>
         <li>Optional Electron <code>safeStorage</code> for the local JSON that holds rooms and keys.</li>
       </ul>
@@ -69,8 +71,8 @@
       <p class="muted">
         The key is a random secret shown as 64 hex characters. Anyone with it can join that room and read messages sent from then on; history from before a join is not backfilled. They can read history
         from peers who have the data. Treat it like a shared password. Use <strong>Join room</strong> with the key;
-        for room details or keys from your archive, see <strong>peerchat-rooms</strong> under Hyperdrives in
-        <a href="peersky://settings/archive">Settings → Archive</a>.
+        for room details or keys kept on this computer, see <strong>peerchat-rooms</strong> under Hyperdrives in
+        <a href="peersky://settings/p2p-data">Settings → P2P data</a>.
       </p>
       <p class="muted">
         The key itself is never sent. Peers find each other through a <strong>swarm topic</strong>, a separate
@@ -115,7 +117,7 @@
         out of their own build, your copy still filters what they send you.
       </p>
       <p class="muted">
-        Whoever creates a room picks its settings, and they cannot be changed afterwards:
+        Whoever creates a room picks its settings, and can change them later with Edit room. Everyone in the room takes the change:
       </p>
       <ul>
         <li><strong>Abuse filter</strong> (on by default): threats and targeted harassment.</li>
@@ -140,10 +142,11 @@
         somebody claiming to be them.
       </p>
       <p class="muted">
-        <strong>What it does not do:</strong> take the room key back. Somebody removed still holds it, and could
-        run a changed build and listen. So removal means every ordinary PeerChat stops passing their messages on
-        and refuses their connection. It is not a lock they cannot pick, and a room key that has reached the
-        wrong person is still worth replacing.
+        <strong>A new key.</strong> In a room made on this version or later, removing somebody also moves the room
+        to a new key that only the people still in it get, so the key the removed person holds reaches nothing new.
+        An older room, and P2P Republic, keep their key: somebody removed from one still holds it, and could run a
+        changed build and listen. There, removal means every ordinary PeerChat stops passing their messages on and
+        refuses their connection, and a room key that has reached the wrong person is still worth replacing.
       </p>
       <p class="muted">
         The three-strikes spam and abuse limit below is a different thing. That one is decided by a filter rather
