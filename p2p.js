@@ -143,6 +143,13 @@ import {
   noteKnownKey,
   signMove,
 } from "./lib/room-move.js";
+import {
+  avatarHash,
+  checkRoomDetails,
+  nextDetailsVersion,
+  normalizeRoomDetails,
+  signRoomDetails,
+} from "./lib/room-details.js";
 
 // Left next to the chat file by a restore from another of this person's
 // devices, and taken on the next start. See importChatTransfer.
@@ -775,6 +782,84 @@ function applyPendingBans(roomKey, exceptConn = null) {
 }
 
 /**
+ * A room's details, signed by the person who made it, so they can change them
+ * and everyone in the room takes the change. See lib/room-details.js.
+ */
+
+// This device's signature on a room it made, over the details it has now.
+function signDetails(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  if (!room || room.isDM || !signingKeys || !isRoomCreator(roomKey)) return null;
+  const details = signRoomDetails({
+    topic: wireTopic(roomKey),
+    v: nextDetailsVersion(room.details),
+    name: room.name || "",
+    bio: room.bio || "",
+    link: room.link || "",
+    avatar: room.avatar || "",
+    moderation: sanitizeRoomModeration(room.moderation),
+    keyPair: signingKeys,
+  });
+  if (details) room.details = details;
+  return details;
+}
+
+// The signed details that go out with a room: the creator's, signed the first
+// time if this device made a room before any were.
+function roomDetailsFor(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  if (!room || room.isDM) return null;
+  const held = normalizeRoomDetails(room.details);
+  if (held) return held;
+  if (!signDetails(roomKey)) return null;
+  debouncePersist();
+  return room.details;
+}
+
+// Signed details from anyone in the room, taken when the creator signed them
+// for this room and they are newer than the ones here. Before the creator key
+// is known they wait, as a removal list does. True when anything changed.
+function takeRoomDetails(roomKey, room, raw, avatar) {
+  const details = normalizeRoomDetails(raw);
+  if (!details || room.isDM) return false;
+  const held = normalizeRoomDetails(room.details);
+  if (held && held.v > details.v) return false;
+  const creatorKey = resolveCreatorKey(roomKey, room.creatorKey);
+  if (!creatorKey) {
+    const waiting = normalizeRoomDetails(room.pendingDetails?.details);
+    if (!waiting || waiting.v < details.v) room.pendingDetails = { details, avatar: sanitizeAvatar(avatar) };
+    return false;
+  }
+  if (!checkRoomDetails({ topic: wireTopic(roomKey), creatorKey, details })) return false;
+  // The picture travels beside the details, so only one that matches what was
+  // signed is taken. These same details can bring it later from somebody else.
+  const picture = sanitizeAvatar(avatar);
+  const pictureFits = !!picture && avatarHash(picture) === details.avatar;
+  if (held && held.v === details.v) {
+    if (!details.avatar || !pictureFits || avatarHash(room.avatar || "") === details.avatar) return false;
+    room.avatar = picture;
+    return true;
+  }
+  room.details = details;
+  room.name = clamp(details.name, MAX_NAME_LEN) || room.name;
+  room.bio = clamp(details.bio, MAX_BIO_LEN);
+  room.link = clamp(details.link, MAX_LINK_LEN) || "";
+  room.moderation = sanitizeRoomModeration(details.moderation);
+  if (!details.avatar) room.avatar = null;
+  else if (pictureFits) room.avatar = picture;
+  return true;
+}
+
+// Signed details that came before this device knew who made the room.
+function applyPendingDetails(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  const pending = room?.pendingDetails;
+  if (!pending || !resolveCreatorKey(roomKey, room.creatorKey)) return false;
+  delete room.pendingDetails;
+  return takeRoomDetails(roomKey, room, pending.details, pending.avatar);
+}
+
+/**
  * Rooms that move to a new key when somebody is removed. See lib/room-move.js.
  *
  * The old room stays here, under its old key, for two things only: its history,
@@ -985,6 +1070,8 @@ function moveRoom(roomKey) {
     keyPair: signingKeys,
   });
   if (!hop || !adoptMove(roomKey, hop)) return "";
+  // Signed again for the new room: a signature names the room it was made for.
+  if (signDetails(next)) debouncePersist();
   passMovesOn(roomKey);
   return next;
 }
@@ -1124,6 +1211,7 @@ function roomUpdatePayload(roomKey) {
     roomKey,
     name: shownRoomName(roomKey, room),
     bio: room.bio || "",
+    link: room.link || "",
     avatar: room.avatar || null,
     isDM: !!room.isDM,
     dmWith: room.dmWith || null,
@@ -1788,6 +1876,7 @@ function sendRoomMeta(conn, rk) {
   // from the creator's own connection, so only the creator sends one. With it,
   // anyone in the room can, and the other side checks it against the key.
   const creatorProof = creatorProofFor(rk);
+  const details = roomDetailsFor(rk);
   try {
     writeToConnection(conn, JSON.stringify({
       type: "room-meta",
@@ -1796,6 +1885,9 @@ function sendRoomMeta(conn, rk) {
       bio: room.bio || "",
       link: room.link || "",
       avatar: room.avatar || null,
+      // The creator's signed details, passed on exactly as they came. An older
+      // build ignores them and reads the fields around them.
+      ...(details && { details }),
       createdAt: Number.isSafeInteger(room.createdAt) ? room.createdAt : 0,
       createdBy: room.createdBy || (room.isHost ? localId : ""),
       creatorKey: room.isHost ? localKey : creatorProof ? resolveCreatorKey(rk, room.creatorKey) : "",
@@ -3007,18 +3099,22 @@ export function initChat(sdk, options = {}) {
 
             let updated = false;
 
-            // Only accept name if ours is a placeholder AND incoming is real
-            if (currentIsPlaceholder && !incomingIsPlaceholder) {
-              room.name = incomingName;
-              updated = true;
-            }
+            // Once the creator's signed details are here, they are what the
+            // room says, and nothing unsigned changes it. See lib/room-details.js.
+            if (!normalizeRoomDetails(room.details)) {
+              // Only accept name if ours is a placeholder AND incoming is real
+              if (currentIsPlaceholder && !incomingIsPlaceholder) {
+                room.name = incomingName;
+                updated = true;
+              }
 
-            // Only fill bio/link/avatar/creator if currently missing - prevents spoofing
-            if (msg.bio && !room.bio) { room.bio = clamp(msg.bio, MAX_BIO_LEN); updated = true; }
-            if (msg.link && !room.link) { room.link = clamp(msg.link, MAX_LINK_LEN) || ""; updated = true; }
-            if (msg.avatar && !room.avatar) {
-              room.avatar = sanitizeAvatar(msg.avatar);
-              if (room.avatar) updated = true;
+              // Only fill bio/link/avatar/creator if currently missing - prevents spoofing
+              if (msg.bio && !room.bio) { room.bio = clamp(msg.bio, MAX_BIO_LEN); updated = true; }
+              if (msg.link && !room.link) { room.link = clamp(msg.link, MAX_LINK_LEN) || ""; updated = true; }
+              if (msg.avatar && !room.avatar) {
+                room.avatar = sanitizeAvatar(msg.avatar);
+                if (room.avatar) updated = true;
+              }
             }
             // The room cannot have been created after the first person in it,
             // so the earliest anyone reports wins. Without this every device
@@ -3047,15 +3143,24 @@ export function initChat(sdk, options = {}) {
             }
             if (!knewCreator && resolveCreatorKey(msg.roomKey, room.creatorKey)) {
               applyPendingBans(msg.roomKey);
+              if (applyPendingDetails(msg.roomKey)) updated = true;
               // On through the room, to everyone this device can show it to.
               if (creatorProofFor(msg.roomKey)) broadcastRoomMeta(msg.roomKey, conn);
             }
             if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
 
-            // The host owns the room's moderation settings, so mirror whatever
-            // they send and never let a remote peer rewrite our own when we are
-            // the host. `room.isHost` is about us, not the sender.
-            if (msg.moderation && !room.isHost) {
+            if (msg.details && takeRoomDetails(msg.roomKey, room, msg.details, msg.avatar)) {
+              updated = true;
+              // On to everyone else in the room, as they came.
+              broadcastRoomMeta(msg.roomKey, conn);
+            } else if (msg.moderation && !room.isHost && !normalizeRoomDetails(room.details) && isRoomCreatorConnection({
+              roomKey: msg.roomKey,
+              storedKey: room.creatorKey,
+              connectionKey: fullId,
+            })) {
+              // Unsigned, as an older creator sends them, the room's settings
+              // count only from the creator's own connection. `room.isHost` is
+              // about us, not the sender.
               const next = sanitizeRoomModeration(msg.moderation);
               if (JSON.stringify(next) !== JSON.stringify(room.moderation)) {
                 room.moderation = next;
@@ -3265,6 +3370,8 @@ export async function handleChatRequest(req, sdk) {
           lastMessage: null, members: {},
           moderation: sanitizeRoomModeration(body.moderation),
         };
+        // Signed from the start, so whoever joins takes them from anyone.
+        signDetails(key);
         persistData();
         return respond(200, { roomKey: key });
       }
@@ -3717,8 +3824,24 @@ export async function handleChatRequest(req, sdk) {
         const room = savedData.rooms[roomKey];
         if (!room) return respond(404, { error: "Room not found" });
         const body = await req.json();
-        if (body.name !== undefined) room.name = clamp(body.name, MAX_NAME_LEN);
-        if (body.bio !== undefined) room.bio = clamp(body.bio, MAX_BIO_LEN);
+        // A room's details are its creator's to change, and the change goes to
+        // everyone in it, signed. See lib/room-details.js.
+        if (["name", "bio", "link", "avatar", "moderation"].some((field) => body[field] !== undefined)) {
+          if (room.isDM) return respond(400, { error: "A direct message has no room details to change." });
+          if (!isRoomCreator(roomKey)) {
+            return respond(403, { error: "Only the person who made this room can change it." });
+          }
+          if (body.avatar != null && body.avatar !== "" && sanitizeAvatar(body.avatar) === null) {
+            return respond(400, { error: "Invalid room image" });
+          }
+          if (body.name !== undefined) room.name = clamp(body.name, MAX_NAME_LEN) || room.name;
+          if (body.bio !== undefined) room.bio = clamp(body.bio, MAX_BIO_LEN);
+          if (body.link !== undefined) room.link = clamp(body.link, MAX_LINK_LEN) || "";
+          if (body.avatar !== undefined) room.avatar = sanitizeAvatar(body.avatar);
+          if (body.moderation !== undefined) room.moderation = sanitizeRoomModeration(body.moderation);
+          signDetails(roomKey);
+          broadcastRoomMeta(roomKey);
+        }
         if (body.isPinned !== undefined) room.isPinned = !!body.isPinned;
         if (body.isMuted !== undefined) room.isMuted = !!body.isMuted;
         persistData();
