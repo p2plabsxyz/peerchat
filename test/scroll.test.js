@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { shouldScrollToUnread, stickToBottom } from "../lib/scroll.js";
+import { holdInView, shouldScrollToUnread, stickToBottom } from "../lib/scroll.js";
 
 // A scroll container with the browser's clamping, driven by a manual frame
 // queue and clock so the loop's decisions are deterministic.
@@ -97,6 +97,59 @@ describe("stickToBottom", () => {
     const h = harness();
     const box = new Box(2000);
     stickToBottom(box, h.opts);
+    stickToBottom(box, h.opts);
+    h.tick();
+    assert.equal(h.pending, 1, "only the newest loop keeps running");
+  });
+});
+
+// A message opened from a search goes to the middle of the pane and stays
+// there while pictures above it load.
+describe("holdInView", () => {
+  const message = (offsetTop, offsetHeight = 60) => ({ offsetTop, offsetHeight, isConnected: true });
+
+  it("puts the message in the middle and keeps it there as content above grows", () => {
+    const h = harness();
+    const box = new Box(4000);
+    const el = message(1800);
+    holdInView(box, el, h.opts);
+    assert.equal(box.scrollTop, 1800 - (500 - 60) / 2);
+    h.tick();
+    box.scrollHeight = 4300;     // a picture above it loads
+    el.offsetTop = 2100;
+    h.tick();
+    assert.equal(box.scrollTop, 2100 - (500 - 60) / 2);
+    assert.equal(h.pending, 1);
+  });
+
+  it("stops the moment the user scrolls, and when its time is up", () => {
+    const h = harness();
+    const box = new Box(4000);
+    const el = message(1800);
+    holdInView(box, el, h.opts);
+    h.tick();
+    box.scrollTop = 600;         // the reader scrolls away
+    h.tick();
+    box.scrollHeight = 4300;
+    el.offsetTop = 2100;
+    h.tick();
+    assert.equal(box.scrollTop, 600);
+    assert.equal(h.pending, 0);
+
+    const again = harness();
+    holdInView(box, el, again.opts);
+    again.advance(2000);
+    again.tick();
+    assert.equal(again.pending, 0, "the loop ends after its budget");
+  });
+
+  it("takes over from stickToBottom, and gives way to a later one", () => {
+    const h = harness();
+    const box = new Box(4000);
+    stickToBottom(box, h.opts);
+    holdInView(box, message(1000), h.opts);
+    h.tick();
+    assert.equal(box.scrollTop, 1000 - (500 - 60) / 2, "the bottom does not pull it back");
     stickToBottom(box, h.opts);
     h.tick();
     assert.equal(h.pending, 1, "only the newest loop keeps running");
