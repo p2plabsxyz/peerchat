@@ -37,7 +37,10 @@ export const chat = {
   getRooms: () => apiRequest("get-rooms"),
   saveProfile: (body) => apiRequest("save-profile", { body }),
   createRoom: (body) => apiRequest("create-key", { body }),
-  joinRoom: (roomKey) => apiRequest("join", { roomKey, post: true }),
+  // The invite link goes in the body, when the room came from one: it can say
+  // who made the room, and the backend checks it.
+  joinRoom: (roomKey, invite = "") => apiRequest("join", invite ? { roomKey, body: { invite } } : { roomKey, post: true }),
+  inviteLink: (roomKey) => apiRequest("invite-link", { roomKey }),
   getHistory: (roomKey) => apiRequest("get-history", { roomKey }),
   searchMessages: (query) => apiRequest("search-messages", { body: { q: query } }),
   setActive: (roomKey) => apiRequest("set-active", { roomKey, post: true }),

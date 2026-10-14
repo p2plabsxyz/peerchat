@@ -61,7 +61,7 @@
         <li><strong>Direct Messages (DMs):</strong> click a peer's avatar to send a private message; the recipient gets an accept/decline popup. The conversation gets its own random room key, minted by whoever opens it and handed over inside the request. See below.</li>
         <li><strong>Link previews:</strong> when a message contains a link, the sender fetches that page’s title and description once and ships them inside the encrypted message. Readers see a small text card without ever connecting to the site, so opening a room never tells the linked host who read it. Turn it off in Settings.</li>
         <li><strong>Moderation</strong> runs locally on every peer, with per-room settings chosen by whoever created the room. See below.</li>
-        <li><strong>Edit room:</strong> whoever made a room can change its name, description, link, picture and settings later, and everyone in the room takes the change. It is signed by the creator, so it can come from anyone in the room and nobody else can make one.</li>
+        <li><strong>Edit room:</strong> whoever made a room can change its name, description, link, picture and settings later, and everyone in the room takes the change. It is signed by the creator and checked against the creator's key, so it can come from anyone in the room.</li>
         <li><strong>Forwarding:</strong> pick messages and forward them to another chat, pictures, videos and files too. Several go a moment apart, so the chat's spam limit is never reached.</li>
         <li><strong>Works with the internet down:</strong> rooms are joined on an isolated LAN swarm as well as the public one (<code>@p2plabs/hyperdht-mdns</code>, no public bootstrap), so peers on the same network keep talking. It needs a network, not an internet connection.</li>
         <li>Optional Electron <code>safeStorage</code> for the local JSON that holds rooms and keys.</li>
@@ -70,9 +70,18 @@
       <h2>How the room key works</h2>
       <p class="muted">
         The key is a random secret shown as 64 hex characters. Anyone with it can join that room and read messages sent from then on; history from before a join is not backfilled. They can read history
-        from peers who have the data. Treat it like a shared password. Use <strong>Join room</strong> with the key;
-        for room details or keys kept on this computer, see <strong>peerchat-rooms</strong> under Hyperdrives in
+        from peers who have the data. Treat it like a shared password. Use <strong>Join room</strong> with an invite
+        link or the key; for room details or keys kept on this computer, see <strong>peerchat-rooms</strong> under Hyperdrives in
         <a href="peersky://settings/p2p-data">Settings → P2P data</a>.
+      </p>
+      <p class="muted">
+        <strong>Who made the room.</strong> A room made on a recent version has a key worked out from its
+        creator's key and a secret, so anyone shown the two can check who made it. <strong>Copy invite</strong> puts
+        both in the link when this computer knows them, and the secret is as private as the room key. A computer
+        that joins from the link knows who made the room from the start. A computer that does not know yet takes
+        the first member who says, on their own connection, that they made it, until anyone in the room shows the
+        secret for another key: then that key is the creator's, and whatever the first one signed, a new name,
+        settings, removals or a move, is dropped.
       </p>
       <p class="muted">
         The key itself is never sent. Peers find each other through a <strong>swarm topic</strong>, a separate
@@ -126,6 +135,10 @@
         <li><strong>Adult domain blocklist</strong>: always on, not toggleable.</li>
       </ul>
       <p class="muted">
+        In a group the filters read a file's name as well as the words, since the name shows in the chat list and
+        in search too.
+      </p>
+      <p class="muted">
         Repeat violations escalate from a warning, to a final warning, to a short block from that room. The block
         lifts by itself after five minutes and the counter resets, so a peer returns with a clean slate instead of
         being blocked again immediately. You are never blocked from your own rooms.
@@ -137,16 +150,19 @@
         A removal lasts: they cannot come back.
       </p>
       <p class="muted">
-        Every copy of PeerChat checks that a removal really came from the person who made the room, against the
-        connection it arrived on rather than against anything written in the message, so it cannot be faked by
-        somebody claiming to be them.
+        Every copy of PeerChat checks that a removal really came from the person who made the room: the list is
+        signed with their key and checked against the creator's key the room trusts, so it can come from anyone in
+        the room.
       </p>
       <p class="muted">
-        <strong>A new key.</strong> In a room made on this version or later, removing somebody also moves the room
-        to a new key that only the people still in it get, so the key the removed person holds reaches nothing new.
-        An older room, and P2P Republic, keep their key: somebody removed from one still holds it, and could run a
-        changed build and listen. There, removal means every ordinary PeerChat stops passing their messages on and
-        refuses their connection, and a room key that has reached the wrong person is still worth replacing.
+        <strong>A new key.</strong> In every room but P2P Republic, removing somebody also moves the room to a new
+        key for the people still in it, so invites from before stop working and the key they were removed with
+        reaches nothing new. Each of a person's devices is a member of its own: if they use PeerChat on another
+        device too, remove that one as well. The new key goes only to devices that were in the room with yours
+        before, and somebody who missed the move hears where it went from one of them for two weeks after it.
+        A device on an older build stays on the old key until it updates. P2P Republic keeps its key: somebody
+        removed from it still holds it, and could run a changed build and listen. There, removal means every
+        ordinary PeerChat stops passing their messages on and refuses their connection.
       </p>
       <p class="muted">
         The three-strikes spam and abuse limit below is a different thing. That one is decided by a filter rather

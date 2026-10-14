@@ -12,6 +12,8 @@ import SecretStream from "@hyperswarm/secret-stream";
 
 import { deriveTopic, encryptMsg, handleChatRequest, initChat } from "../p2p.js";
 import { attachChatTransport } from "../transport.js";
+import { encodeMessagePayload } from "../lib/link-preview.js";
+import { makeRotatingRoomKey, newKeyChain } from "../lib/key-chain.js";
 import {
   MAX_MSGS_PER_WINDOW,
   checkContent,
@@ -24,6 +26,8 @@ import { securePair, topicsFrame, wireRoom } from "./helpers.mjs";
 
 const GROUP = "d1".repeat(32);
 const DM = "d2".repeat(32);
+// A group whose keys rotate, which keeps a file's name inside the sealed body.
+const SEALED = makeRotatingRoomKey();
 const CAROL = SecretStream.keyPair(Buffer.alloc(32, 9));
 const full = (keyPair) => keyPair.publicKey.toString("hex");
 const short = (keyPair) => full(keyPair).slice(0, 8);
@@ -116,6 +120,7 @@ describe("a message with a threat, a slur and an adult link, from a peer", () =>
       rooms: {
         [GROUP]: room(GROUP, "Launch crew"),
         [DM]: room(DM, "carol", { isHost: false, isDM: true, dmWith: short(CAROL), dmWithKey: full(CAROL), pendingAcceptance: false }),
+        [SEALED]: room(SEALED, "Night shift", { chain: newKeyChain() }),
       },
     }));
     initChat(sdk, { storagePath: path.join(dir, "chat.json") });
@@ -127,7 +132,7 @@ describe("a message with a threat, a slur and an adult link, from a peer", () =>
 
     const pair = await securePair({ clientKeyPair: CAROL });
     carol = { pair, frames: [], transport: null };
-    swarm.emit("connection", pair.serverStream, { topics: [deriveTopic(GROUP), deriveTopic(DM)] });
+    swarm.emit("connection", pair.serverStream, { topics: [deriveTopic(GROUP), deriveTopic(DM), deriveTopic(SEALED)] });
     let buffer = "";
     await new Promise((opened) => {
       carol.transport = attachChatTransport(pair.clientStream, (raw) => {
@@ -139,7 +144,7 @@ describe("a message with a threat, a slur and an adult link, from a peer", () =>
     });
     carol.send = (frame) => carol.transport.send(typeof frame === "string" ? frame : JSON.stringify(frame) + "\n");
     for (let i = 0; i < 100 && !carol.frames.some((f) => f.type === "topics"); i++) await sleep(50);
-    carol.send(topicsFrame(pair.clientStream, [GROUP, DM]));
+    carol.send(topicsFrame(pair.clientStream, [GROUP, DM, SEALED]));
     for (let i = 0; i < 100 && carol.frames.filter((f) => f.type === "room-meta").length < 2; i++) await sleep(50);
     carol.send({ type: "join", room: wireRoom(GROUP), peerId: short(CAROL), username: "carol", ts: Date.now() });
     await sleep(200);
@@ -173,5 +178,59 @@ describe("a message with a threat, a slur and an adult link, from a peer", () =>
     }
     assert.ok(notice, "a moderation notice");
     assert.equal((await history(GROUP)).some((m) => m.id === id), false);
+  });
+
+  // A file's name shows in the chat list and in search as well as on the file, so
+  // in a group it goes through the filters the words do. A direct message skips
+  // them for the name as for the words.
+  describe("a file whose name the filters catch, from a peer", () => {
+    const NAME = "you ass.png";
+    const noticeFor = async (roomKey, id) => {
+      for (let i = 0; i < 60; i++) {
+        const notice = (await history(roomKey)).find((m) => m.type === "system" && m.moderationNotice && m.id?.startsWith(`mod-${id}`));
+        if (notice) return notice;
+        await sleep(50);
+      }
+      return null;
+    };
+    const fileFrame = (roomKey, id, fields = {}) => ({
+      room: wireRoom(roomKey), id, sender: short(CAROL), sn: "carol", ts: Date.now(), ...fields,
+    });
+
+    before(() => setBadWords(new Set(["ass"])));
+
+    it("is held back in a group, as words the filters catch would be", async () => {
+      const id = randomBytes(16).toString("hex");
+      carol.send(fileFrame(GROUP, id, { fileName: NAME, fileSize: 10, ...encryptMsg("hyper://files/one", GROUP) }));
+      assert.ok(await noticeFor(GROUP, id), "a moderation notice");
+      assert.equal((await history(GROUP)).some((m) => m.id === id), false);
+    });
+
+    it("is held back in a group when the name is sealed inside the message", async () => {
+      const id = randomBytes(16).toString("hex");
+      const payload = encodeMessagePayload("hyper://files/two", null, "", { fileName: NAME, fileSize: 10 });
+      carol.send(fileFrame(SEALED, id, encryptMsg(payload, SEALED)));
+      assert.ok(await noticeFor(SEALED, id), "a moderation notice");
+      assert.equal((await history(SEALED)).some((m) => m.id === id), false);
+    });
+
+    it("is held back from somebody's history in a group too", async () => {
+      const id = randomBytes(16).toString("hex");
+      carol.send({ type: "sync", ...fileFrame(GROUP, id, { fileName: NAME, fileSize: 10, ...encryptMsg("hyper://files/three", GROUP) }) });
+      assert.ok(await noticeFor(GROUP, id), "a moderation notice");
+      assert.equal((await history(GROUP)).some((m) => m.id === id), false);
+    });
+
+    it("lands in a direct message, name and all", async () => {
+      const id = randomBytes(16).toString("hex");
+      carol.send(fileFrame(DM, id, { fileName: NAME, fileSize: 10, ...encryptMsg("hyper://files/four", DM) }));
+      let found;
+      for (let i = 0; i < 60 && !found; i++) {
+        found = (await history(DM)).find((m) => m.id === id);
+        if (!found) await sleep(50);
+      }
+      assert.ok(found, "the file is in the conversation");
+      assert.equal(found.fileName, NAME);
+    });
   });
 });
