@@ -2,6 +2,7 @@ import { PRE_JOINED_ROOM_KEY } from "./rooms.js";
 import {
   buildDirectInviteUrl,
   buildInviteUrl,
+  inviteNamesCreator,
   isDirectRoomFor,
   parseDirectInvite,
   parseInvite,
@@ -1183,13 +1184,17 @@ function hideBoot() {
 
 // An invite carries the room key, so it is read once and wiped from the URL
 // before the app renders; history and the address bar must not keep it.
+// The whole link is kept for the join as well: it can say who made the room,
+// with a secret as private as the key.
 let pendingInvite = null;
+let pendingInviteLink = "";
 let pendingDirectInvite = null;
 function takeInviteFromAddress() {
   const room = parseInvite(location.hash);
   const person = parseDirectInvite(location.hash);
   if (!room && !person) return false;
   pendingInvite = room;
+  pendingInviteLink = room ? location.hash : "";
   pendingDirectInvite = person;
   try { history.replaceState(null, "", location.pathname + location.search); } catch {}
   return true;
@@ -1207,8 +1212,10 @@ async function consumeInvite() {
   // Each invite is opened once, however the page came to read it.
   const directInvite = pendingDirectInvite;
   const invite = pendingInvite;
+  const inviteLink = pendingInviteLink;
   pendingDirectInvite = null;
   pendingInvite = null;
+  pendingInviteLink = "";
   // A personal link names a person rather than a room, so it asks them: the
   // whole key, or the peer id of an older link.
   if (directInvite) {
@@ -1226,8 +1233,10 @@ async function consumeInvite() {
   }
   if (!invite) return;
   try {
-    if (!S.rooms[invite]) {
-      await chat.joinRoom(invite);
+    // A room here already is joined again only to take who made it, when
+    // the link says.
+    if (!S.rooms[invite] || inviteNamesCreator(inviteLink)) {
+      await chat.joinRoom(invite, inviteLink);
       await loadRooms();
       renderRoomList();
     }
@@ -2965,15 +2974,18 @@ let joiningRoom = false;
 $("join-room-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (joiningRoom) return;
-  const key = $("join-room-key").value.trim();
-  if (!/^[a-f0-9]{64}$/i.test(key)) { alert("Invalid room key."); return; }
+  const pasted = $("join-room-key").value.trim();
+  // A room key, or an invite link, which can also say who made the room.
+  const bareKey = /^[a-f0-9]{64}$/i.test(pasted);
+  const key = bareKey ? pasted.toLowerCase() : parseInvite(pasted);
+  if (!key) { alert("Invalid room key or invite link."); return; }
   // Finding the room can take a few seconds, and a button that does nothing
   // in the meantime gets pressed again.
   const confirmBtn = $("join-room-confirm");
   joiningRoom = true;
   if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = "Joining…"; }
   try {
-    await chat.joinRoom(key);
+    await chat.joinRoom(key, bareKey ? "" : pasted);
     await loadRooms();
     renderRoomList();
     closeAllModals();
@@ -3313,8 +3325,14 @@ $("chat-header-main")?.addEventListener("click", () => {
   if (inviteRow) inviteRow.style.display = keyRow.style.display;
   const inviteBtn = $("ri-copy-invite");
   if (inviteBtn) {
-    inviteBtn.onclick = () => {
-      const link = buildInviteUrl(S.activeRoom);
+    // The link says who made the room, which only the backend knows, so it is
+    // asked for as this opens and the click copies it at once.
+    const inviteRoom = S.activeRoom;
+    const invite = inviteRow?.style.display === "none"
+      ? Promise.resolve("")
+      : chat.inviteLink(inviteRoom).then((answer) => answer.link || "").catch(() => buildInviteUrl(inviteRoom));
+    inviteBtn.onclick = async () => {
+      const link = await invite;
       if (!link) return;
       copyText(link).then(() => {
         inviteBtn.textContent = "Copied!";
@@ -3698,7 +3716,10 @@ async function removeRoomMember(peerId, memberName) {
   const confirmed = confirm(
     `Remove ${memberName} from this room?\n\n` +
     "They will not be able to come back. Everyone running PeerChat will stop passing their messages on." +
-    (movesKey ? " The room also moves to a new key they never get, so invites from before stop working." : ""),
+    (movesKey
+      ? " The room also moves to a new key for the people still in it, so invites from before stop working." +
+        " If they use PeerChat on another device too, remove that one as well."
+      : ""),
   );
   if (!confirmed) return;
 

@@ -75,10 +75,19 @@ const MAX_WANT_IDS_PER_WINDOW = 6000;
 const WANT_RETRY_MS = 3000;
 const WANT_GIVE_UP_MS = 30_000;
 const MAX_WANTED = 4096;
+// Of those, how many one connection's ids and one room's may be. One member
+// could fill the whole list with made-up ids, from P2P Republic say, and real
+// ids from every other room were not asked for until they ran out.
+const MAX_WANTED_PER_PEER = 512;
+const MAX_WANTED_PER_ROOM = 2048;
 const MAX_REMEMBERED_PASSES = 4096;
 const MAX_IDS_HEARD_PER_PEER = 2048;
 const MAX_AUTHOR_RATES = 4096;
 const MAX_PROVEN_KEYS = 4096;
+// Room details, removal lists, moves and asks for room details, from one
+// connection a minute, as the phone allows. Each can mean a signature to check
+// or a frame to send back, and nothing else held them back.
+const MAX_CONTROL_FRAMES_PER_WINDOW = 60;
 
 import { earliestRoomCreatedAt } from "./lib/room-created-at.js";
 import {
@@ -151,6 +160,7 @@ import {
   signRoomDetails,
 } from "./lib/room-details.js";
 import { lastMessageOf, previewNeedsName } from "./lib/message-preview.js";
+import { buildInviteUrl, parseRoomInvite } from "./lib/invite.js";
 import {
   newestHits,
   queryMatcher,
@@ -233,6 +243,8 @@ const provenKeys = new Map();
 // and the ones it asked for, with who else has them.
 const recentPasses = new Map();
 const wantedIds = new Map();
+// How many of those are each room's.
+const wantedPerRoom = new Map();
 let wantTimer = null;
 let safeStore = null;
 let dataPath = null;
@@ -752,37 +764,163 @@ function creatorProofFor(roomKey) {
     : "";
 }
 
+// An invite to a room: its key, and who made it when this device has a creator
+// key for it, with the secret that shows it when this device holds one that
+// checks out. A direct message never says, and P2P Republic's creator key
+// ships with the app, so its invite is the key alone. See lib/invite.js.
+function inviteLinkFor(roomKey) {
+  const room = savedData.rooms?.[roomKey];
+  if (!room || room.isDM || normalizeCreatorKey(PINNED_CREATOR_KEYS[roomKey])) return buildInviteUrl(roomKey);
+  const creator = normalizeCreatorKey(room.creatorKey) || (room.isHost ? localKey : "");
+  return buildInviteUrl(roomKey, creator, creator ? creatorProofFor(roomKey) : "");
+}
+
+// Whether the creator key held for a room is settled: pinned in the app, or
+// shown by the secret that made the room's key out of it. Any other key was
+// only announced, by whoever said first on their own connection that they made
+// the room, or by an invite without the secret, and a key shown with the
+// secret replaces it. Two keys cannot both make one room key, so a shown key
+// is never replaced.
+function creatorKeySettled(roomKey, room) {
+  if (normalizeCreatorKey(PINNED_CREATOR_KEYS[roomKey])) return true;
+  return !!room?.creatorProof && checkCreatorProof(roomKey, room.creatorKey, room.creatorProof);
+}
+
 // The creator key from anyone in the room, when it comes with the secret that
 // made the room's key out of it. Before this, only the creator's own connection
 // could say who made a room, so in a room bigger than one device's connections
 // most members never learned it, and dropped every removal list as unchecked.
+// It replaces a key that was only announced: whoever announced that one did
+// not make the room, and the first to say so used to keep it for good.
 // True when the room learned something.
 function takeCreatorProof(roomKey, room, announcedKey, proof) {
   if (room.isDM) return false;
   const key = normalizeCreatorKey(announcedKey);
   if (!key || !checkCreatorProof(roomKey, key, proof)) return false;
   const held = resolveCreatorKey(roomKey, room.creatorKey);
-  if (held && held !== key) return false;
+  if (held && held !== key) {
+    if (creatorKeySettled(roomKey, room)) return false;
+    dropAnnouncedCreator(roomKey, room, key);
+  }
   let changed = false;
-  if (!room.creatorKey) { room.creatorKey = key; changed = true; }
-  if (!room.creatorProof) { room.creatorProof = proof.toLowerCase(); changed = true; }
+  if (room.creatorKey !== key) { room.creatorKey = key; changed = true; }
+  if (room.creatorProof !== proof.toLowerCase()) { room.creatorProof = proof.toLowerCase(); changed = true; }
   // The short id is a label, and whoever said it first may have been wrong.
   if (room.createdBy !== key.slice(0, 8)) { room.createdBy = key.slice(0, 8); changed = true; }
   return changed;
 }
 
+// What a creator key that was only announced signed here counts for nothing
+// once another key is shown to have made the room: the room's details and what
+// they set, its removal list, the name it came with, and a move it made. Its
+// details may carry any version, so they are dropped rather than outnumbered,
+// and the real creator's come again from anyone in the room. The room is as a
+// new join has it until they do, its filters on.
+function dropAnnouncedCreator(roomKey, room, provenKey) {
+  if (normalizeRoomDetails(room.details)) {
+    room.name = roomKey.slice(0, 8) + "...";
+    room.bio = "";
+    room.link = "";
+    room.avatar = null;
+  }
+  delete room.details;
+  room.moderation = { ...DEFAULT_ROOM_MODERATION };
+  room.bans = [];
+  room.bansSigned = { v: 0, sig: "" };
+  room.createdByName = "";
+  undoMoveNotBy(roomKey, room, provenKey);
+}
+
+// A move this room followed that its creator did not sign came from whoever
+// was taken for the creator before. The rooms that move made here go, as
+// leaving them would but without telling anyone, and the room is the one
+// shown again, on the page too: it follows the event back as it follows a
+// move.
+function undoMoveNotBy(roomKey, room, creatorKey) {
+  if (!room.movedTo) return;
+  const hop = normalizeMove(room.movedTo);
+  if (hop && checkMove({ fromTopic: wireTopic(roomKey), creatorKey, move: hop, topicOf: wireTopic })) return;
+  const made = [];
+  let from = roomKey;
+  let next = room.movedTo.to;
+  for (let i = 0; i < MAX_MOVES && next && savedData.rooms[next]?.movedFrom === from; i++) {
+    made.push(next);
+    from = next;
+    next = savedData.rooms[next].movedTo?.to;
+  }
+  delete room.movedTo;
+  const shown = made.includes(activeRoom);
+  for (const key of made) {
+    dropRoomLocally(chatSdk, key).catch(() => {});
+    broadcastGlobal("room-moved", { from: key, to: roomKey });
+  }
+  if (shown) activeRoom = roomKey;
+  persistData();
+}
+
+// Who made the room, from an invite to it: taken when this device does not
+// know yet, and with the secret, by the same rule as from anyone in the room.
+// See lib/invite.js.
+function takeInviteCreator(roomKey, invite) {
+  const room = savedData.rooms[roomKey];
+  if (!room || room.isDM || !invite?.creatorKey) return;
+  const held = resolveCreatorKey(roomKey, room.creatorKey);
+  if (invite.creatorProof) {
+    takeCreatorProof(roomKey, room, invite.creatorKey, invite.creatorProof);
+  } else if (!held) {
+    room.creatorKey = invite.creatorKey;
+    room.createdBy = invite.creatorKey.slice(0, 8);
+  }
+  if (resolveCreatorKey(roomKey, room.creatorKey) === held) return;
+  creatorKeyChanged(roomKey);
+  persistData();
+  emitRoomUpdate(roomKey);
+}
+
+// The room has a creator key it did not have before, learned or put in place
+// of one only announced: what waited for one is checked against it, and the
+// room's details go on through the room so others learn it too. True when
+// waiting details were taken.
+function creatorKeyChanged(roomKey, exceptConn = null) {
+  applyPendingBans(roomKey);
+  const tookDetails = applyPendingDetails(roomKey);
+  if (creatorProofFor(roomKey)) broadcastRoomMeta(roomKey, exceptConn);
+  // Only now, with the real creator's removals in place, so nobody they
+  // removed is let in on the way.
+  letInHeldPeers(roomKey);
+  return tookDetails;
+}
+
+// Everyone held out of a room while it had moved, who proved it on their
+// connection, let in once it has not: a move undone because whoever made it
+// was wrongly taken for the creator. Not anybody the creator removed.
+function letInHeldPeers(roomKey) {
+  if (savedData.rooms[roomKey]?.movedTo) return;
+  for (const peer of peers) {
+    if (!peer.closedRooms?.has(roomKey) || isPeerRemovedFromRoom(roomKey, peer)) continue;
+    peer.closedRooms.delete(roomKey);
+    if (peerSharesRoom(peer, roomKey)) continue;
+    peer.rooms.push(roomKey);
+    noteKnown(roomKey, peer.fullId);
+    shareRoomsWith(peer.conn, [roomKey]);
+  }
+}
+
 // A signed removal list that came before this device knew who made the room,
-// checked now that it does. It used to be dropped, and the next one came only
-// with the next removal.
+// or that did not check out against a key somebody only announced, checked
+// now. It used to be dropped, and the next one came only with the next
+// removal. One that still does not check out against an announced key waits
+// on, since a proof can still replace that key.
 function applyPendingBans(roomKey, exceptConn = null) {
   const room = savedData.rooms?.[roomKey];
   const pending = room?.pendingBans;
   const creatorKey = resolveCreatorKey(roomKey, room?.creatorKey);
   if (!pending || !creatorKey) return;
-  delete room.pendingBans;
   const signed = normalizeSignedRemovals(pending.signed);
-  if (signed.v <= normalizeSignedRemovals(room.bansSigned).v) return;
-  if (!checkSignedRemovals({ topic: wireTopic(roomKey), creatorKey, bans: pending.bans, signed })) return;
+  const checks = checkSignedRemovals({ topic: wireTopic(roomKey), creatorKey, bans: pending.bans, signed });
+  if (!checks && !creatorKeySettled(roomKey, room)) return;
+  delete room.pendingBans;
+  if (!checks || signed.v <= normalizeSignedRemovals(room.bansSigned).v) return;
   applyRoomBans(roomKey, pending.bans);
   room.bansSigned = signed;
   persistData();
@@ -827,19 +965,24 @@ function roomDetailsFor(roomKey) {
 
 // Signed details from anyone in the room, taken when the creator signed them
 // for this room and they are newer than the ones here. Before the creator key
-// is known they wait, as a removal list does. True when anything changed.
+// is known they wait, as a removal list does, and so do ones that do not check
+// out against a key that was only announced: a proof can still replace that
+// key, and the details held may be its at any version. True when anything
+// changed.
 function takeRoomDetails(roomKey, room, raw, avatar) {
   const details = normalizeRoomDetails(raw);
   if (!details || room.isDM) return false;
   const held = normalizeRoomDetails(room.details);
-  if (held && held.v > details.v) return false;
   const creatorKey = resolveCreatorKey(roomKey, room.creatorKey);
-  if (!creatorKey) {
+  const settled = !!creatorKey && creatorKeySettled(roomKey, room);
+  if (settled && held && held.v > details.v) return false;
+  if (!creatorKey || !checkRoomDetails({ topic: wireTopic(roomKey), creatorKey, details })) {
+    if (settled) return false;
     const waiting = normalizeRoomDetails(room.pendingDetails?.details);
     if (!waiting || waiting.v < details.v) room.pendingDetails = { details, avatar: sanitizeAvatar(avatar) };
     return false;
   }
-  if (!checkRoomDetails({ topic: wireTopic(roomKey), creatorKey, details })) return false;
+  if (held && held.v > details.v) return false;
   // The picture travels beside the details, so only one that matches what was
   // signed is taken. These same details can bring it later from somebody else.
   const picture = sanitizeAvatar(avatar);
@@ -873,11 +1016,21 @@ function applyPendingDetails(roomKey) {
  *
  * The old room stays here, under its old key, for two things only: its history,
  * shown with the new room's, and anyone who was offline when it moved, who
- * hears where it went when they come back, if this device saw them in it
- * before. Nobody new is let in, and nothing is sent in it from here.
+ * hears where it went when they come back, if they proved the room on a
+ * connection to this device before. Nobody new is let in, and nothing is sent
+ * in it from here. It stays joined for two weeks after the move, and after
+ * that only its record and history stay.
  */
 const MAX_MOVES = 32;
 const MAX_MOVE_FUTURE_MS = 5 * 60_000;
+// Moves taken along one room's line in any hour, counting the ones taken
+// already. A creator, or somebody wrongly taken for one, could otherwise send
+// a long line of them on every connection, and this device made a room for
+// each. The rest are taken when the hour allows: they come again with the line.
+const MAX_MOVES_PER_HOUR = 10;
+const MOVE_LIMIT_WINDOW_MS = 60 * 60_000;
+const MOVED_ROOM_KEPT_MS = 14 * 24 * 60 * 60_000;
+const movedRoomTimers = new Map();
 
 // Where a room's people are now: the end of its moves.
 function finalRoomKey(roomKey) {
@@ -914,7 +1067,53 @@ function roomsBefore(roomKey) {
   return before;
 }
 
-// Somebody seen in a room, by key, with when this device first saw them.
+// The moves along a room's line made in the last hour, by when each says it
+// was made: the ones taken here already, which the rooms before it hold.
+function movesInLastHour(roomKey, now = Date.now()) {
+  let count = 0;
+  for (const key of roomsBefore(roomKey)) {
+    if (savedData.rooms[key]?.movedTo?.at > now - MOVE_LIMIT_WINDOW_MS) count += 1;
+  }
+  return count;
+}
+
+// Whether a room moved over two weeks ago.
+function movedLongAgo(room, now = Date.now()) {
+  const at = room?.movedTo?.at;
+  return Number.isSafeInteger(at) && now - at >= MOVED_ROOM_KEPT_MS;
+}
+
+// A room that moved is left two weeks after the move, as at start.
+function keepMovedRoomFor(roomKey) {
+  const at = savedData.rooms[roomKey]?.movedTo?.at;
+  if (!Number.isSafeInteger(at) || movedRoomTimers.has(roomKey)) return;
+  const timer = setTimeout(() => {
+    movedRoomTimers.delete(roomKey);
+    leaveMovedRoom(roomKey);
+  }, Math.max(0, at + MOVED_ROOM_KEPT_MS - Date.now()));
+  timer.unref?.();
+  movedRoomTimers.set(roomKey, timer);
+}
+
+// Two weeks after a room moved, anyone who missed the move has had their time
+// to come back and hear where it went. Its topic is left, so nobody finds this
+// device under it any more, and its record and history stay.
+function leaveMovedRoom(roomKey) {
+  const room = savedData.rooms[roomKey];
+  if (!room || !movedLongAgo(room) || !joinedRooms.has(roomKey)) return;
+  joinedRooms.delete(roomKey);
+  for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
+    if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
+  }
+  for (const peer of peers) peer.rooms = peer.rooms.filter((key) => key !== roomKey);
+  Promise.resolve(chatSdk?.leave?.(deriveTopic(roomKey)))
+    .catch((error) => console.warn(`[chat] Leave moved room ${roomKey.slice(0, 8)}: ${error.message}`));
+}
+
+// Somebody who proved a room on a connection to this device, by key, with when
+// it first saw them. Only that: a message or reaction can be signed with any
+// key, so a key noted from one was a way for somebody about to be removed to
+// have a spare key handed the room's next key.
 function noteKnown(roomKey, key) {
   const room = savedData.rooms?.[roomKey];
   if (!room || room.isDM || room.movedTo || !key) return;
@@ -931,9 +1130,10 @@ function movesOnRemoval(roomKey) {
     !!signingKeys && !!localKey && isRoomCreator(roomKey);
 }
 
-// Whether a moved room opens to this peer: somebody this device saw in it
-// before it moved, or another of this person's own devices, and not removed.
-// Anyone else, the person removed under a new key included, gets nothing.
+// Whether a moved room opens to this peer: somebody who proved it on a
+// connection to this device before it moved, or another of this person's own
+// devices, and not removed. Anyone else, the person removed under a new key
+// included, gets nothing.
 function movedRoomWelcomes(roomKey, peer) {
   const room = savedData.rooms?.[roomKey];
   const hop = normalizeMove(room?.movedTo);
@@ -951,8 +1151,8 @@ function sendMoves(conn, roomKey) {
   try { writeToConnection(conn, JSON.stringify({ type: "room-moved", roomKey, moves }) + "\n"); } catch {}
 }
 
-// A move on to everyone else in the old room this device saw there before it
-// moved. Anyone it did not is let out of the old room on this side.
+// A move on to everyone else in the old room who proved it here before it
+// moved. Anyone else is let out of the old room on this side.
 function passMovesOn(roomKey, exceptConn = null) {
   for (const peer of peers) {
     if (peer.conn === exceptConn || peer.conn.destroyed || !peerSharesRoom(peer, roomKey)) continue;
@@ -962,7 +1162,9 @@ function passMovesOn(roomKey, exceptConn = null) {
 }
 
 // The new room in place of the old one: everything this device knew of the old
-// one, the chain the move brought, joined. False when there was nothing to do.
+// one, and the chain the move brought. A record only: whoever takes a line of
+// moves joins the room it ends in (enterMovedRoom). False when there was
+// nothing to do.
 function adoptMove(fromKey, hop) {
   const from = savedData.rooms[fromKey];
   if (!from || from.movedTo) return false;
@@ -1008,26 +1210,32 @@ function adoptMove(fromKey, hop) {
   from.unreadCount = 0;
   from.unreadMentions = 0;
   if (activeRoom === fromKey) activeRoom = hop.to;
-  persistData();
+  return true;
+}
 
-  appendToFeedWhenOpen(hop.to, {
-    id: `moved-${wireTopic(hop.to)}`,
+// The room a line of moves ends in, joined, with a line in it saying why, and
+// the page sent on to it. The rooms on the way stay records, which history and
+// finalRoomKey find their way through: no topic, no feed and no line of their
+// own. Following a long line used to join every room in it.
+function enterMovedRoom(fromKey, toKey, at) {
+  persistData();
+  appendToFeedWhenOpen(toKey, {
+    id: `moved-${wireTopic(toKey)}`,
     type: "system",
     moderationNotice: true,
     text: "This room has a new key, so people removed from it cannot follow. Invites from before no longer work.",
-    ts: hop.at,
+    ts: at,
   });
   if (chatSdk) {
-    joinRoom(chatSdk, hop.to)
+    joinRoom(chatSdk, toKey)
       .then(() => {
-        announceRoomJoin(hop.to);
-        emitRoomUpdate(hop.to);
+        announceRoomJoin(toKey);
+        emitRoomUpdate(toKey);
       })
-      .catch((error) => console.error(`[chat] Join moved room ${hop.to.slice(0, 8)}: ${error.message}`));
+      .catch((error) => console.error(`[chat] Join moved room ${toKey.slice(0, 8)}: ${error.message}`));
   }
-  broadcastGlobal("room-moved", { from: fromKey, to: hop.to });
-  emitRoomUpdate(hop.to);
-  return true;
+  broadcastGlobal("room-moved", { from: fromKey, to: toKey });
+  emitRoomUpdate(toKey);
 }
 
 // Written once the room's feed is open, which for a room just moved to is a
@@ -1041,27 +1249,54 @@ function appendToFeedWhenOpen(roomKey, entry) {
 }
 
 // Moves somebody in a room passed on: each checked against the creator key of
-// the room it leaves, taken, and passed on, until one does not check out.
+// the room it leaves, and taken, until one does not check out or the hour has
+// had its share. Only the room the line ends in is joined, and the line goes on
+// from every room that moved here now.
 function takeMoves(roomKey, moves, conn) {
+  const now = Date.now();
+  const moved = [];
+  const made = [];
   let key = roomKey;
+  let at = 0;
+  let recent = -1;
   for (const raw of moves.slice(0, MAX_MOVES)) {
     const room = savedData.rooms[key];
     const hop = normalizeMove(raw);
-    if (!room || room.isDM || !hop) return;
+    if (!room || room.isDM || !hop) break;
     if (room.movedTo) {
-      if (room.movedTo.to !== hop.to) return;
+      if (room.movedTo.to !== hop.to) break;
       key = hop.to;
       continue;
     }
     const creatorKey = resolveCreatorKey(key, room.creatorKey);
-    if (!creatorKey || hop.at > Date.now() + MAX_MOVE_FUTURE_MS) return;
-    if (!checkMove({ fromTopic: wireTopic(key), creatorKey, move: hop, topicOf: wireTopic })) return;
+    if (!creatorKey || hop.at > now + MAX_MOVE_FUTURE_MS) break;
+    if (!checkMove({ fromTopic: wireTopic(key), creatorKey, move: hop, topicOf: wireTopic })) break;
     // Removed here: not ours to follow, whoever passed it on.
-    if (isRemovedFromRoom(key)) return;
-    if (!adoptMove(key, hop)) return;
-    passMovesOn(key, conn);
+    if (isRemovedFromRoom(key)) break;
+    // The hour's share, unless this device made the room.
+    if (creatorKey !== localKey) {
+      if (recent < 0) recent = movesInLastHour(key, now);
+      if (recent >= MAX_MOVES_PER_HOUR) break;
+      if (hop.at > now - MOVE_LIMIT_WINDOW_MS) recent += 1;
+    }
+    const isNew = !savedData.rooms[hop.to];
+    if (!adoptMove(key, hop)) break;
+    moved.push(key);
+    if (isNew) made.push(hop.to);
     key = hop.to;
+    at = hop.at;
   }
+  if (!moved.length) return;
+  // The rooms on the way, made just now, are records and nothing more, at
+  // start too.
+  for (const passed of made) {
+    if (passed !== key) savedData.rooms[passed].passedThrough = true;
+  }
+  for (const from of moved) {
+    if (joinedRooms.has(from)) keepMovedRoomFor(from);
+  }
+  enterMovedRoom(moved[0], key, at);
+  for (const from of moved) passMovesOn(from, conn);
 }
 
 // The creator's side of a removal: the room moves to a new key, made from this
@@ -1080,7 +1315,9 @@ function moveRoom(roomKey) {
   });
   if (!hop || !adoptMove(roomKey, hop)) return "";
   // Signed again for the new room: a signature names the room it was made for.
-  if (signDetails(next)) debouncePersist();
+  signDetails(next);
+  keepMovedRoomFor(roomKey);
+  enterMovedRoom(roomKey, next, hop.at);
   passMovesOn(roomKey);
   return next;
 }
@@ -1427,7 +1664,6 @@ async function receiveReaction(source, msg, via) {
     ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
   };
   await appendToFeed(roomKey, entry);
-  if (signed) noteKnown(roomKey, signed.author);
   if (signed && via !== "sync") passOn(roomKey, entry, source.conn);
 }
 
@@ -1451,15 +1687,25 @@ async function receiveChatMessage(source, msg, via) {
   const roomMod = roomModerationFor(roomKey);
   const payload = dropFlaggedPreview(decodeMessagePayload(decrypted.plaintext), roomMod);
   const sn = clamp(header.sn, 50) || (via === "live" ? savedData.peerProfiles[source.remoteId]?.username : "") || authorId;
+  // A file's name shows in the chat list and in search as well as on the file,
+  // so in a group it goes through the room's filters as the words do. A direct
+  // message skips them.
+  const sentName = typeof payload.fileName === "string" && payload.fileName ? payload.fileName : header.fileName;
+  const fileName = !room?.isDM && typeof sentName === "string" ? sentName : "";
   if (via === "sync") {
-    const check = moderationCheckContent(payload.text, roomMod);
+    let check = moderationCheckContent(payload.text, roomMod);
+    if (!check.flagged && fileName) check = moderationCheckContent(fileName, roomMod);
     if (check.flagged) {
       appendModerationNotice(roomKey, msg.id, sn, { action: "warn", reason: check.reason }, ts);
       return;
     }
   } else {
     try {
-      const modResult = moderationCheck(authorId, roomKey, payload.text, undefined, { roomModeration: roomMod });
+      let modResult = moderationCheck(authorId, roomKey, payload.text, undefined, { roomModeration: roomMod });
+      // Counted against the spam limit once, with the words.
+      if (modResult.allowed && fileName) {
+        modResult = moderationCheck(authorId, roomKey, fileName, undefined, { roomModeration: roomMod, checkSpam: false });
+      }
       if (!modResult.allowed) {
         appendModerationNotice(roomKey, msg.id, sn, modResult, ts);
         return;
@@ -1486,7 +1732,6 @@ async function receiveChatMessage(source, msg, via) {
     ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
   };
   await appendToFeed(roomKey, entry);
-  if (signed) noteKnown(roomKey, signed.author);
 
   if (via === "live" && room) {
     if (!room.members) room.members = {};
@@ -1589,7 +1834,12 @@ function takeHaves(peer, roomKey, ids) {
       continue;
     }
     if (wantedIds.size >= MAX_WANTED) continue;
+    // Past this connection's share or this room's, the id is not asked for,
+    // and nothing anybody else told us is held up by it.
+    if ((peer.wanting || 0) >= MAX_WANTED_PER_PEER || (wantedPerRoom.get(roomKey) || 0) >= MAX_WANTED_PER_ROOM) continue;
     wantedIds.set(id, { roomKey, sources: [peer], asked: 0, askedAt: now, since: now });
+    peer.wanting = (peer.wanting || 0) + 1;
+    wantedPerRoom.set(roomKey, (wantedPerRoom.get(roomKey) || 0) + 1);
     ask.push(id);
   }
   if (ask.length) sendWant(peer, roomKey, ask);
@@ -1603,20 +1853,31 @@ function sendWant(peer, roomKey, ids) {
   try { writeToConnection(peer.conn, JSON.stringify({ type: "want", roomKey, ids }) + "\n"); } catch {}
 }
 
+// An asked-for id off the list, and off the share of the connection that told
+// us first and of its room.
+function forgetWanted(id, wanted) {
+  wantedIds.delete(id);
+  const first = wanted.sources[0];
+  if (first?.wanting > 0) first.wanting -= 1;
+  const left = (wantedPerRoom.get(wanted.roomKey) || 0) - 1;
+  if (left > 0) wantedPerRoom.set(wanted.roomKey, left);
+  else wantedPerRoom.delete(wanted.roomKey);
+}
+
 // A message asked for that has not come: the next neighbour that has it is
 // asked, until none is left or it has been too long.
 function retryWants() {
   const now = Date.now();
   for (const [id, wanted] of wantedIds) {
     if (seenIds.has(id) || now - wanted.since > WANT_GIVE_UP_MS) {
-      wantedIds.delete(id);
+      forgetWanted(id, wanted);
       continue;
     }
     if (now - wanted.askedAt < WANT_RETRY_MS) continue;
     let next = wanted.asked + 1;
     while (next < wanted.sources.length && (wanted.sources[next].conn.destroyed || !peerSharesRoom(wanted.sources[next], wanted.roomKey))) next += 1;
     if (next >= wanted.sources.length) {
-      wantedIds.delete(id);
+      forgetWanted(id, wanted);
       continue;
     }
     wanted.asked = next;
@@ -1639,6 +1900,20 @@ function answerWants(peer, roomKey, ids) {
     if (!kept || kept.roomKey !== roomKey) continue;
     try { writeToConnection(peer.conn, JSON.stringify({ type: "pass", roomKey, m: kept.entry }) + "\n"); } catch {}
   }
+}
+
+// Room details, removal lists, moves and asks for room details: one budget a
+// connection, the phone's. Past it they are dropped, and come again with the
+// next connection or the next change.
+function consumeControlRate(peer) {
+  const now = Date.now();
+  if (!peer.controlRate || now >= peer.controlRate.resetsAt) {
+    peer.controlRate = { count: 1, resetsAt: now + RATE_WINDOW_MS };
+    return true;
+  }
+  if (peer.controlRate.count >= MAX_CONTROL_FRAMES_PER_WINDOW) return false;
+  peer.controlRate.count += 1;
+  return true;
 }
 
 function consumePassRate(peer) {
@@ -2687,12 +2962,42 @@ export function initChat(sdk, options = {}) {
       buf += raw.toString();
       const lines = buf.split("\n");
       buf = lines.pop();
+      // Longer than any line this side would read, and still no end to it: a
+      // peer sending that is only growing this process until it runs out of
+      // memory, so the connection goes.
+      if (buf.length > MAX_MSG_LEN * 4) {
+        buf = "";
+        conn.destroy();
+        return;
+      }
       for (const line of lines) {
         if (!line) continue;
         try {
           if (line.length > MAX_MSG_LEN * 4) continue;
           const msg = fromWire(JSON.parse(line));
           if (!msg) continue;
+
+          // Who made a room, shown by the secret behind its key, counts from
+          // anyone who proved they hold the key, a peer this device keeps out
+          // of the room included. While it has the creator only on somebody's
+          // word, that somebody may have removed the very people who can set
+          // it right, or moved the room away from them. A proof can only name
+          // the real creator. See takeCreatorProof.
+          if (msg.type === "room-meta" && msg.creatorProof && msg.roomKey && isValidRoomKey(msg.roomKey)) {
+            const room = savedData.rooms[msg.roomKey];
+            const peerRecord = peerForConnection(conn);
+            const keptOut = !!peerRecord && (peerRecord.closedRooms?.has(msg.roomKey) ||
+              (peerSharesRoom(peerRecord, msg.roomKey) && isPeerRemovedFromRoom(msg.roomKey, peerRecord)));
+            if (room && !room.isDM && keptOut && !creatorKeySettled(msg.roomKey, room) && consumeControlRate(peerRecord)) {
+              const held = resolveCreatorKey(msg.roomKey, room.creatorKey);
+              if (takeCreatorProof(msg.roomKey, room, msg.creatorKey, msg.creatorProof) &&
+                  resolveCreatorKey(msg.roomKey, room.creatorKey) !== held) {
+                creatorKeyChanged(msg.roomKey, conn);
+                persistData();
+                emitRoomUpdate(msg.roomKey);
+              }
+            }
+          }
 
           if (
             msg.roomKey &&
@@ -3034,6 +3339,7 @@ export function initChat(sdk, options = {}) {
           // in it. Each move is checked against the creator key of the room it
           // leaves. See lib/room-move.js.
           if (msg.type === "room-moved") {
+            if (!consumeControlRate(peer)) continue;
             if (!msg.roomKey || !Array.isArray(msg.moves)) continue;
             takeMoves(msg.roomKey, msg.moves, conn);
             continue;
@@ -3059,6 +3365,7 @@ export function initChat(sdk, options = {}) {
           // message id and no encrypted body, so a build that predates this
           // drops it at its first check rather than making anything of it.
           if (msg.type === "room-bans") {
+            if (!consumeControlRate(peer)) continue;
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room) continue;
@@ -3080,11 +3387,15 @@ export function initChat(sdk, options = {}) {
               continue;
             }
 
-            // Signed, but this device does not know who made the room yet:
-            // kept, and checked once it does. See applyPendingBans.
-            if (signed.sig && !creatorKey) {
+            // Signed, but this device does not know who made the room yet, or
+            // knows only what somebody announced, which a proof can replace:
+            // kept, the newest only, and checked once it does. See
+            // applyPendingBans.
+            if (signed.sig && (!creatorKey || !creatorKeySettled(msg.roomKey, room))) {
               const pendingV = normalizeSignedRemovals(room.pendingBans?.signed).v;
-              if (signed.v > held.v && signed.v > pendingV) {
+              // The list held under an announced key may be a fake creator's,
+              // at any version, and goes when a proof replaces that key.
+              if ((creatorKey || signed.v > held.v) && signed.v > pendingV) {
                 room.pendingBans = { bans: normalizeRoomBans(msg.bans), signed };
                 debouncePersist();
               }
@@ -3107,6 +3418,7 @@ export function initChat(sdk, options = {}) {
           }
 
           if (msg.type === "room-meta") {
+            if (!consumeControlRate(peer)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room) continue;
             if (moderationIsKicked(remoteId, msg.roomKey)) continue;
@@ -3144,9 +3456,10 @@ export function initChat(sdk, options = {}) {
               updated = true;
             }
             if (msg.createdBy && !room.createdBy) { room.createdBy = clamp(msg.createdBy, MAX_SENDER_LEN); updated = true; }
-            const knewCreator = !!resolveCreatorKey(msg.roomKey, room.creatorKey);
+            const heldCreator = resolveCreatorKey(msg.roomKey, room.creatorKey);
             // From anyone, with the secret that made the room's key out of the
-            // creator's. See lib/room-move.js.
+            // creator's, even in place of a key that was only announced. See
+            // lib/room-move.js.
             if (takeCreatorProof(msg.roomKey, room, msg.creatorKey, msg.creatorProof)) updated = true;
             // Otherwise only from the creator, and only once. The connection is
             // what proves it: whoever announces has to be the key they announce.
@@ -3160,13 +3473,17 @@ export function initChat(sdk, options = {}) {
               room.creatorKey = normalizeCreatorKey(msg.creatorKey);
               updated = true;
             }
-            if (!knewCreator && resolveCreatorKey(msg.roomKey, room.creatorKey)) {
-              applyPendingBans(msg.roomKey);
-              if (applyPendingDetails(msg.roomKey)) updated = true;
-              // On through the room, to everyone this device can show it to.
-              if (creatorProofFor(msg.roomKey)) broadcastRoomMeta(msg.roomKey, conn);
+            // Learned, or put in place of one only announced: what waited for
+            // it is checked, and it goes on through the room.
+            if (resolveCreatorKey(msg.roomKey, room.creatorKey) !== heldCreator) {
+              if (creatorKeyChanged(msg.roomKey, conn)) updated = true;
             }
-            if (msg.createdByName && !room.createdByName) { room.createdByName = clamp(msg.createdByName, 50); updated = true; }
+            // Who made it, by name, only from them. Anyone else could name
+            // anybody, and the first to say used to be kept.
+            if (msg.createdByName && !room.createdByName && fullId === resolveCreatorKey(msg.roomKey, room.creatorKey)) {
+              room.createdByName = clamp(msg.createdByName, 50);
+              updated = true;
+            }
 
             if (msg.details && takeRoomDetails(msg.roomKey, room, msg.details, msg.avatar)) {
               updated = true;
@@ -3195,6 +3512,7 @@ export function initChat(sdk, options = {}) {
           }
 
           if (msg.type === "request-room-meta") {
+            if (!consumeControlRate(peer)) continue;
             if (msg.roomKey && moderationIsKicked(remoteId, msg.roomKey)) continue;
             if (msg.roomKey && savedData.rooms[msg.roomKey]) {
               sendRoomMeta(conn, msg.roomKey);
@@ -3309,7 +3627,18 @@ export function initChat(sdk, options = {}) {
 
   // Install the connection listeners before joining. A discovered LAN peer can
   // connect immediately, especially when both instances run on the same host.
-  for (const roomKey of Object.keys(savedData.rooms)) {
+  for (const [roomKey, room] of Object.entries(savedData.rooms)) {
+    // Passed through on the way along a line of moves: only a record.
+    if (room.passedThrough) continue;
+    // Moved over two weeks ago: not joined, and its history still shows with
+    // the room it went to.
+    if (movedLongAgo(room)) {
+      openFeed(sdk, roomKey).catch((error) => {
+        console.error(`[chat] History of ${roomKey.slice(0, 8)}: ${error.message}`);
+      });
+      continue;
+    }
+    if (room.movedTo) keepMovedRoomFor(roomKey);
     joinRoom(sdk, roomKey).catch((error) => {
       console.error(`[chat] Auto-join ${roomKey.slice(0, 8)}: ${error.message}`);
     });
@@ -3643,6 +3972,14 @@ export async function handleChatRequest(req, sdk) {
       }
 
       if (action === "join") {
+        // An invite can say who made the room (lib/invite.js). A room here
+        // already takes that first: a proof in it can undo a move the room
+        // followed, which changes the room it is joined under.
+        const body = await req.json().catch(() => ({}));
+        const invite = parseRoomInvite(typeof body?.invite === "string" ? body.invite : "", checkCreatorProof);
+        const named = invite.roomKey && invite.roomKey === requested ? invite : null;
+        if (named && savedData.rooms[requested]) takeInviteCreator(requested, named);
+        const roomKey = requested && savedData.rooms[requested] ? finalRoomKey(requested) : requested;
         if (!roomKey || !isValidRoomKey(roomKey)) return respond(400, { error: "Invalid room key" });
         const isNew = !savedData.rooms[roomKey];
         if (isNew) {
@@ -3663,10 +4000,11 @@ export async function handleChatRequest(req, sdk) {
             // settings. Starting permissive would leak content the host chose
             // to filter during the window before meta lands.
             moderation: { ...DEFAULT_ROOM_MODERATION },
-            // Learned from the creator when they announce it, never assumed.
+            // Learned from the invite or from the room, never assumed.
             creatorKey: "",
             bans: [],
           };
+          if (named) takeInviteCreator(roomKey, named);
           persistData();
         }
         clearRoomLeft(roomKey);
@@ -4004,6 +4342,14 @@ export async function handleChatRequest(req, sdk) {
           // This person's other devices, whose messages are theirs too.
           siblings: [...siblingIds],
         });
+      }
+
+      // An invite to a room, which says who made it when this device knows.
+      // Built here, where the creator key is: the page never holds it.
+      if (action === "invite-link") {
+        if (!roomKey || !isValidRoomKey(roomKey)) return respond(400, { error: "Invalid room key" });
+        if (!savedData.rooms[roomKey]) return respond(404, { error: "Room not found" });
+        return respond(200, { link: inviteLinkFor(roomKey) });
       }
 
       if (action === "net-status") {
