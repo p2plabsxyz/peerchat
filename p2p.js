@@ -481,6 +481,35 @@ function isSealedFile(raw) {
   return !!raw && raw[SEALED_MARK] === 1 && typeof raw.data === "string";
 }
 
+// PeerSky beta 30 and older read a locked file as the oldest form of the file,
+// a bare list of rooms, and saved it back as two rooms: "peersky-sealed", and
+// "data" with the locked text spread over its fields, a letter each. Every
+// room and the name looked gone. The locked text is all there, so it is put
+// back together and opened, as many times as it was folded.
+function lockedTextFromOldRead(raw) {
+  const rooms = raw && typeof raw === "object" ? (raw.rooms || raw) : null;
+  const data = rooms?.data;
+  if (!rooms?.[SEALED_MARK] || !data || typeof data !== "object") return null;
+  let text = "";
+  for (let i = 0; Object.hasOwn(data, i) && typeof data[i] === "string"; i++) text += data[i];
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(text) ? text : null;
+}
+
+function unfoldOldRead(raw) {
+  let unfolded = null;
+  for (let depth = 0; depth < 8; depth++) {
+    const text = lockedTextFromOldRead(raw);
+    if (!text) break;
+    try {
+      raw = JSON.parse(safeStore.decryptString(Buffer.from(text, "base64")));
+    } catch {
+      break;
+    }
+    unfolded = raw;
+  }
+  return unfolded;
+}
+
 function loadData() {
   if (!dataPath) return;
   try {
@@ -495,6 +524,11 @@ function loadData() {
         console.error("[chat] The PeerChat file is locked with another computer's safe storage and did not open; it is left as it is:", err?.message || err);
         return;
       }
+    }
+    const unfolded = unfoldOldRead(raw);
+    if (unfolded) {
+      raw = unfolded;
+      console.warn("[chat] An older PeerSky had read this file wrong; its rooms are back");
     }
     // Inside a locked file the keys are not under a lock of their own.
     const open = raw.plain === true ? (v) => v : dec4disk;
@@ -534,7 +568,7 @@ function loadData() {
     }
 
     // A file from before the lock is locked now, not at its next change.
-    if ((raw.v || 0) < DATA_VERSION || (!sealed && canSealFile())) persistData();
+    if (unfolded || (raw.v || 0) < DATA_VERSION || (!sealed && canSealFile())) persistData();
     normalizePersistedDmIds();
   } catch (err) {
     console.error("[chat] Load failed:", err.message);

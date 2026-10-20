@@ -76,6 +76,20 @@ async function rooms(mod, sdk = fakeSdk()) {
   return Array.isArray(body.rooms) ? body.rooms : Object.values(body.rooms || body);
 }
 
+// What PeerSky beta 30 and older did with a locked file: read it as a bare
+// list of rooms, the oldest form of the file, and save that list back.
+function readByBeta30(storagePath) {
+  const file = JSON.parse(readFileSync(storagePath, "utf8"));
+  const list = {};
+  for (const [id, r] of Object.entries(file)) list[id] = { ...r, moderation: { links: true } };
+  writeFileSync(storagePath, JSON.stringify({ v: 1, profile: {}, peerProfiles: {}, pendingDMs: {}, blockedPeers: {}, rooms: list }));
+}
+
+async function profile(mod) {
+  const res = await mod.handleChatRequest({ url: "hyper://chat?action=get-profile", method: "GET", json: async () => ({}) }, fakeSdk());
+  return JSON.parse(await res.text());
+}
+
 describe("the PeerChat file, locked whole", () => {
   it("locks a file from before at the first start: no room key, key chain, link or room name shows", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "peerchat-locked-"));
@@ -125,6 +139,55 @@ describe("the PeerChat file, locked whole", () => {
     await res.text();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(readFileSync(storagePath, "utf8"), before);
+  });
+
+  it("brings back the rooms and name after beta 30 read the locked file as a list of rooms", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "peerchat-locked-"));
+    const storagePath = chatFile(dir);
+    const store = safeStorage();
+    await start(storagePath, store);
+    readByBeta30(storagePath);
+    assert.ok(JSON.parse(readFileSync(storagePath, "utf8")).rooms.data[0]);
+
+    const mod = await start(storagePath, store);
+    const list = await rooms(mod);
+    assert.deepEqual(list.map((r) => [r.roomKey, r.name]), [[ROOM, "Trip planning"]]);
+    assert.equal((await profile(mod)).username, "ada");
+    // Locked again as it was, with no trace of the wrong read.
+    const inside = JSON.parse(store.decryptString(Buffer.from(JSON.parse(readFileSync(storagePath, "utf8")).data, "base64")));
+    assert.deepEqual(Object.keys(inside.rooms), [ROOM]);
+    assert.equal(inside.link.key, LINK_KEY);
+  });
+
+  it("unfolds a file read wrong, locked by this build, and read wrong again", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "peerchat-locked-"));
+    const storagePath = chatFile(dir);
+    const store = safeStorage();
+    await start(storagePath, store);
+    readByBeta30(storagePath);
+    // A build from before this fix locked the wrong read as it found it.
+    const wrong = JSON.parse(readFileSync(storagePath, "utf8"));
+    writeFileSync(storagePath, JSON.stringify({ "peersky-sealed": 1, data: store.encryptString(JSON.stringify({ ...wrong, plain: true })).toString("base64") }));
+    readByBeta30(storagePath);
+
+    const mod = await start(storagePath, store);
+    assert.deepEqual((await rooms(mod)).map((r) => r.roomKey), [ROOM]);
+    assert.equal((await profile(mod)).username, "ada");
+  });
+
+  it("keeps the locked text of a file read wrong on another computer, which cannot open it", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "peerchat-locked-"));
+    const storagePath = chatFile(dir);
+    await start(storagePath, safeStorage());
+    readByBeta30(storagePath);
+    const other = safeStorage("another-computer");
+    const elsewhere = await start(storagePath, other);
+    await rooms(elsewhere);
+    await new Promise((r) => setTimeout(r, 50));
+    const sealed = JSON.parse(readFileSync(storagePath, "utf8"));
+    const kept = JSON.parse(other.decryptString(Buffer.from(sealed.data, "base64")));
+    const text = Object.keys(kept.rooms.data).filter((k) => /^\d+$/.test(k)).map((k) => kept.rooms.data[k]).join("");
+    assert.ok(text.length > 100, "the locked text is still in the file");
   });
 
   it("writes the file as before where the system has no real safe storage", async () => {
