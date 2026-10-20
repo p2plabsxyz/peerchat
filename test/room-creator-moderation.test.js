@@ -194,7 +194,12 @@ describe("room creator moderation, wired up", () => {
     assert.match(action, /if \(!isRoomCreator\(rk\)\)/);
     assert.match(action, /cannot remove yourself/);
     assert.match(action, /nobody to remove from a direct message/);
-    assert.match(action, /key: connected\?\.fullId \|\| ""/);
+    assert.match(action, /const movedTo = removeFromRoom\(rk, ids\)/);
+    // Their full key wherever it is known, so the removal catches that person
+    // rather than anyone sharing their first eight.
+    const remove = p2p.slice(p2p.indexOf("function removeFromRoom("), p2p.indexOf("\n}\n", p2p.indexOf("function removeFromRoom(")));
+    assert.match(remove, /key: connected\?\.fullId \|\| profile\?\.fullKey \|\| ""/);
+    assert.match(remove, /filter\(\(id\) => id && id !== own\)/);
   });
 
   // The key belongs to the room you made, not to every room you are in. On the
@@ -232,8 +237,8 @@ describe("room creator moderation, wired up", () => {
     assert.match(p2p, /room\?\.createdByName \|\| room\?\.createdBy \|\| "whoever made the room"/);
 
     // The creator says it when they do it.
-    const action = p2p.slice(p2p.indexOf('if (action === "remove-room-member")'), p2p.indexOf('if (action === "restore-room-member")'));
-    assert.match(action, /appendRemovalNotice\(rk, peerId, removedName\)/);
+    const remove = p2p.slice(p2p.indexOf("function removeFromRoom("), p2p.indexOf("\n}\n", p2p.indexOf("function removeFromRoom(")));
+    assert.match(remove, /appendRemovalNotice\(roomKey, id, name\)/);
 
     // Everyone else says it when the removal reaches them, and only for bans
     // that are new to them and made since they joined, rather than the whole

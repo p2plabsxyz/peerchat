@@ -119,6 +119,7 @@ import {
   devicesProof,
   checkDevicesProof,
 } from "./lib/device-link.js";
+import { checkPersonProof, makePersonProof, personKey } from "./lib/person-proof.js";
 import { checkRoomProof, roomProof } from "./lib/room-proof.js";
 import { mentionsPerson } from "./lib/mentions.js";
 import { PEER_PRESENCE_GRACE_MS } from "./lib/presence.js";
@@ -789,6 +790,78 @@ function isPeerIdRemovedFromRoom(roomKey, peerId) {
  * appears exactly where the removal took effect and cannot be forged by
  * somebody who is not the creator.
  */
+// The person a member is, by the person key their own profile proved over
+// their own connection (lib/person-proof.js), or "".
+function personOf(peerId) {
+  const id = normPeerId(peerId);
+  if (!id) return "";
+  const connected = peers.find((peer) => peer.id === id && peer.person);
+  return connected?.person || savedData.peerProfiles?.[id]?.person || "";
+}
+
+function ownPersonKey() {
+  return savedData.link ? personKey(savedData.link) : "";
+}
+
+// Every device known to be this person, by a proof that checked out.
+function devicesOfPerson(person) {
+  if (!person) return [];
+  const ids = new Set();
+  for (const [id, profile] of Object.entries(savedData.peerProfiles || {})) {
+    if (profile?.person === person) ids.add(normPeerId(id));
+  }
+  for (const peer of peers) if (peer.person === person) ids.add(peer.id);
+  ids.delete(normPeerId(localId));
+  ids.delete("");
+  return [...ids];
+}
+
+// Kept here only: a device of this person that turns up later goes too.
+const MAX_REMOVED_PERSONS = 64;
+const PERSON_KEY = /^[0-9a-f]{64}$/;
+
+function rememberRemovedPerson(room, person) {
+  const kept = Array.isArray(room.removedPersons) ? room.removedPersons : [];
+  room.removedPersons = [person, ...kept.filter((removed) => removed !== person && PERSON_KEY.test(removed))]
+    .slice(0, MAX_REMOVED_PERSONS);
+}
+
+// Out of the room, each by their own removal, the full key wherever it is
+// known. The list goes to everyone, and the room moves to a new key that none
+// of them hears.
+function removeFromRoom(roomKey, ids) {
+  const room = savedData.rooms[roomKey];
+  const own = normPeerId(localId);
+  const targets = ids.map(normPeerId).filter((id) => id && id !== own);
+  if (!room || !targets.length) return null;
+  for (const id of targets) {
+    const connected = peers.find((peer) => peer.id === id && peerSharesRoom(peer, roomKey));
+    const profile = savedData.peerProfiles?.[id];
+    const name = room.members?.[id]?.username || profile?.username || "";
+    // The name goes with the removal, for anyone in the room who never met them.
+    room.bans = addRoomBan(room.bans, { id, key: connected?.fullId || profile?.fullKey || "", name });
+    if (room.members?.[id]) delete room.members[id];
+    appendRemovalNotice(roomKey, id, name);
+  }
+  unsignRemovals(room);
+  broadcastRoomBans(roomKey);
+  persistData();
+  emitRoomUpdate(roomKey);
+  return moveRoom(roomKey);
+}
+
+// A device of somebody this device removed, proving it is theirs: out of every
+// room of ours they were removed from.
+function removeLateDevices(peerId, person) {
+  const id = normPeerId(peerId);
+  for (const [roomKey, room] of Object.entries(savedData.rooms)) {
+    if (!Array.isArray(room.removedPersons) || !room.removedPersons.includes(person)) continue;
+    if (!isRoomCreator(roomKey)) continue;
+    if ((room.bans || []).some((ban) => ban.id === id)) continue;
+    removeFromRoom(roomKey, [id]);
+  }
+}
+
 function appendRemovalNotice(roomKey, peerId, username, at = Date.now()) {
   const room = savedData.rooms?.[roomKey];
   const name = clamp(username, MAX_NAME_LEN) ||
@@ -2203,6 +2276,9 @@ function shareProfile(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
       avatar: savedData.profile.avatar || null,
       rooms: sharedRooms,
       ...(proof ? { device: savedData.device?.label || "", link: proof } : {}),
+      // For anyone: which person this device is, so removing one of their
+      // devices removes them all (lib/person-proof.js).
+      ...(savedData.link ? { person: makePersonProof(savedData.link, localKey) } : {}),
     }) + "\n");
   } catch {}
 }
@@ -3253,7 +3329,14 @@ export function initChat(sdk, options = {}) {
               const uname = clamp(msg.username, 50);
               const ubio = clamp(msg.bio, MAX_BIO_LEN);
               const uavatar = sanitizeAvatar(msg.avatar);
-              savedData.peerProfiles[remoteId] = { username: uname, bio: ubio, avatar: uavatar, updatedAt: Date.now() };
+              // Only as this connection's own key signed it.
+              const person = checkPersonProof(msg.person, fullId);
+              const connectedEntry = peerForConnection(conn) || pendingPeers.get(conn);
+              if (connectedEntry) connectedEntry.person = person;
+              savedData.peerProfiles[remoteId] = {
+                username: uname, bio: ubio, avatar: uavatar, updatedAt: Date.now(),
+                ...(person && { person, fullKey: fullId }),
+              };
               for (const room of Object.values(savedData.rooms)) {
                 if (dmFromThem(room, remoteId, fullId)) {
                   room.name = uname;
@@ -3287,6 +3370,7 @@ export function initChat(sdk, options = {}) {
               }
               debouncePersist();
               broadcastGlobal("member-update", { peerId: remoteId, username: uname, bio: ubio, avatar: uavatar, isOnline: true, rooms: peerRoomKeys });
+              if (person) removeLateDevices(remoteId, person);
             }
             continue;
           }
@@ -4035,24 +4119,19 @@ export async function handleChatRequest(req, sdk) {
           return respond(400, { error: "You cannot remove yourself from your own room." });
         }
 
-        // Their full key if they are here to take it from, so the removal
-        // catches that person rather than anyone sharing their first eight.
-        const connected = peers.find((peer) => peer.id === peerId && peerSharesRoom(peer, rk));
-        const removedName = room.members?.[peerId]?.username ||
-          savedData.peerProfiles?.[peerId]?.username || "";
-        // The name goes with the removal, for anyone in the room who never met them.
-        room.bans = addRoomBan(room.bans, { id: peerId, key: connected?.fullId || "", name: removedName });
-        unsignRemovals(room);
-        if (room.members?.[peerId]) delete room.members[peerId];
-
-        appendRemovalNotice(rk, peerId, removedName);
-        broadcastRoomBans(rk);
-        persistData();
-        emitRoomUpdate(rk);
-        // And the room moves to a new key, which the person removed never
-        // hears. See lib/room-move.js.
-        const movedTo = moveRoom(rk);
-        return respond(200, { bans: room.bans, ...(movedTo && { movedTo }) });
+        // Every one of the person's devices goes, not only the one picked: each
+        // device is a member of its own, and removing one left the rest in the
+        // room. A device is theirs only by the person key its own profile
+        // proved (lib/person-proof.js). One of this person's own devices is not
+        // them leaving their room, so only that one goes.
+        const person = personOf(peerId);
+        const everyDevice = Boolean(person) && person !== ownPersonKey();
+        const ids = everyDevice ? [peerId, ...devicesOfPerson(person).filter((id) => id !== peerId)] : [peerId];
+        if (everyDevice) rememberRemovedPerson(room, person);
+        // And the room moves to a new key, which nobody removed hears. See
+        // lib/room-move.js.
+        const movedTo = removeFromRoom(rk, ids);
+        return respond(200, { bans: room.bans, removed: ids, ...(movedTo && { movedTo }) });
       }
 
       if (action === "restore-room-member") {
@@ -4065,7 +4144,14 @@ export async function handleChatRequest(req, sdk) {
           return respond(403, { error: "Only the person who made this room can let people back in." });
         }
 
-        room.bans = removeRoomBan(room.bans, body.peerId);
+        // Back in, with every one of their devices, as they went.
+        const restoredId = normPeerId(body.peerId);
+        const person = personOf(restoredId);
+        const ids = new Set([restoredId, ...(person ? devicesOfPerson(person) : [])]);
+        for (const id of ids) room.bans = removeRoomBan(room.bans, id);
+        if (person && Array.isArray(room.removedPersons)) {
+          room.removedPersons = room.removedPersons.filter((removed) => removed !== person);
+        }
         unsignRemovals(room);
         broadcastRoomBans(rk);
         persistData();
