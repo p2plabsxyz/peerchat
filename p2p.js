@@ -5,7 +5,7 @@ import {
   createDecipheriv,
   randomBytes,
 } from "crypto";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import {
   checkContent as moderationCheckContent,
   initModeration,
@@ -115,6 +115,9 @@ import {
   normalizeLink,
   normalizeSharedRooms,
   normalizeTransfer,
+  devicesTopic,
+  devicesProof,
+  checkDevicesProof,
 } from "./lib/device-link.js";
 import { checkRoomProof, roomProof } from "./lib/room-proof.js";
 import { mentionsPerson } from "./lib/mentions.js";
@@ -449,11 +452,52 @@ function dec4disk(v) {
 
 const DATA_VERSION = 1;
 
+// The whole file is locked with the system's safe storage (the Keychain,
+// DPAPI or the keyring), in the form PeerSky locks its private drive key in
+// (src/backup/sealed-file.js there), so a backup opens this file as it opens
+// those and carries it to another computer. Room keys and the link were
+// locked one by one before, but each room's key was also its name in the
+// list, in the clear, and a room's hourly key chain was not locked at all:
+// anyone who copied the profile folder could read every room. Inside the
+// locked file nothing is locked again ("plain"). Where the system has no real
+// safe storage, as on Linux with no keyring, the file is written as before.
+const SEALED_MARK = "peersky-sealed";
+// Set when the file is locked and will not open on this computer: then it is
+// never written over, which would lose every room on it.
+let dataLocked = false;
+
+function canSealFile() {
+  try {
+    if (!safeStore?.isEncryptionAvailable?.()) return false;
+    if (typeof safeStore.getSelectedStorageBackend === "function" &&
+        safeStore.getSelectedStorageBackend() === "basic_text") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSealedFile(raw) {
+  return !!raw && raw[SEALED_MARK] === 1 && typeof raw.data === "string";
+}
+
 function loadData() {
   if (!dataPath) return;
   try {
     if (!existsSync(dataPath)) return;
-    const raw = JSON.parse(readFileSync(dataPath, "utf8"));
+    let raw = JSON.parse(readFileSync(dataPath, "utf8"));
+    const sealed = isSealedFile(raw);
+    if (sealed) {
+      try {
+        raw = JSON.parse(safeStore.decryptString(Buffer.from(raw.data, "base64")));
+      } catch (err) {
+        dataLocked = true;
+        console.error("[chat] The PeerChat file is locked with another computer's safe storage and did not open; it is left as it is:", err?.message || err);
+        return;
+      }
+    }
+    // Inside a locked file the keys are not under a lock of their own.
+    const open = raw.plain === true ? (v) => v : dec4disk;
 
     if (raw.rooms) {
       savedData.profile = raw.profile || {};
@@ -464,7 +508,7 @@ function loadData() {
       // Kept like the room keys. On another computer the keychain cannot open
       // it, and the transfer that brought this file carries it again.
       savedData.link = raw.link && typeof raw.link.key === "string"
-        ? normalizeLink({ ...raw.link, key: dec4disk(raw.link.key) })
+        ? normalizeLink({ ...raw.link, key: open(raw.link.key) })
         : null;
       savedData.leftRooms = sanitizeLeftRooms(raw.leftRooms);
       if (savedData.link && Array.isArray(raw.siblings)) {
@@ -473,11 +517,11 @@ function loadData() {
         }
       }
       for (const [id, r] of Object.entries(raw.rooms)) {
-        savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
+        savedData.rooms[id] = { ...r, roomKey: open(r.roomKey) };
       }
     } else {
       for (const [id, r] of Object.entries(raw)) {
-        savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
+        savedData.rooms[id] = { ...r, roomKey: open(r.roomKey) };
       }
     }
 
@@ -489,7 +533,8 @@ function loadData() {
       if (!room.moderation) room.moderation = { ...DEFAULT_ROOM_MODERATION };
     }
 
-    if ((raw.v || 0) < DATA_VERSION) persistData();
+    // A file from before the lock is locked now, not at its next change.
+    if ((raw.v || 0) < DATA_VERSION || (!sealed && canSealFile())) persistData();
     normalizePersistedDmIds();
   } catch (err) {
     console.error("[chat] Load failed:", err.message);
@@ -515,24 +560,38 @@ function clearRoomLeft(roomKey) {
 }
 
 function persistData() {
-  if (!dataPath) return;
+  if (!dataPath || dataLocked) return;
   try {
+    const seal = canSealFile();
+    // Under the file's lock, or each under its own where there is none.
+    const lock = seal ? (v) => v : enc4disk;
     const out = {
       v: DATA_VERSION,
+      ...(seal ? { plain: true } : {}),
       profile: savedData.profile,
       peerProfiles: savedData.peerProfiles,
       pendingDMs: savedData.pendingDMs || {},
       blockedPeers: savedData.blockedPeers || {},
       device: { label: savedData.device?.label || "" },
-      link: savedData.link ? { ...savedData.link, key: enc4disk(savedData.link.key) } : null,
+      link: savedData.link ? { ...savedData.link, key: lock(savedData.link.key) } : null,
       leftRooms: savedData.leftRooms || {},
       siblings: [...siblingIds].slice(0, MAX_SIBLINGS),
       rooms: {},
     };
     for (const [id, r] of Object.entries(savedData.rooms)) {
-      out.rooms[id] = { ...r, roomKey: enc4disk(r.roomKey) };
+      out.rooms[id] = { ...r, roomKey: lock(r.roomKey) };
     }
-    writeFileSync(dataPath, JSON.stringify(out, null, 2), "utf8");
+    const text = seal
+      ? JSON.stringify({ [SEALED_MARK]: 1, data: safeStore.encryptString(JSON.stringify(out)).toString("base64") })
+      : JSON.stringify(out, null, 2);
+    // Whole or not at all: a write cut short left a file nothing could read.
+    const temporary = `${dataPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, text, { encoding: "utf8", mode: 0o600 });
+      renameSync(temporary, dataPath);
+    } finally {
+      try { rmSync(temporary, { force: true }); } catch {}
+    }
   } catch (err) {
     console.error("[chat] Save failed:", err.message);
   }
@@ -2019,7 +2078,10 @@ function topicsFrameFor(conn) {
   // pass: takes messages passed on. have: takes their ids first and asks for
   // what it lacks. move: takes a room's move to a new key. An older build
   // ignores all three and never gets any of them.
-  return JSON.stringify({ type: "topics", rooms, pass: true, have: true, move: true }) + "\n";
+  // devices: shows one of this person's other devices that this is one too.
+  // An older build ignores it.
+  const devices = savedData.link ? devicesProof(savedData.link, conn.handshakeHash, conn.publicKey) : "";
+  return JSON.stringify({ type: "topics", rooms, pass: true, have: true, move: true, ...(devices && { devices }) }) + "\n";
 }
 
 function shareTopics(conn) {
@@ -2091,7 +2153,11 @@ function shareRoomsWith(conn, roomKeys) {
 function shareProfile(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   if (!savedData.profile?.username) return;
   const sharedRooms = roomKeys.filter((rk) => connectionSharesRoom(conn, rk));
-  if (!sharedRooms.length) return;
+  // To someone in no room with us only when they proved they are another of
+  // this person's devices (the topics frame), and the proof in it is what
+  // makes them a sibling.
+  const ownDevice = !!(peerForConnection(conn) || pendingPeers.get(conn))?.ownDevice;
+  if (!sharedRooms.length && !ownDevice) return;
   // The proof lets the person's other devices take a new name from this one.
   // Anyone else just sees the name with its label.
   const proof = savedData.link ? makeProfileProof(savedData.link, savedData.profile, localKey) : null;
@@ -2627,6 +2693,26 @@ function sharedRoomEntries() {
   return Object.keys(savedData.rooms).map(sharedRoomEntry).filter(Boolean);
 }
 
+// The topic this person's devices meet under, joined while there is a link.
+// See devicesTopic in lib/device-link.js.
+let devicesTopicHex = "";
+
+function joinDevicesTopic(sdk = chatSdk) {
+  const topic = devicesTopic(savedData.link);
+  const hex = topic ? topic.toString("hex") : "";
+  if (!sdk || hex === devicesTopicHex) return;
+  if (devicesTopicHex) {
+    try { sdk.leave?.(Buffer.from(devicesTopicHex, "hex")); } catch {}
+  }
+  devicesTopicHex = hex;
+  if (!topic) return;
+  try {
+    sdk.join(topic, { client: true, server: true });
+  } catch (err) {
+    console.warn("[chat] Could not look for your other devices:", err?.message || err);
+  }
+}
+
 // For a transfer to another of this person's devices: the link, the label
 // the other device takes, the profile and every room with its key. The link is
 // made here the first time, which makes this the device the name was made on.
@@ -2639,6 +2725,7 @@ export function exportChatTransfer({ targetType = "desktop" } = {}) {
   const label = nextLabel(savedData.link, targetType === "mobile" ? "mobile" : "desktop");
   savedData.link = { ...savedData.link, labels: mergeLabels(savedData.link.labels, [label]) };
   persistData();
+  joinDevicesTopic();
   return makeTransfer({
     link: savedData.link,
     label,
@@ -2775,6 +2862,7 @@ export async function importChatTransfer(raw, options = {}) {
   const transfer = normalizeTransfer(raw);
   if (!transfer) return { ok: false, added: 0 };
   const added = applyChatTransfer(transfer, options);
+  joinDevicesTopic();
   await joinAddedRooms(added, "transfer");
   reshareProfile();
   return { ok: true, added: added.length, label: savedData.device?.label || "" };
@@ -2811,6 +2899,7 @@ export function initChat(sdk, options = {}) {
   // announced again, and nothing could be sent or heard until a restart.
   if (chatSdk && chatSdk !== sdk) {
     joinedRooms.clear();
+    devicesTopicHex = "";
     for (const roomKey of Object.keys(roomFeeds)) delete roomFeeds[roomKey];
     if (persistTimer) {
       clearTimeout(persistTimer);
@@ -2822,6 +2911,8 @@ export function initChat(sdk, options = {}) {
   loadData();
   chatSdk = sdk;
   takeIncomingTransfer();
+  // Where this person's other devices are found, with or without a room.
+  joinDevicesTopic(sdk);
 
   // A room this device made under another key, as on a desktop restored from
   // another desktop, is not this device's to run: the creator key says who is.
@@ -2867,7 +2958,13 @@ export function initChat(sdk, options = {}) {
     // connections do). Either way it starts in no room: rooms open one by one
     // as the peer proves it holds their keys.
     const foundUnderOurs = sharedRoomsFromTopics(info.topics, discoveryKeys).length > 0;
-    const isChat = foundUnderOurs || (!info.topics?.length && discoveryKeys.size > 0);
+    // Or under the topic this person's devices meet under, which they look
+    // for with no room at all.
+    const foundOurDevices = !!devicesTopicHex && (info.topics || []).some((topic) => {
+      try { return b4a.toString(topic, "hex").toLowerCase() === devicesTopicHex; } catch { return false; }
+    });
+    const isChat = foundUnderOurs || foundOurDevices ||
+      (!info.topics?.length && (discoveryKeys.size > 0 || !!devicesTopicHex));
 
     if (!isChat) {
       conn.on("error", () => {});
@@ -3028,6 +3125,15 @@ export function initChat(sdk, options = {}) {
               if (msg.have === true) peerEntry.haves = true;
               // And takes a room's move to a new key. See lib/room-move.js.
               if (msg.move === true) peerEntry.moves = true;
+              // Another of this person's devices, shown by the link, room or
+              // no room. Our proofs and our profile go to it, and the proof in
+              // the profile makes it a sibling, which then gets every room.
+              if (!peerEntry.ownDevice && savedData.link &&
+                  checkDevicesProof(savedData.link, conn.handshakeHash, conn.remotePublicKey, msg.devices)) {
+                peerEntry.ownDevice = true;
+                shareTopics(conn);
+                shareProfile(conn, peerEntry.rooms);
+              }
               const added = [];
               for (const entry of msg.rooms.slice(0, MAX_SHARED_TOPICS)) {
                 const topic = typeof entry?.topic === "string" ? entry.topic.toLowerCase() : "";
