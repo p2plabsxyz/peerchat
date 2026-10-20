@@ -115,6 +115,9 @@ import {
   normalizeLink,
   normalizeSharedRooms,
   normalizeTransfer,
+  devicesTopic,
+  devicesProof,
+  checkDevicesProof,
 } from "./lib/device-link.js";
 import { checkRoomProof, roomProof } from "./lib/room-proof.js";
 import { mentionsPerson } from "./lib/mentions.js";
@@ -2075,7 +2078,10 @@ function topicsFrameFor(conn) {
   // pass: takes messages passed on. have: takes their ids first and asks for
   // what it lacks. move: takes a room's move to a new key. An older build
   // ignores all three and never gets any of them.
-  return JSON.stringify({ type: "topics", rooms, pass: true, have: true, move: true }) + "\n";
+  // devices: shows one of this person's other devices that this is one too.
+  // An older build ignores it.
+  const devices = savedData.link ? devicesProof(savedData.link, conn.handshakeHash, conn.publicKey) : "";
+  return JSON.stringify({ type: "topics", rooms, pass: true, have: true, move: true, ...(devices && { devices }) }) + "\n";
 }
 
 function shareTopics(conn) {
@@ -2147,7 +2153,11 @@ function shareRoomsWith(conn, roomKeys) {
 function shareProfile(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
   if (!savedData.profile?.username) return;
   const sharedRooms = roomKeys.filter((rk) => connectionSharesRoom(conn, rk));
-  if (!sharedRooms.length) return;
+  // To someone in no room with us only when they proved they are another of
+  // this person's devices (the topics frame), and the proof in it is what
+  // makes them a sibling.
+  const ownDevice = !!(peerForConnection(conn) || pendingPeers.get(conn))?.ownDevice;
+  if (!sharedRooms.length && !ownDevice) return;
   // The proof lets the person's other devices take a new name from this one.
   // Anyone else just sees the name with its label.
   const proof = savedData.link ? makeProfileProof(savedData.link, savedData.profile, localKey) : null;
@@ -2683,6 +2693,26 @@ function sharedRoomEntries() {
   return Object.keys(savedData.rooms).map(sharedRoomEntry).filter(Boolean);
 }
 
+// The topic this person's devices meet under, joined while there is a link.
+// See devicesTopic in lib/device-link.js.
+let devicesTopicHex = "";
+
+function joinDevicesTopic(sdk = chatSdk) {
+  const topic = devicesTopic(savedData.link);
+  const hex = topic ? topic.toString("hex") : "";
+  if (!sdk || hex === devicesTopicHex) return;
+  if (devicesTopicHex) {
+    try { sdk.leave?.(Buffer.from(devicesTopicHex, "hex")); } catch {}
+  }
+  devicesTopicHex = hex;
+  if (!topic) return;
+  try {
+    sdk.join(topic, { client: true, server: true });
+  } catch (err) {
+    console.warn("[chat] Could not look for your other devices:", err?.message || err);
+  }
+}
+
 // For a transfer to another of this person's devices: the link, the label
 // the other device takes, the profile and every room with its key. The link is
 // made here the first time, which makes this the device the name was made on.
@@ -2695,6 +2725,7 @@ export function exportChatTransfer({ targetType = "desktop" } = {}) {
   const label = nextLabel(savedData.link, targetType === "mobile" ? "mobile" : "desktop");
   savedData.link = { ...savedData.link, labels: mergeLabels(savedData.link.labels, [label]) };
   persistData();
+  joinDevicesTopic();
   return makeTransfer({
     link: savedData.link,
     label,
@@ -2831,6 +2862,7 @@ export async function importChatTransfer(raw, options = {}) {
   const transfer = normalizeTransfer(raw);
   if (!transfer) return { ok: false, added: 0 };
   const added = applyChatTransfer(transfer, options);
+  joinDevicesTopic();
   await joinAddedRooms(added, "transfer");
   reshareProfile();
   return { ok: true, added: added.length, label: savedData.device?.label || "" };
@@ -2867,6 +2899,7 @@ export function initChat(sdk, options = {}) {
   // announced again, and nothing could be sent or heard until a restart.
   if (chatSdk && chatSdk !== sdk) {
     joinedRooms.clear();
+    devicesTopicHex = "";
     for (const roomKey of Object.keys(roomFeeds)) delete roomFeeds[roomKey];
     if (persistTimer) {
       clearTimeout(persistTimer);
@@ -2878,6 +2911,8 @@ export function initChat(sdk, options = {}) {
   loadData();
   chatSdk = sdk;
   takeIncomingTransfer();
+  // Where this person's other devices are found, with or without a room.
+  joinDevicesTopic(sdk);
 
   // A room this device made under another key, as on a desktop restored from
   // another desktop, is not this device's to run: the creator key says who is.
@@ -2923,7 +2958,13 @@ export function initChat(sdk, options = {}) {
     // connections do). Either way it starts in no room: rooms open one by one
     // as the peer proves it holds their keys.
     const foundUnderOurs = sharedRoomsFromTopics(info.topics, discoveryKeys).length > 0;
-    const isChat = foundUnderOurs || (!info.topics?.length && discoveryKeys.size > 0);
+    // Or under the topic this person's devices meet under, which they look
+    // for with no room at all.
+    const foundOurDevices = !!devicesTopicHex && (info.topics || []).some((topic) => {
+      try { return b4a.toString(topic, "hex").toLowerCase() === devicesTopicHex; } catch { return false; }
+    });
+    const isChat = foundUnderOurs || foundOurDevices ||
+      (!info.topics?.length && (discoveryKeys.size > 0 || !!devicesTopicHex));
 
     if (!isChat) {
       conn.on("error", () => {});
@@ -3084,6 +3125,15 @@ export function initChat(sdk, options = {}) {
               if (msg.have === true) peerEntry.haves = true;
               // And takes a room's move to a new key. See lib/room-move.js.
               if (msg.move === true) peerEntry.moves = true;
+              // Another of this person's devices, shown by the link, room or
+              // no room. Our proofs and our profile go to it, and the proof in
+              // the profile makes it a sibling, which then gets every room.
+              if (!peerEntry.ownDevice && savedData.link &&
+                  checkDevicesProof(savedData.link, conn.handshakeHash, conn.remotePublicKey, msg.devices)) {
+                peerEntry.ownDevice = true;
+                shareTopics(conn);
+                shareProfile(conn, peerEntry.rooms);
+              }
               const added = [];
               for (const entry of msg.rooms.slice(0, MAX_SHARED_TOPICS)) {
                 const topic = typeof entry?.topic === "string" ? entry.topic.toLowerCase() : "";
