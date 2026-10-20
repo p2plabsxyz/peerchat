@@ -5,7 +5,7 @@ import {
   createDecipheriv,
   randomBytes,
 } from "crypto";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import {
   checkContent as moderationCheckContent,
   initModeration,
@@ -449,11 +449,52 @@ function dec4disk(v) {
 
 const DATA_VERSION = 1;
 
+// The whole file is locked with the system's safe storage (the Keychain,
+// DPAPI or the keyring), in the form PeerSky locks its private drive key in
+// (src/backup/sealed-file.js there), so a backup opens this file as it opens
+// those and carries it to another computer. Room keys and the link were
+// locked one by one before, but each room's key was also its name in the
+// list, in the clear, and a room's hourly key chain was not locked at all:
+// anyone who copied the profile folder could read every room. Inside the
+// locked file nothing is locked again ("plain"). Where the system has no real
+// safe storage, as on Linux with no keyring, the file is written as before.
+const SEALED_MARK = "peersky-sealed";
+// Set when the file is locked and will not open on this computer: then it is
+// never written over, which would lose every room on it.
+let dataLocked = false;
+
+function canSealFile() {
+  try {
+    if (!safeStore?.isEncryptionAvailable?.()) return false;
+    if (typeof safeStore.getSelectedStorageBackend === "function" &&
+        safeStore.getSelectedStorageBackend() === "basic_text") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSealedFile(raw) {
+  return !!raw && raw[SEALED_MARK] === 1 && typeof raw.data === "string";
+}
+
 function loadData() {
   if (!dataPath) return;
   try {
     if (!existsSync(dataPath)) return;
-    const raw = JSON.parse(readFileSync(dataPath, "utf8"));
+    let raw = JSON.parse(readFileSync(dataPath, "utf8"));
+    const sealed = isSealedFile(raw);
+    if (sealed) {
+      try {
+        raw = JSON.parse(safeStore.decryptString(Buffer.from(raw.data, "base64")));
+      } catch (err) {
+        dataLocked = true;
+        console.error("[chat] The PeerChat file is locked with another computer's safe storage and did not open; it is left as it is:", err?.message || err);
+        return;
+      }
+    }
+    // Inside a locked file the keys are not under a lock of their own.
+    const open = raw.plain === true ? (v) => v : dec4disk;
 
     if (raw.rooms) {
       savedData.profile = raw.profile || {};
@@ -464,7 +505,7 @@ function loadData() {
       // Kept like the room keys. On another computer the keychain cannot open
       // it, and the transfer that brought this file carries it again.
       savedData.link = raw.link && typeof raw.link.key === "string"
-        ? normalizeLink({ ...raw.link, key: dec4disk(raw.link.key) })
+        ? normalizeLink({ ...raw.link, key: open(raw.link.key) })
         : null;
       savedData.leftRooms = sanitizeLeftRooms(raw.leftRooms);
       if (savedData.link && Array.isArray(raw.siblings)) {
@@ -473,11 +514,11 @@ function loadData() {
         }
       }
       for (const [id, r] of Object.entries(raw.rooms)) {
-        savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
+        savedData.rooms[id] = { ...r, roomKey: open(r.roomKey) };
       }
     } else {
       for (const [id, r] of Object.entries(raw)) {
-        savedData.rooms[id] = { ...r, roomKey: dec4disk(r.roomKey) };
+        savedData.rooms[id] = { ...r, roomKey: open(r.roomKey) };
       }
     }
 
@@ -489,7 +530,8 @@ function loadData() {
       if (!room.moderation) room.moderation = { ...DEFAULT_ROOM_MODERATION };
     }
 
-    if ((raw.v || 0) < DATA_VERSION) persistData();
+    // A file from before the lock is locked now, not at its next change.
+    if ((raw.v || 0) < DATA_VERSION || (!sealed && canSealFile())) persistData();
     normalizePersistedDmIds();
   } catch (err) {
     console.error("[chat] Load failed:", err.message);
@@ -515,24 +557,38 @@ function clearRoomLeft(roomKey) {
 }
 
 function persistData() {
-  if (!dataPath) return;
+  if (!dataPath || dataLocked) return;
   try {
+    const seal = canSealFile();
+    // Under the file's lock, or each under its own where there is none.
+    const lock = seal ? (v) => v : enc4disk;
     const out = {
       v: DATA_VERSION,
+      ...(seal ? { plain: true } : {}),
       profile: savedData.profile,
       peerProfiles: savedData.peerProfiles,
       pendingDMs: savedData.pendingDMs || {},
       blockedPeers: savedData.blockedPeers || {},
       device: { label: savedData.device?.label || "" },
-      link: savedData.link ? { ...savedData.link, key: enc4disk(savedData.link.key) } : null,
+      link: savedData.link ? { ...savedData.link, key: lock(savedData.link.key) } : null,
       leftRooms: savedData.leftRooms || {},
       siblings: [...siblingIds].slice(0, MAX_SIBLINGS),
       rooms: {},
     };
     for (const [id, r] of Object.entries(savedData.rooms)) {
-      out.rooms[id] = { ...r, roomKey: enc4disk(r.roomKey) };
+      out.rooms[id] = { ...r, roomKey: lock(r.roomKey) };
     }
-    writeFileSync(dataPath, JSON.stringify(out, null, 2), "utf8");
+    const text = seal
+      ? JSON.stringify({ [SEALED_MARK]: 1, data: safeStore.encryptString(JSON.stringify(out)).toString("base64") })
+      : JSON.stringify(out, null, 2);
+    // Whole or not at all: a write cut short left a file nothing could read.
+    const temporary = `${dataPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, text, { encoding: "utf8", mode: 0o600 });
+      renameSync(temporary, dataPath);
+    } finally {
+      try { rmSync(temporary, { force: true }); } catch {}
+    }
   } catch (err) {
     console.error("[chat] Save failed:", err.message);
   }
