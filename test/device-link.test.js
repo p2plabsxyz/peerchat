@@ -13,6 +13,8 @@ import {
   makeTransfer,
   mergeLabels,
   nextLabel,
+  takesLowerLabel,
+  desktopNumber,
   normalizeLabel,
   normalizeTransfer,
 } from "../lib/device-link.js";
@@ -31,16 +33,27 @@ describe("device labels", () => {
     assert.equal(normalizeLabel("tablet"), "");
   });
 
-  it("gives the one phone 'mobile' and numbers desktops", () => {
-    const fromDesktop = { ...createLink("desktop"), labels: [] };
-    assert.equal(nextLabel(fromDesktop, "mobile"), "mobile");
-    assert.equal(nextLabel(fromDesktop, "desktop"), "desktop1");
-    assert.equal(nextLabel({ ...fromDesktop, labels: ["mobile", "desktop1"] }, "desktop"), "desktop2");
-
-    const fromPhone = { ...createLink("mobile"), labels: [] };
-    assert.equal(nextLabel(fromPhone, "desktop"), "desktop");
-    assert.equal(nextLabel({ ...fromPhone, labels: ["desktop"] }, "desktop"), "desktop2");
+  it("gives the one phone 'mobile' and desktops the lowest number free among the devices seen", () => {
+    assert.equal(nextLabel([], "mobile"), "mobile");
+    assert.equal(nextLabel(["mobile"], "desktop"), "desktop");
+    assert.equal(nextLabel(["mobile", "desktop"], "desktop"), "desktop2");
+    // An earlier PeerChat called the first desktop desktop1.
+    assert.equal(nextLabel(["desktop1"], "desktop"), "desktop2");
+    // A number nobody uses is given again, below one somebody does.
+    assert.equal(nextLabel(["desktop5", "", "bad"], "desktop"), "desktop");
+    assert.equal(nextLabel(["desktop", "desktop3"], "desktop"), "desktop2");
     assert.deepEqual(mergeLabels(["desktop2", "mobile"], ["mobile", "bad", "desktop1"]), ["desktop1", "desktop2", "mobile"]);
+  });
+
+  it("moves a desktop only to a lower number", () => {
+    assert.equal(takesLowerLabel("desktop5", "desktop"), true);
+    assert.equal(takesLowerLabel("desktop3", "desktop2"), true);
+    assert.equal(takesLowerLabel("desktop", "desktop2"), false);
+    assert.equal(takesLowerLabel("desktop1", "desktop"), false);
+    // The device the name was made on, and a phone, keep theirs.
+    assert.equal(takesLowerLabel("", "desktop"), false);
+    assert.equal(takesLowerLabel("mobile", "desktop"), false);
+    assert.equal(desktopNumber("desktop12"), 12);
   });
 });
 

@@ -94,15 +94,17 @@ describe("one person on two devices", () => {
     assert.equal(transfer.profile.username, "ada");
     assert.deepEqual(transfer.rooms.map((room) => room.roomKey), [ROOM]);
     assert.equal(transfer.rooms[0].creatorKey, "07".repeat(32));
-    // Kept, so the next transfer uses the same link, and each desktop gets a
-    // label of its own even before the first one is heard from.
+    // Kept, so the next transfer uses the same link. The first desktop is
+    // plain "desktop", and a transfer that is never used takes no number: one
+    // made again gets the same label.
     const first = exportChatTransfer({ targetType: "desktop" });
     assert.equal(first.link.key, link.key);
-    assert.equal(first.label, "desktop1");
-    assert.equal(exportChatTransfer({ targetType: "desktop" }).label, "desktop2");
+    assert.equal(first.label, "desktop");
+    assert.equal(exportChatTransfer({ targetType: "desktop" }).label, "desktop");
     assert.equal(exportChatTransfer({ targetType: "mobile" }).label, "mobile");
-    const saved = JSON.parse(readFileSync(storagePath, "utf8")).link;
-    assert.deepEqual(saved.labels, ["desktop1", "desktop2", "mobile"]);
+    const saved = JSON.parse(readFileSync(storagePath, "utf8"));
+    assert.deepEqual(saved.link.labels, []);
+    assert.deepEqual(saved.deviceLabels, []);
   });
 
   it("sends its name without a label, with a proof the phone can check", async () => {
@@ -149,6 +151,23 @@ describe("one person on two devices", () => {
     assert.equal(me.bio, "new bio");
     const resent = await eventually(() => frames.find((f) => f.type === "profile" && f.username === "adele"), "the new name sent on");
     assert.equal(resent.link.at, at);
+  });
+
+  it("gives a new desktop a number none of the person's devices it has seen goes by", async () => {
+    // The phone above said it is "mobile". Another desktop of theirs says
+    // "desktop": the next one is desktop2, and a label from anyone without
+    // the link counts for nothing.
+    transport.send(JSON.stringify({
+      type: "profile", peerId: "0b0b0b0b", username: "mallory@desktop3", bio: "", avatar: null, rooms: [wireRoom(ROOM)],
+      device: "desktop3", link: makeProfileProof(createLink("desktop"), { username: "mallory", bio: "", avatar: null, at: 1 }, phoneKey),
+    }) + "\n");
+    transport.send(JSON.stringify({
+      type: "profile", peerId: "0b0b0b0b", username: "adele@desktop", bio: "new bio", avatar: null, rooms: [wireRoom(ROOM)],
+      device: "desktop", link: makeProfileProof(link, { username: "adele", bio: "new bio", avatar: null, at: 1 }, phoneKey),
+    }) + "\n");
+    await eventually(() => JSON.parse(readFileSync(storagePath, "utf8")).deviceLabels?.includes("desktop"), "the label kept");
+    assert.deepEqual(JSON.parse(readFileSync(storagePath, "utf8")).deviceLabels, ["desktop", "mobile"]);
+    assert.equal(exportChatTransfer({ targetType: "desktop" }).label, "desktop2");
   });
 
   it("ignores a rename from anyone without the link, and an older one from the phone", async () => {
@@ -298,5 +317,18 @@ describe("one person on two devices", () => {
     const phoneLink = JSON.parse(readFileSync(storagePath, "utf8")).link;
     const result = await importChatTransfer(makeTransfer({ link: phoneLink, label: "desktop2", profile: { username: "phone person", at: 11 }, rooms: [] }));
     assert.equal(result.label, "desktop");
+  });
+
+  it("moves down to a lower number sent again, as a desktop numbered too high by an earlier PeerChat", async () => {
+    const phoneLink = JSON.parse(readFileSync(storagePath, "utf8")).link;
+    // As an earlier PeerChat left it: a number for every transfer made.
+    await importChatTransfer(makeTransfer({ link: createLink("mobile"), label: "desktop5", profile: { username: "phone person", at: 12 }, rooms: [] }));
+    const relinked = JSON.parse(readFileSync(storagePath, "utf8")).link;
+    assert.notEqual(relinked.key, phoneLink.key);
+    assert.equal((await call("get-profile", "GET")).displayName, "phone person@desktop5");
+    const result = await importChatTransfer(makeTransfer({ link: relinked, label: "desktop", profile: { username: "phone person", at: 12 }, rooms: [] }));
+    assert.equal(result.label, "desktop");
+    assert.equal((await call("get-profile", "GET")).displayName, "phone person@desktop");
+    assert.equal(JSON.parse(readFileSync(storagePath, "utf8")).device.label, "desktop");
   });
 });
