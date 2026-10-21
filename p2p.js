@@ -110,6 +110,7 @@ import {
   makeTransfer,
   mergeLabels,
   nextLabel,
+  takesLowerLabel,
   normalizeDeviceKey,
   normalizeLabel,
   normalizeLink,
@@ -259,12 +260,13 @@ let peerCountTimer = null;
 let chatSdk = null;
 
 // device.label: this device's fixed label after the name ("mobile",
-// "desktop1"), empty on the device the name was made on. link: the secret the
-// person's devices share. See lib/device-link.js.
+// "desktop2"), empty on the device the name was made on. link: the secret the
+// person's devices share. See lib/device-link.js. deviceLabels: the labels the
+// person's other devices were seen with, so a new one is given a free one.
 // leftRooms: rooms this device left or was removed from, by when. Another of
 // the person's devices offering one back is ignored until it is joined again
 // here, so leaving a room on one device sticks.
-let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {}, device: { label: "" }, link: null, leftRooms: {} };
+let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {}, device: { label: "" }, deviceLabels: [], link: null, leftRooms: {} };
 const MAX_LEFT_ROOMS = 1000;
 
 function isValidRoomKey(k) {
@@ -540,6 +542,7 @@ function loadData() {
       savedData.pendingDMs = raw.pendingDMs || {};
       savedData.blockedPeers = sanitizeBlockedPeers(raw.blockedPeers);
       savedData.device = { label: normalizeLabel(raw.device?.label) };
+      savedData.deviceLabels = mergeLabels(raw.deviceLabels);
       // Kept like the room keys. On another computer the keychain cannot open
       // it, and the transfer that brought this file carries it again.
       savedData.link = raw.link && typeof raw.link.key === "string"
@@ -608,6 +611,7 @@ function persistData() {
       pendingDMs: savedData.pendingDMs || {},
       blockedPeers: savedData.blockedPeers || {},
       device: { label: savedData.device?.label || "" },
+      deviceLabels: mergeLabels(savedData.deviceLabels),
       link: savedData.link ? { ...savedData.link, key: lock(savedData.link.key) } : null,
       leftRooms: savedData.leftRooms || {},
       siblings: [...siblingIds].slice(0, MAX_SIBLINGS),
@@ -2301,6 +2305,15 @@ function reshareProfile() {
   });
 }
 
+// The label another of this person's devices goes by, so no new one is given
+// it.
+function rememberDeviceLabel(label) {
+  const value = normalizeLabel(label);
+  if (!value || (savedData.deviceLabels || []).includes(value)) return;
+  savedData.deviceLabels = mergeLabels(savedData.deviceLabels, [value]);
+  persistData();
+}
+
 // A profile from another of this person's devices: the labels it knows, and
 // its name, bio and picture when they were set after ours.
 function takeSiblingProfile(proof, avatar) {
@@ -2831,9 +2844,11 @@ export function exportChatTransfer({ targetType = "desktop" } = {}) {
   if (!savedData.profile?.username) return null;
   if (!savedData.link) savedData.link = createLink("desktop");
   const rooms = sharedRoomEntries();
-  // Kept as given, so the next desktop is not given the same label.
-  const label = nextLabel(savedData.link, targetType === "mobile" ? "mobile" : "desktop");
-  savedData.link = { ...savedData.link, labels: mergeLabels(savedData.link.labels, [label]) };
+  // The lowest one free among the devices seen, this one's too. Nothing is
+  // kept for it: a transfer never used leaves its number free, and one sent
+  // to the same device again carries the same label.
+  const seen = [...(savedData.deviceLabels || []), savedData.device?.label];
+  const label = nextLabel(seen, targetType === "mobile" ? "mobile" : "desktop");
   persistData();
   joinDevicesTopic();
   return makeTransfer({
@@ -2852,8 +2867,12 @@ export function exportChatTransfer({ targetType = "desktop" } = {}) {
 // another desktop), so it takes its label even though it has the link.
 function applyChatTransfer(transfer, { adopt = false } = {}) {
   const sameLink = !!savedData.link && linkId(savedData.link) === linkId(transfer.link);
-  // Devices proven with another link are not this person's.
-  if (!sameLink) siblingIds.clear();
+  // Devices proven with another link are not this person's, and nor are the
+  // labels they went by.
+  if (!sameLink) {
+    siblingIds.clear();
+    savedData.deviceLabels = [];
+  }
   if (!sameLink || adopt) {
     savedData.link = { ...transfer.link, labels: mergeLabels(transfer.link.labels, [transfer.label]) };
     savedData.device = { label: transfer.label };
@@ -2862,6 +2881,9 @@ function applyChatTransfer(transfer, { adopt = false } = {}) {
     }
   } else {
     savedData.link = { ...savedData.link, labels: mergeLabels(savedData.link.labels, transfer.link.labels) };
+    // Sent again with a lower number than this desktop has, as one an earlier
+    // PeerChat numbered too high gets when the person sends to it again.
+    if (takesLowerLabel(savedData.device?.label, transfer.label)) savedData.device = { label: transfer.label };
     const ourAt = Number.isSafeInteger(savedData.profile?.at) ? savedData.profile.at : 0;
     if (transfer.profile && transfer.profile.at > ourAt) savedData.profile = { ...savedData.profile, ...transfer.profile };
   }
@@ -3305,6 +3327,7 @@ export function initChat(sdk, options = {}) {
               const entry = peerForConnection(conn) || pendingPeers.get(conn);
               const first = entry && !entry.sibling;
               if (entry) entry.sibling = true;
+              rememberDeviceLabel(msg.device);
               takeSiblingProfile(msg.link, msg.avatar || null);
               if (first) {
                 // Every room this device is in, once per connection.
