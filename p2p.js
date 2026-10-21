@@ -1253,13 +1253,17 @@ function movedLongAgo(room, now = Date.now()) {
   return Number.isSafeInteger(at) && now - at >= MOVED_ROOM_KEPT_MS;
 }
 
-// A room that moved is left two weeks after the move, as at start.
+// A room that moved is left two weeks after the move, as at start. A timer
+// can go off a moment before the clock says two weeks, and it is set again
+// for what is left: dropped there, the room stayed joined until a restart.
 function keepMovedRoomFor(roomKey) {
   const at = savedData.rooms[roomKey]?.movedTo?.at;
   if (!Number.isSafeInteger(at) || movedRoomTimers.has(roomKey)) return;
   const timer = setTimeout(() => {
     movedRoomTimers.delete(roomKey);
-    leaveMovedRoom(roomKey);
+    const room = savedData.rooms[roomKey];
+    if (room && !movedLongAgo(room)) keepMovedRoomFor(roomKey);
+    else leaveMovedRoom(roomKey);
   }, Math.max(0, at + MOVED_ROOM_KEPT_MS - Date.now()));
   timer.unref?.();
   movedRoomTimers.set(roomKey, timer);
@@ -2689,6 +2693,10 @@ async function joinRoom(sdk, roomKey) {
       console.warn(`[chat] Discovery flush ${roomKey.slice(0, 8)}: ${error.message}`);
     }
   }
+
+  // A room that moved, whose two weeks ran out while it was joining: its
+  // timer found it not joined yet, so it is left here.
+  leaveMovedRoom(roomKey);
 
   if (feedError) throw feedError;
 }
