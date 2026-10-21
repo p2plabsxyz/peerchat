@@ -14,7 +14,8 @@ describe("messages from your own devices", () => {
     assert.match(p2p, /siblings: \[\.\.\.siblingIds\]\.slice\(0, MAX_SIBLINGS\),/);
     // Only with a link to prove them by, and none from another person's link.
     assert.match(p2p, /if \(savedData\.link && Array\.isArray\(raw\.siblings\)\) \{/);
-    assert.match(p2p, /if \(!sameLink\) siblingIds\.clear\(\);/);
+    // Nor the labels those devices went by.
+    assert.match(p2p, /if \(!sameLink\) \{\s+siblingIds\.clear\(\);\s+savedData\.deviceLabels = \[\];/);
     assert.match(p2p, /blockedPeers: listBlockedPeers\(\),\s+\/\/ [^\n]*\n\s+siblings: \[\.\.\.siblingIds\],/);
   });
 
