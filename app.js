@@ -1633,6 +1633,8 @@ function refreshRoomHeader(key) {
     if (tries++ >= 20 || S.activeRoom !== key) { clearInterval(poll); return; }
     try {
       await loadRooms();
+      // Another chat may be open by now, and this name and picture are not its.
+      if (S.activeRoom !== key) { clearInterval(poll); return; }
       const room = S.rooms[key];
       if (room && room.name && room.name !== key.slice(0, 8) + "...") {
         renderRoomList();
@@ -2511,23 +2513,27 @@ async function refreshActiveRoom() {
   try {
     await loadRooms();
     renderRoomList();
-    if (S.activeRoom) {
-      const room = S.rooms[S.activeRoom];
+    // The chat open when the history was asked for. Read again once it came
+    // back, a chat opened in between got the other one's history, which then
+    // stayed in it until a reload: a direct message showing P2P Republic.
+    const roomKey = S.activeRoom;
+    if (roomKey) {
+      const room = S.rooms[roomKey];
       if (room) {
-        $("chat-room-name").textContent = room.name || S.activeRoom.slice(0, 8) + "...";
+        $("chat-room-name").textContent = room.name || roomKey.slice(0, 8) + "...";
         $("chat-room-avatar").src = avatar(room.name, 32, room.avatar);
       }
-      const { messages: fresh } = await chat.getHistory(S.activeRoom);
-      const _existing = S.messages[S.activeRoom] || [];
+      const { messages: fresh } = await chat.getHistory(roomKey);
+      const _existing = S.messages[roomKey] || [];
       // Counted as the buffer is, as the sync check does: raw history carries
       // reactions that never reach the pane, so a room with one rebuilt itself
       // after every sync with every peer, and its pictures blinked.
       if (fresh && fresh.filter(chatMessageRenders).length > _existing.length) {
         const firstRender = _existing.length === 0;
-        S.messages[S.activeRoom] = extractReactions(S.activeRoom, mergeWithHistory(_existing, fresh));
-        renderMessages(S.activeRoom, firstRender);
+        S.messages[roomKey] = extractReactions(roomKey, mergeWithHistory(_existing, fresh));
+        renderMessages(roomKey, firstRender);
       }
-      updateRoomPeerCount(S.activeRoom);
+      updateRoomPeerCount(roomKey);
     }
   } catch {}
 }
