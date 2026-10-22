@@ -1655,12 +1655,15 @@ function applyDMComposerGate(roomKey) {
   const banner = $("dm-blocked-banner");
   const blockedByPeer = !!(room.isDM && room.blockedByPeer);
   const blockedByMe = !!(room.isDM && room.dmWith && isPeerBlocked(room.dmWith));
+  // The other person left the chat, so nothing sent here would reach them.
+  const leftByPeer = !!(room.isDM && room.leftByPeer && !blockedByPeer && !blockedByMe);
+  const leftName = room.leftByName || room.name || "This person";
 
   // Messaging someone offline is allowed. There is no server holding the
   // message, so it only moves while both sides are running.
   const offlineNote = $("dm-offline-note");
   if (offlineNote) {
-    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe &&
+    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe && !leftByPeer &&
       !S.onlinePeers.has(room.dmWith));
     offlineNote.style.display = peerOffline ? "" : "none";
     if (peerOffline) {
@@ -1674,12 +1677,14 @@ function applyDMComposerGate(roomKey) {
   // than letting messages go nowhere.
   const removed = !!room.removedByCreator;
   if (banner) {
-    banner.style.display = removed || blockedByPeer || blockedByMe ? "" : "none";
+    banner.style.display = removed || blockedByPeer || blockedByMe || leftByPeer ? "" : "none";
     banner.textContent = removed
       ? `You were removed from this room by ${room.createdByName || "whoever made it"}.`
       : blockedByMe
         ? "You blocked this person. Unblock them in Settings to message them again."
-        : "This person blocked your direct messages. Open their profile and press Message to ask again.";
+        : leftByPeer
+          ? `${leftName} left this chat.`
+          : "This person blocked your direct messages. Open their profile and press Message to ask again.";
   }
   if (removed) {
     messageInput.disabled = true;
@@ -1688,6 +1693,10 @@ function applyDMComposerGate(roomKey) {
   } else if (blockedByPeer || blockedByMe) {
     messageInput.disabled = true;
     messageInput.placeholder = blockedByMe ? "You blocked this person." : "This person blocked your direct messages.";
+    sendBtn.disabled = true;
+  } else if (leftByPeer) {
+    messageInput.disabled = true;
+    messageInput.placeholder = `${leftName} left this chat.`;
     sendBtn.disabled = true;
   } else if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
     messageInput.disabled = true;
@@ -1701,6 +1710,9 @@ function applyDMComposerGate(roomKey) {
       if (!document.querySelector(".modal.open")) messageInput?.focus();
     });
   }
+  // A file is a message too, and was uploaded only to be refused.
+  const attachBtn = $("attach-btn");
+  if (attachBtn) attachBtn.disabled = messageInput.disabled;
 }
 
 // Every openRoom call takes a ticket. The awaits below (setActive, markRead,
@@ -2873,6 +2885,50 @@ function connectGlobalSSE() {
           applyDMComposerGate(roomKey);
         }
       }
+    } catch {}
+  });
+
+  // Gone from here without this page leaving it: another of this person's
+  // devices left it, or it gave way to the copy the other person offered of
+  // the same chat.
+  es.addEventListener("room-left", (ev) => {
+    touch();
+    try {
+      const { roomKey } = JSON.parse(ev.data);
+      if (!S.rooms[roomKey]) return;
+      delete S.rooms[roomKey];
+      if (S.activeRoom === roomKey) {
+        S.activeRoom = null;
+        $("chat-active").style.display = "none";
+        $("chat-empty").style.display = "flex";
+      }
+      renderRoomList();
+    } catch {}
+  });
+
+  es.addEventListener("dm-left", (ev) => {
+    touch();
+    try {
+      const { roomKey, username } = JSON.parse(ev.data);
+      const room = S.rooms[roomKey];
+      if (!room?.isDM) return;
+      room.leftByPeer = true;
+      room.leftByName = username || room.name;
+      renderRoomList();
+      applyDMComposerGate(roomKey);
+    } catch {}
+  });
+
+  es.addEventListener("dm-back", (ev) => {
+    touch();
+    try {
+      const { roomKey } = JSON.parse(ev.data);
+      const room = S.rooms[roomKey];
+      if (!room?.isDM) return;
+      room.leftByPeer = false;
+      delete room.leftByName;
+      renderRoomList();
+      applyDMComposerGate(roomKey);
     } catch {}
   });
 
