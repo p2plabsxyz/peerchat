@@ -266,7 +266,10 @@ let chatSdk = null;
 // leftRooms: rooms this device left or was removed from, by when. Another of
 // the person's devices offering one back is ignored until it is joined again
 // here, so leaving a room on one device sticks.
-let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {}, device: { label: "" }, deviceLabels: [], link: null, leftRooms: {} };
+// farewells: direct chats this person left, by room: the leave that went
+// out, sent again to each of the other person's devices that comes online
+// within FAREWELL_KEPT_MS. See keepFarewell.
+let savedData = { profile: {}, rooms: {}, peerProfiles: {}, blockedPeers: {}, device: { label: "" }, deviceLabels: [], link: null, leftRooms: {}, farewells: {} };
 const MAX_LEFT_ROOMS = 1000;
 
 function isValidRoomKey(k) {
@@ -549,6 +552,14 @@ function loadData() {
         ? normalizeLink({ ...raw.link, key: open(raw.link.key) })
         : null;
       savedData.leftRooms = sanitizeLeftRooms(raw.leftRooms);
+      savedData.farewells = {};
+      for (const value of Object.values(raw.farewells && typeof raw.farewells === "object" ? raw.farewells : {})) {
+        const roomKey = typeof value?.roomKey === "string" ? String(open(value.roomKey) || "").toLowerCase() : "";
+        if (!isValidRoomKey(roomKey) || !Number.isSafeInteger(value.at) || Date.now() - value.at > FAREWELL_KEPT_MS) continue;
+        if (typeof value.id !== "string" || !value.id || value.id.length > 128) continue;
+        if (Object.keys(savedData.farewells).length >= MAX_FAREWELLS) break;
+        savedData.farewells[roomKey] = { at: value.at, id: value.id, username: clamp(value.username, MAX_NAME_LEN) };
+      }
       if (savedData.link && Array.isArray(raw.siblings)) {
         for (const id of raw.siblings.slice(0, MAX_SIBLINGS)) {
           if (typeof id === "string" && /^[0-9a-f]{8,64}$/i.test(id)) siblingIds.add(id.toLowerCase());
@@ -614,6 +625,10 @@ function persistData() {
       deviceLabels: mergeLabels(savedData.deviceLabels),
       link: savedData.link ? { ...savedData.link, key: lock(savedData.link.key) } : null,
       leftRooms: savedData.leftRooms || {},
+      farewells: Object.fromEntries(Object.entries(savedData.farewells || {}).map(([roomKey, farewell]) => [
+        wireTopic(roomKey),
+        { roomKey: lock(roomKey), at: farewell.at, id: farewell.id, username: farewell.username || "" },
+      ])),
       siblings: [...siblingIds].slice(0, MAX_SIBLINGS),
       rooms: {},
     };
@@ -1200,6 +1215,12 @@ const MAX_MOVE_FUTURE_MS = 5 * 60_000;
 const MAX_MOVES_PER_HOUR = 10;
 const MOVE_LIMIT_WINDOW_MS = 60 * 60_000;
 const MOVED_ROOM_KEPT_MS = 14 * 24 * 60 * 60_000;
+// A direct chat this person left stays joined this long, out of sight and
+// taking nothing, so the other person's devices that come online later hear
+// that they left. Without it the other side went on writing into a chat
+// nobody read. Mobile keeps the same in its service.mjs.
+const FAREWELL_KEPT_MS = 14 * 24 * 60 * 60_000;
+const MAX_FAREWELLS = 100;
 const movedRoomTimers = new Map();
 
 // Where a room's people are now: the end of its moves.
@@ -1906,6 +1927,7 @@ async function receiveChatMessage(source, msg, via) {
     ...(signed && { ak: msg.ak, h: msg.h, as: msg.as }),
   };
   await appendToFeed(roomKey, entry);
+  directChatBack(roomKey, authorId, ts);
 
   if (via === "live" && room) {
     if (!room.members) room.members = {};
@@ -2493,26 +2515,120 @@ function announceJoins(conn, roomKeys = peerForConnection(conn)?.rooms || []) {
  * record. No leave announcement, because callers either send their own or are
  * dropping a room nobody else ever joined.
  */
-async function dropRoomLocally(sdk, roomKey) {
+async function dropRoomLocally(sdk, roomKey, { keepTopic = false } = {}) {
   // The record goes first and the topic after, so a caller that does not wait
   // still sees the room gone on the very next line.
   for (const stream of roomSseClients[roomKey] || []) { try { stream.end(); } catch {} }
   delete roomSseClients[roomKey];
   delete roomFeeds[roomKey];
   joinedRooms.delete(roomKey);
-  for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
-    if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
+  if (!keepTopic) {
+    for (const [discoveryKey, mappedRoomKey] of discoveryKeys) {
+      if (mappedRoomKey === roomKey) discoveryKeys.delete(discoveryKey);
+    }
   }
   delete savedData.rooms[roomKey];
   if (activeRoom === roomKey) activeRoom = null;
   markRoomLeft(roomKey);
   persistData();
 
+  if (keepTopic) return;
   try {
     await sdk.leave(deriveTopic(roomKey));
   } catch (error) {
     console.warn(`[chat] Leave ${roomKey.slice(0, 8)}: ${error.message}`);
   }
+}
+
+// Leaving a room: everyone connected in it hears so, and the rooms it moved
+// from go with it, as they were only kept for its history and for anyone who
+// missed the move. Leaving a direct chat is this person leaving it, so the
+// other person is told, now or when their devices come online, and this
+// person's other devices leave it too. A chat with yourself is only this
+// device's.
+async function leaveRoomEverywhere(sdk, roomKey) {
+  const room = savedData.rooms[roomKey];
+  const farewell = !!(room?.isDM && room.dmWith && !isOwnSender(room.dmWith));
+  const leaveTs = Date.now();
+  const leave = {
+    type: "leave", peerId: localId,
+    username: myName() || localId, roomKey,
+    id: `${wireTopic(roomKey)}-${localId}-left-${leaveTs}`, ts: leaveTs,
+  };
+  relayToRoom(roomKey, JSON.stringify(leave) + "\n");
+  const before = roomsBefore(roomKey);
+  await dropRoomLocally(sdk, roomKey, { keepTopic: farewell });
+  if (farewell) keepFarewell(roomKey, { at: leaveTs, id: leave.id, username: leave.username });
+  for (const key of before) await dropRoomLocally(sdk, key);
+}
+
+// The left chat's topic stays joined, its proof still going out, so each of
+// the other person's devices that connects is sent the leave.
+function keepFarewell(roomKey, leave) {
+  savedData.farewells = { ...(savedData.farewells || {}), [roomKey]: leave };
+  const entries = Object.entries(savedData.farewells);
+  if (entries.length > MAX_FAREWELLS) endFarewell(entries.sort((a, b) => a[1].at - b[1].at)[0][0]);
+  discoveryKeys.set(wireTopic(roomKey), roomKey);
+  persistData();
+}
+
+function joinFarewells(sdk) {
+  for (const roomKey of Object.keys(savedData.farewells || {})) {
+    if (savedData.rooms[roomKey]) {
+      delete savedData.farewells[roomKey];
+      continue;
+    }
+    discoveryKeys.set(wireTopic(roomKey), roomKey);
+    try { sdk.join(deriveTopic(roomKey), { client: true, server: true }); } catch {}
+  }
+}
+
+function endOldFarewells(now = Date.now()) {
+  for (const [roomKey, farewell] of Object.entries(savedData.farewells || {})) {
+    if (now - farewell.at > FAREWELL_KEPT_MS) endFarewell(roomKey);
+  }
+}
+
+function endFarewell(roomKey) {
+  if (!savedData.farewells?.[roomKey]) return;
+  delete savedData.farewells[roomKey];
+  debouncePersist();
+  if (savedData.rooms[roomKey]) return;
+  discoveryKeys.delete(wireTopic(roomKey));
+  for (const peer of peers) peer.rooms = peer.rooms.filter((key) => key !== roomKey);
+  chatSdk?.leave(deriveTopic(roomKey)).catch(() => {});
+}
+
+// The leave again, to a device that proved it holds the chat's key: the other
+// person's, or one of this person's that has not left it yet. Our own proof
+// goes first, or the leave is dropped as coming from outside the chat.
+function sendFarewells(conn, roomKeys) {
+  if (!roomKeys.length) return;
+  shareTopics(conn);
+  for (const roomKey of roomKeys) {
+    const farewell = savedData.farewells?.[roomKey];
+    if (!farewell) continue;
+    try {
+      writeToConnection(conn, JSON.stringify({
+        type: "leave", peerId: localId,
+        username: farewell.username || myName() || localId, roomKey,
+        id: farewell.id, ts: farewell.at,
+      }) + "\n");
+    } catch {}
+  }
+}
+
+// Back in a direct chat they left: a join or a message after the leave.
+function directChatBack(roomKey, peerId, at) {
+  const room = savedData.rooms[roomKey];
+  if (!room?.isDM || !room.leftByPeer || isOwnSender(peerId)) return;
+  if (!(at > (room.leftAt || 0))) return;
+  room.leftByPeer = false;
+  delete room.leftAt;
+  delete room.leftByName;
+  room.backAt = at;
+  debouncePersist();
+  broadcastGlobal("dm-back", { roomKey });
 }
 
 // Opens a request: the conversation is bound to the key the invite came from,
@@ -3275,6 +3391,7 @@ export function initChat(sdk, options = {}) {
                 shareProfile(conn, peerEntry.rooms);
               }
               const added = [];
+              const farewells = [];
               for (const entry of msg.rooms.slice(0, MAX_SHARED_TOPICS)) {
                 const topic = typeof entry?.topic === "string" ? entry.topic.toLowerCase() : "";
                 // Unknown topics resolve to nothing, and a known one opens only
@@ -3282,6 +3399,11 @@ export function initChat(sdk, options = {}) {
                 const rk = discoveryKeys.get(topic);
                 if (!rk || peerSharesRoom(peerEntry, rk)) continue;
                 if (!checkRoomProof(rk, conn.handshakeHash, conn.remotePublicKey, entry.proof)) continue;
+                // A direct chat this person left: the device holding it hears so.
+                if (!savedData.rooms[rk]) {
+                  if (savedData.farewells?.[rk] && !farewells.includes(rk)) farewells.push(rk);
+                  continue;
+                }
                 // A room that moved opens only to somebody seen in it before.
                 // Held here in case they prove to be another of this person's
                 // devices once their profile comes.
@@ -3293,6 +3415,7 @@ export function initChat(sdk, options = {}) {
                 added.push(rk);
                 noteKnown(rk, peerEntry.fullId);
               }
+              sendFarewells(conn, farewells);
               if (added.length) {
                 // Our proofs before anything of ours about these rooms, or the
                 // other side drops our join as coming from outside the room.
@@ -3444,6 +3567,7 @@ export function initChat(sdk, options = {}) {
               };
               debouncePersist();
               broadcastGlobal("member-update", { peerId: joinPeerId, username: joinName, bio: clamp(msg.bio, MAX_BIO_LEN), avatar: sanitizeAvatar(msg.avatar), isOnline: true, rooms: [msg.roomKey] });
+              directChatBack(msg.roomKey, joinPeerId, announcedJoin);
             }
 
             const sysId = msg.id || `${wireTopic(msg.roomKey)}-${joinPeerId}-join-${msg.ts || Date.now()}`;
@@ -3497,11 +3621,17 @@ export function initChat(sdk, options = {}) {
             // drops it, and an unaccepted room has nothing in it to lose.
             const ours = findDirectRoomKey(remoteId);
             if (ours) {
-              if (!savedData.rooms[ours]?.pendingAcceptance || ours < msg.roomKey) {
+              // Ours waits on an answer, and theirs is a chat with them this
+              // device left, which they kept and offer back: theirs holds
+              // everything said so far, so ours gives way. Going by the keys,
+              // each side answered with its own and neither opened.
+              const theirsWasLeft = !!savedData.rooms[ours]?.pendingAcceptance && !!savedData.leftRooms?.[msg.roomKey];
+              if (!theirsWasLeft && (!savedData.rooms[ours]?.pendingAcceptance || ours < msg.roomKey)) {
                 sendDMInvite(conn, ours, savedData.rooms[ours], remoteId, fullId);
                 continue;
               }
               dropRoomLocally(sdk, ours).catch(() => {});
+              broadcastGlobal("room-left", { roomKey: ours });
             }
             const fromName = clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId;
             const fromAvatar = sanitizeAvatar(msg.fromAvatar);
@@ -3550,6 +3680,10 @@ export function initChat(sdk, options = {}) {
             room.bio = acceptBio || "";
             room.pendingAcceptance = false;
             room.blockedByPeer = false;
+            room.leftByPeer = false;
+            delete room.leftAt;
+            delete room.leftByName;
+            room.backAt = Date.now();
             if (!room.dmWithKey) room.dmWithKey = fullId;
             debouncePersist();
             offerRoomToSiblings(msg.roomKey);
@@ -3777,8 +3911,39 @@ export function initChat(sdk, options = {}) {
 
           if (msg.type === "leave") {
             if (msg.roomKey && msg.peerId) {
+              // Only about the device it came from, as the phone takes it.
+              // Taken from anyone, somebody in a room could make somebody else
+              // look as though they had left.
+              if (normPeerId(msg.peerId) !== normPeerId(remoteId)) continue;
               if (moderationIsKicked(remoteId, msg.roomKey)) continue;
               const room = savedData.rooms[msg.roomKey];
+              // A direct chat. Only the two people in it and their own devices
+              // hold its key, and this came from a device that proved it, so
+              // it is the other person: the chat says so and takes no more
+              // messages until they come back. Another of this person's own
+              // devices leaving it means this person left it.
+              if (room?.isDM && room.dmWith) {
+                const at = Math.min(Number.isSafeInteger(msg.ts) ? msg.ts : Date.now(), Date.now());
+                if (isOwnSender(remoteId)) {
+                  if (!isOwnSender(room.dmWith) && at > (room.joinedAt || room.createdAt || 0)) {
+                    leaveRoomEverywhere(chatSdk, msg.roomKey).catch(() => {});
+                    broadcastGlobal("room-left", { roomKey: msg.roomKey });
+                  }
+                  continue;
+                }
+                // From before they came back, or before this person asked them
+                // again: old news, which one of their devices that left with
+                // them sends to every device it meets for a while. One already
+                // taken is said once.
+                if (at < (room.backAt || 0) || (room.leftByPeer && (room.leftAt || 0) >= at)) continue;
+                const named = clamp(msg.username, 50);
+                room.leftByPeer = true;
+                room.leftAt = at;
+                room.leftByName = (named && named !== msg.peerId ? named : "") ||
+                  savedData.peerProfiles?.[msg.peerId]?.username || room.name || "";
+                debouncePersist();
+                broadcastGlobal("dm-left", { roomKey: msg.roomKey, fromId: remoteId, username: room.leftByName });
+              }
               const realName = (name) => (name && name !== msg.peerId ? name : "");
               const leaveName = realName(clamp(msg.username, 50)) ||
                 realName(room?.members?.[msg.peerId]?.username) ||
@@ -3898,6 +4063,8 @@ export function initChat(sdk, options = {}) {
       console.error(`[chat] Auto-join ${roomKey.slice(0, 8)}: ${error.message}`);
     });
   }
+  joinFarewells(sdk);
+  setInterval(() => endOldFarewells(), 60 * 60_000).unref?.();
 }
 
 // A room's messages as a page reads them, with those of the rooms it moved from
@@ -4068,8 +4235,12 @@ export async function handleChatRequest(req, sdk) {
         // Asking again clears it. A block that could never be retried would
         // make the other side's unblock meaningless, and if they are still
         // blocking us the answer comes straight back.
-        if (existing?.blockedByPeer) {
+        if (existing?.blockedByPeer || existing?.leftByPeer) {
           existing.blockedByPeer = false;
+          existing.leftByPeer = false;
+          delete existing.leftAt;
+          delete existing.leftByName;
+          existing.backAt = Date.now();
           existing.pendingAcceptance = true;
           persistData();
         }
@@ -4320,6 +4491,9 @@ export async function handleChatRequest(req, sdk) {
         if (_sendRoom?.isDM && _sendRoom.blockedByPeer) {
           return respond(403, { error: "This person blocked your direct messages." });
         }
+        if (_sendRoom?.isDM && _sendRoom.leftByPeer) {
+          return respond(403, { error: "This person left the chat." });
+        }
         if (_sendRoom?.isDM && isPeerBlocked(_sendRoom.dmWith)) {
           return respond(403, { error: "Unblock this person before messaging them." });
         }
@@ -4521,19 +4695,7 @@ export async function handleChatRequest(req, sdk) {
 
       if (action === "delete-room") {
         if (!roomKey || !isValidRoomKey(roomKey)) return respond(400, { error: "Invalid room key" });
-        const leaveTs = Date.now();
-        const leaveId = `${wireTopic(roomKey)}-${localId}-left-${leaveTs}`;
-        const leaveMsg = JSON.stringify({
-          type: "leave", peerId: localId,
-          username: myName() || localId, roomKey,
-          id: leaveId, ts: leaveTs,
-        }) + "\n";
-        relayToRoom(roomKey, leaveMsg);
-        // The rooms it moved from go with it: they were only kept for its
-        // history and for anyone who missed the move.
-        const before = roomsBefore(roomKey);
-        await dropRoomLocally(sdk, roomKey);
-        for (const key of before) await dropRoomLocally(sdk, key);
+        await leaveRoomEverywhere(sdk, roomKey);
         return respond(200, { ok: true });
       }
 
@@ -4638,6 +4800,8 @@ export async function handleChatRequest(req, sdk) {
             rotates: !!roomChainFor(k),
             pendingAcceptance: !!r.pendingAcceptance,
             blockedByPeer: !!r.blockedByPeer,
+            leftByPeer: !!(r.isDM && r.leftByPeer),
+            ...(r.isDM && r.leftByPeer && { leftByName: r.leftByName || "" }),
             isPinned: !!r.isPinned,
             isMuted: !!r.isMuted,
             createdAt: r.createdAt || 0,
