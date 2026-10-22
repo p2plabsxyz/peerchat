@@ -44,4 +44,20 @@ export function attachChatTransport(conn, ondata, options = {}) {
   return transport;
 }
 
+// While the other end of a local network connection is still proving who it
+// is, a chat channel it opens first is held, not refused: protomux refuses a
+// channel this side has not opened yet, and the two sides finish proving at
+// different moments. Returns what lets it go, once this side has opened its
+// own channel or decided not to.
+export function holdChatTransport(conn) {
+  const mux = Protomux.from(conn);
+  let release = null;
+  const released = new Promise((resolve) => { release = resolve; });
+  mux.pair({ protocol: CHAT_PROTOCOL }, () => released);
+  return () => {
+    mux.unpair({ protocol: CHAT_PROTOCOL });
+    release();
+  };
+}
+
 export { CHAT_PROTOCOL };
