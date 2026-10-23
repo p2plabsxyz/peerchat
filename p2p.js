@@ -18,7 +18,7 @@ import {
   soleKeyFor,
   topicHex,
 } from "./routing.js";
-import { attachChatTransport } from "./transport.js";
+import { attachChatTransport, holdChatTransport } from "./transport.js";
 import {
   decodeMessagePayload,
   encodeMessagePayload,
@@ -239,6 +239,10 @@ let localKey = "";
 // removal lists of rooms made here. Null until it is read from the store, and
 // for good when the store does not hold the key this device connects with.
 let signingKeys = null;
+let signingKeysLoading = Promise.resolve();
+// How a device on the local network proves who it is (see initChat).
+let identityGate = null;
+const LAN_IDENTITY_CONTEXT = "peersky-chat";
 // How much each person has said lately, wherever it came from.
 const authorRates = new Map();
 // The whole key behind each short id, as connections proved them, so a key
@@ -914,6 +918,25 @@ async function loadSigningKeys(sdk, options) {
     if (typeof sdk.corestore?.createKeyPair === "function") candidates.push(await sdk.corestore.createKeyPair("noise"));
   } catch {}
   signingKeys = pickSigningKeyPair(localKey, candidates);
+}
+
+// Who is on the other end of a local network connection, if they share a
+// room with this device (a left direct chat counts, so its leave can still
+// reach them) or are another of this person's devices. Null otherwise: they
+// learn nothing about who this is either. Started at once, with the signing
+// keys still loading if need be, as the other side's gate is refused while
+// this side has none open.
+async function identifyOnLan(conn) {
+  const keyPair = signingKeysLoading.then(() => signingKeys);
+  const result = await identityGate(conn, { keyPair, secrets: lanSecrets(), context: LAN_IDENTITY_CONTEXT });
+  return result?.publicKey || null;
+}
+
+function lanSecrets() {
+  const keys = new Set([...Object.keys(savedData.rooms || {}), ...Object.keys(savedData.farewells || {})]);
+  const secrets = [...keys].filter(isValidRoomKey).map((key) => b4a.from(key, "hex"));
+  if (savedData.link?.key) secrets.push(b4a.from(savedData.link.key, "hex"));
+  return secrets;
 }
 
 // The creator's list, signed, so anybody in the room can pass it on. A list
@@ -3145,7 +3168,8 @@ export function initChat(sdk, options = {}) {
   // against this. See lib/room-moderation.js.
   localKey = sdk.publicKey ? b4a.toString(sdk.publicKey, "hex").toLowerCase() : "";
   signingKeys = null;
-  loadSigningKeys(sdk, options).catch(() => {});
+  signingKeysLoading = loadSigningKeys(sdk, options).catch(() => {});
+  identityGate = typeof options.identityGate === "function" ? options.identityGate : null;
 
   initModeration().catch((e) => console.warn("[chat] Moderation blocklist load failed:", e.message));
 
@@ -3202,12 +3226,32 @@ export function initChat(sdk, options = {}) {
   // sighting, and answering each with a frame of proofs ran through the other
   // side's control budget, which then dropped the proof for a new room.
 
+  // On the local network a connection's key is made up for that network and
+  // says nothing about who is on the other end. Who they are is proven inside
+  // the channel, and only to someone who shares a room or this person's
+  // device link (identityGate from @p2plabs/hyperdht-mdns, which PeerSky
+  // passes in). From then on they are the person they proved to be.
   sdk.swarm.on("connection", (conn, info = {}) => {
-    const remoteId = conn.remotePublicKey
-      ? b4a.toString(conn.remotePublicKey, "hex").slice(0, 8).toLowerCase()
+    if (info.lan && info.ephemeral && identityGate) {
+      conn.on("error", () => {});
+      const release = holdChatTransport(conn);
+      identifyOnLan(conn)
+        .then((remoteKey) => {
+          if (remoteKey && !conn.destroyed) handleConnection(conn, info, remoteKey, true);
+        })
+        .catch(() => {})
+        .finally(release);
+      return;
+    }
+    handleConnection(conn, info, conn.remotePublicKey, false);
+  });
+
+  function handleConnection(conn, info, remoteKey, proven) {
+    const remoteId = remoteKey
+      ? b4a.toString(remoteKey, "hex").slice(0, 8).toLowerCase()
       : "peer";
-    const fullId = conn.remotePublicKey
-      ? b4a.toString(conn.remotePublicKey, "hex").toLowerCase()
+    const fullId = remoteKey
+      ? b4a.toString(remoteKey, "hex").toLowerCase()
       : remoteId;
 
     // Found under one of our topics, or arriving without any (server-side
@@ -3219,7 +3263,7 @@ export function initChat(sdk, options = {}) {
     const foundOurDevices = !!devicesTopicHex && (info.topics || []).some((topic) => {
       try { return b4a.toString(topic, "hex").toLowerCase() === devicesTopicHex; } catch { return false; }
     });
-    const isChat = foundUnderOurs || foundOurDevices ||
+    const isChat = proven || foundUnderOurs || foundOurDevices ||
       (!info.topics?.length && (discoveryKeys.size > 0 || !!devicesTopicHex));
 
     if (!isChat) {
@@ -4043,7 +4087,7 @@ export function initChat(sdk, options = {}) {
     conn.on("close", () => {
       deactivatePeer();
     });
-  });
+  }
 
   // Install the connection listeners before joining. A discovered LAN peer can
   // connect immediately, especially when both instances run on the same host.

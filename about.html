@@ -63,7 +63,7 @@
         <li><strong>Moderation</strong> runs locally on every peer, with per-room settings chosen by whoever created the room. See below.</li>
         <li><strong>Edit room:</strong> whoever made a room can change its name, description, link, picture and settings later, and everyone in the room takes the change. It is signed by the creator and checked against the creator's key, so it can come from anyone in the room.</li>
         <li><strong>Forwarding:</strong> pick messages and forward them to another chat, pictures, videos and files too. Several go a moment apart, so the chat's spam limit is never reached.</li>
-        <li><strong>Works with the internet down:</strong> rooms are joined on an isolated LAN swarm as well as the public one (<code>@p2plabs/hyperdht-mdns</code>, no public bootstrap), so peers on the same network keep talking. It needs a network, not an internet connection.</li>
+        <li><strong>Works with the internet down:</strong> rooms are joined on an isolated LAN swarm as well as the public one (<code>@p2plabs/hyperdht-mdns</code>, no public bootstrap), so peers on the same network keep talking. It needs a network, not an internet connection. With hyperdht-mdns 2 the local network learns no ids and no rooms: a device there connects with a key made up for the network, and proves who it is inside the encrypted channel only to people it shares a room with and its own devices.</li>
         <li>Optional Electron <code>safeStorage</code> for the local JSON that holds rooms and keys.</li>
       </ul>
 
