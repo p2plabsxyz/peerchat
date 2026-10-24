@@ -52,6 +52,11 @@ const MEMBERS_LIST_MAX_BYTES = 192 * 1024;
 // included, on every connection grew with the room until a big one was hundreds
 // of MB per connection.
 const MAX_SHARED_MEMBERS = 100;
+// Rooms have no member limit, but the list of names kept for one does. Someone
+// else's list is only their word, and without this a peer could send made-up
+// people until the disk was full. A peer shares at most MAX_SHARED_MEMBERS, so
+// that is all one list may add.
+const MAX_STORED_MEMBERS = 10000;
 // And this much of a room's log goes to a peer when it connects, newest last,
 // as on the phone. Every entry from the start used to be read and sent.
 const MAX_SYNC_ENTRIES = 200;
@@ -331,6 +336,14 @@ function sanitizeBlockedPeers(raw) {
   return out;
 }
 
+// A list grown past the cap by an older version is cut back when it loads.
+function capStoredMembers(members) {
+  if (!members || typeof members !== "object") return members;
+  const ids = Object.keys(members);
+  if (ids.length <= MAX_STORED_MEMBERS) return members;
+  return Object.fromEntries(ids.slice(0, MAX_STORED_MEMBERS).map((id) => [id, members[id]]));
+}
+
 function normalizePersistedDmIds() {
   let changed = false;
   for (const r of Object.values(savedData.rooms)) {
@@ -584,6 +597,7 @@ function loadData() {
     // and unconfigurable at the same time.
     for (const room of Object.values(savedData.rooms)) {
       if (!room.moderation) room.moderation = { ...DEFAULT_ROOM_MODERATION };
+      room.members = capStoredMembers(room.members);
     }
 
     // A file from before the lock is locked now, not at its next change.
@@ -4011,9 +4025,12 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "members-list") {
             if (!msg.roomKey || !savedData.rooms[msg.roomKey]) continue;
             if (moderationIsKicked(remoteId, msg.roomKey)) continue;
+            if (!consumeControlRate(peer)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room.members) room.members = {};
             const incoming = msg.members || {};
+            let stored = Object.keys(room.members).length;
+            let added = 0;
             // Only merge new member profiles, never blindly delete based on incomplete lists
             for (const [rawId, m] of Object.entries(incoming)) {
               const peerId = normPeerId(rawId);
@@ -4023,6 +4040,9 @@ export function initChat(sdk, options = {}) {
               if (isPeerBannedFromRoom(room.bans, { peerId })) continue;
               const username = clamp(m?.username, 50);
               if (!username || username === peerId) continue;
+              if (added >= MAX_SHARED_MEMBERS || stored >= MAX_STORED_MEMBERS) break;
+              added++;
+              stored++;
               // A name and a bio, which is all anyone else can vouch for. Their
               // picture comes from them when this device meets them, and when
               // they joined only ever from their own join. Kept from every list,
