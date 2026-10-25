@@ -4696,6 +4696,7 @@ export async function handleChatRequest(req, sdk) {
           createdAt: savedData.profile?.createdAt || Date.now(),
           notifications: body.notifications !== undefined ? !!body.notifications : (savedData.profile?.notifications ?? true),
           linkPreview: body.linkPreview !== undefined ? !!body.linkPreview : (savedData.profile?.linkPreview ?? true),
+          sounds: body.sounds !== undefined ? !!body.sounds : (savedData.profile?.sounds ?? true),
         };
         savedData.peerProfiles[localId] = {
           username: myName(),
@@ -4821,6 +4822,7 @@ export async function handleChatRequest(req, sdk) {
           createdAt: savedData.profile?.createdAt || 0,
           notifications: savedData.profile?.notifications ?? true,
           linkPreview: savedData.profile?.linkPreview ?? true,
+          sounds: savedData.profile?.sounds ?? true,
           blockedPeers: listBlockedPeers(),
           // This person's other devices, whose messages are theirs too.
           siblings: [...siblingIds],

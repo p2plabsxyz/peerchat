@@ -1253,6 +1253,7 @@ async function init() {
     hideBoot();
     if (!profile.username) { showOnboarding(); return; }
     S.profile = profile;
+    S.settings.sounds = profile.sounds ?? true;
     S.settings.notifications = profile.notifications ?? true;
     S.settings.linkPreview = profile.linkPreview ?? true;
     await loadRooms();
@@ -1356,7 +1357,7 @@ $("onboard-submit")?.addEventListener("click", async () => {
     }
     const { profile } = await chat.saveProfile({ username, bio: $("onboard-bio").value.trim() });
     S.profile = profile;
-    S.settings.sounds = true;
+    S.settings.sounds = profile.sounds ?? true;
     S.settings.notifications = profile.notifications ?? true;
     S.settings.linkPreview = profile.linkPreview ?? true;
     await loadRooms();
@@ -4095,7 +4096,7 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     const sounds = $("set-sounds").checked;
     const notifications = $("set-notifications").checked;
     const linkPreview = $("set-linkpreview").checked;
-    const body = { username, bio: $("set-bio").value.trim(), notifications, linkPreview };
+    const body = { username, bio: $("set-bio").value.trim(), notifications, linkPreview, sounds };
     if (pendingAvatar) body.avatar = pendingAvatar;
     const { profile } = await chat.saveProfile(body);
     S.profile = profile;
