@@ -2643,7 +2643,7 @@ function connectGlobalSSE() {
 
       // What you wrote on another of your devices is not news to you.
       if (!isSystem && !isOwnId(msg.sender)) {
-        if (rk !== S.activeRoom) {
+        if (rk !== S.activeRoom || document.visibilityState !== "visible") {
           room.unreadCount = (room.unreadCount || 0) + 1;
           if (msgText && isMentioned(msgText, rk)) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
@@ -4481,9 +4481,23 @@ $("new-room-avatar-input")?.addEventListener("change", async (e) => {
   } catch (err) { alert(err.message); }
 });
 
+// A chat on screen is read as it arrives. One left open in a hidden tab, or in
+// a tab that was closed, is not on screen: its messages count as unread, as in
+// any other chat, instead of passing as read with nobody looking.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     connectGlobalSSE();
+    const roomKey = S.activeRoom;
+    const room = roomKey && S.rooms[roomKey];
+    if (room) {
+      room.unreadCount = 0;
+      room.unreadMentions = 0;
+      renderRoomList();
+      updateTabTitle();
+      chat.setActive(roomKey).then(() => chat.markRead(roomKey)).catch(() => {});
+    }
+  } else if (S.activeRoom) {
+    chat.setActive(null).catch(() => {});
   }
 });
 

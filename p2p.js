@@ -2927,6 +2927,12 @@ async function setUpFeed(sdk, roomKey) {
           };
         }
 
+        // A chat on screen is read as it arrives, as far as the message's own
+        // time, which a sender's clock can put a little ahead of ours.
+        if (!isSystem && shown === activeRoom) {
+          const at = Math.min(Number(msg.timestamp) || 0, Date.now() + 10 * 60_000);
+          room.lastReadTs = Math.max(room.lastReadTs || 0, Date.now(), at);
+        }
         // What you wrote on another of your devices is not news to you.
         if (!isSystem && !isReaction && shown !== activeRoom && !isOwnSender(msg.sender)) {
           room.unreadCount = (room.unreadCount || 0) + 1;
@@ -4790,11 +4796,15 @@ export async function handleChatRequest(req, sdk) {
       }
 
       if (action === "set-active") {
-        activeRoom = roomKey && isValidRoomKey(roomKey) ? roomKey : null;
-        if (activeRoom) {
-          const room = savedData.rooms[activeRoom];
-          if (room) { room.unreadCount = 0; room.unreadMentions = 0; persistData(); }
-        }
+        // The chat being left was read up to now, not only up to when it was
+        // opened, so its New Messages line goes after what was on screen.
+        const next = roomKey && isValidRoomKey(roomKey) ? roomKey : null;
+        const leaving = activeRoom && activeRoom !== next ? savedData.rooms[activeRoom] : null;
+        if (leaving) leaving.lastReadTs = Date.now();
+        activeRoom = next;
+        const room = activeRoom ? savedData.rooms[activeRoom] : null;
+        if (room) { room.unreadCount = 0; room.unreadMentions = 0; }
+        if (room || leaving) persistData();
         return respond(200, { ok: true });
       }
 
