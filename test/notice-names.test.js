@@ -177,7 +177,7 @@ describe("on screen", async () => {
 
   it("lists nobody by their id", () => {
     assert.match(app, /const memberName = nameForPeer\(id\);\s+if \(!self && !memberName\) continue;/);
-    assert.match(app, /if \(!username\) return;\s+S\.peerProfiles\[peerId\] = \{ username,/);
+    assert.match(app, /if \(!username\) return;[\s\S]{0,200}S\.peerProfiles\[peerId\] = \{ \.\.\.S\.peerProfiles\[peerId\], username,/);
   });
 
   it("says Online, Idle or Offline over a direct message, and counts people in a group", () => {

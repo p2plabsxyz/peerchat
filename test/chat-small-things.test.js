@@ -24,6 +24,6 @@ describe("in a chat", () => {
     const people = [{ username: "Test Ana" }, { username: "Anahita" }, { username: "Test Ben" }];
     const found = people.filter((m) => startsName(m) || startsWord(m)).sort((a, b) => Number(startsName(b)) - Number(startsName(a)));
     assert.deepEqual(found.map((m) => m.username), ["Anahita", "Test Ana"]);
-    assert.match(app, /\.filter\(\(m\) => m\.id !== S\.profile\?\.id && \(startsName\(m\) \|\| startsWord\(m\)\)\)/);
+    assert.match(app, /mentionPeople\(room\)\s+\.filter\(\(m\) => startsName\(m\) \|\| startsWord\(m\)\)/);
   });
 });

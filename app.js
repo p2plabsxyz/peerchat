@@ -2807,7 +2807,9 @@ function connectGlobalSSE() {
       const peerAvatar = data.avatar || null;
       const peerRooms = Array.isArray(data.rooms) ? data.rooms : null;
       if (!username) return;
-      S.peerProfiles[peerId] = { username, bio, avatar: peerAvatar, updatedAt: Date.now() };
+      // Keeps what the update does not carry, such as the person key that ties
+      // someone's devices together.
+      S.peerProfiles[peerId] = { ...S.peerProfiles[peerId], username, bio, avatar: peerAvatar, updatedAt: Date.now() };
       if (isOnline) S.onlinePeers.add(peerId);
       patchRoomsForPeer(peerId, username, bio, peerAvatar, peerRooms);
       refreshActiveChatForPeer(peerId, username, peerAvatar);
@@ -2832,7 +2834,7 @@ function connectGlobalSSE() {
     try {
       const { peerId, username, bio, avatar: profileAvatar } = JSON.parse(ev.data);
       const peerAvatar = profileAvatar || null;
-      S.peerProfiles[peerId] = { username, bio, avatar: peerAvatar, updatedAt: Date.now() };
+      S.peerProfiles[peerId] = { ...S.peerProfiles[peerId], username, bio, avatar: peerAvatar, updatedAt: Date.now() };
       patchRoomsForPeer(peerId, username, bio, peerAvatar, null);
       refreshActiveChatForPeer(peerId, username, peerAvatar);
       updateRoomPeerCount(S.activeRoom);
@@ -3147,6 +3149,24 @@ $("message-form")?.addEventListener("submit", async (e) => {
   }
 });
 
+// Who @ offers in a room: never you, on this device or another of yours. A
+// direct chat is with one person, so it offers their devices only: the one it
+// is with, and any that proved they are that person. Its member list could hold
+// your own devices and leave the other person out.
+function mentionPeople(room) {
+  const people = Object.entries(room.members || {}).map(([id, m]) => ({ id, username: m.username || id }));
+  if (!room.isDM) return people.filter((m) => !isOwnId(m.id));
+  const partner = room.dmWith;
+  if (!partner || isOwnId(partner)) return [];
+  const person = S.peerProfiles[partner]?.person || "";
+  const theirs = people.filter((m) => !isOwnId(m.id) &&
+    (peerIdEq(m.id, partner) || (!!person && S.peerProfiles[m.id]?.person === person)));
+  if (!theirs.some((m) => peerIdEq(m.id, partner))) {
+    theirs.unshift({ id: partner, username: S.peerProfiles[partner]?.username || room.name || partner });
+  }
+  return theirs;
+}
+
 function buildMentionPopup() {
   const input = $("message-input");
   const popup = $("mention-popup");
@@ -3166,9 +3186,8 @@ function buildMentionPopup() {
   // Any word of a name, so "@Ana" finds "Test Ana"; whole names first.
   const startsName = (m) => m.username.toLowerCase().startsWith(query);
   const startsWord = (m) => m.username.toLowerCase().split(/\s+/).some((word) => word.startsWith(query));
-  const candidates = Object.entries(room.members || {})
-    .map(([id, m]) => ({ id, username: m.username || id }))
-    .filter((m) => m.id !== S.profile?.id && (startsName(m) || startsWord(m)))
+  const candidates = mentionPeople(room)
+    .filter((m) => startsName(m) || startsWord(m))
     .sort((a, b) => Number(startsName(b)) - Number(startsName(a)));
 
   if (candidates.length === 0) { popup.classList.remove("open"); mentionIdx = -1; return; }
