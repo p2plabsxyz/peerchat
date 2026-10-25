@@ -3795,10 +3795,9 @@ async function removeRoomMember(peerId, memberName) {
   const movesKey = roomKey !== PRE_JOINED_ROOM_KEY;
   const confirmed = confirm(
     `Remove ${memberName} from this room?\n\n` +
-    "They will not be able to come back. Everyone running PeerChat will stop passing their messages on." +
+    "They will not be able to come back, and their other devices go with them. Everyone running PeerChat will stop passing their messages on." +
     (movesKey
-      ? " The room also moves to a new key for the people still in it, so invites from before stop working." +
-        " If they use PeerChat on another device too, remove that one as well."
+      ? " The room also moves to a new key for the people still in it, so invites from before stop working."
       : ""),
   );
   if (!confirmed) return;
@@ -4146,6 +4145,9 @@ function showCtxMenu(e, roomKey) {
   const room = S.rooms[roomKey];
   menu.querySelector('[data-action="pin"]').textContent = room?.isPinned ? "Unpin" : "Pin";
   menu.querySelector('[data-action="mute"]').textContent = room?.isMuted ? "Unmute" : "Mute";
+  // A direct chat has no key to rejoin with, so it is a chat you leave.
+  const leaveBtn = menu.querySelector('[data-action="delete"]');
+  if (leaveBtn) leaveBtn.textContent = room?.isDM ? "Leave Chat" : "Leave Room";
   const copyBtn = menu.querySelector('[data-action="copy"]');
   if (copyBtn) {
     const isDM = room?.isDM;
@@ -4193,7 +4195,10 @@ $("room-menu")?.addEventListener("click", async (e) => {
   } else if (action === "copy") {
     copyText(ctxTarget);
   } else if (action === "delete") {
-    if (!confirm("Leave this room? You can rejoin with the room key.")) return;
+    const question = room.isDM
+      ? `Leave your chat with ${room.name || "this person"}? They are told you left.`
+      : "Leave this room? You can rejoin with the room key.";
+    if (!confirm(question)) return;
     await chat.deleteRoom(ctxTarget);
     delete S.rooms[ctxTarget];
     if (S.activeRoom === ctxTarget) {
