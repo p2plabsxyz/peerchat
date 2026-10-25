@@ -26,7 +26,10 @@ const THREAT_PATTERNS = [
   /\bgo\s*die\b/i,
   /\bshoot\s*up\b/i,
   /\brape\s*(you|u|her|him|them)\b/i,
-  /\bi('?ll|m\s*going\s*to)\s*(rape|murder|stalk)\b/i,
+  // Said as "I'll", "I will", "I'm going to", "I am gonna", with a phone's
+  // curly apostrophe or none.
+  /\bi(?:[’']?ll|\s+will|[’']?m\s*(?:going\s*to|gonna)|\s+am\s+(?:going\s+to|gonna))\s*(rape|murder|stalk)\b/i,
+  /\bi(?:[’']?ll|\s+will|[’']?m\s*(?:going\s*to|gonna)|\s+am\s+(?:going\s+to|gonna))\s*(kill|stab|hurt)\s*(you|u|ya)\b/i,
   /\bstfu\b/i,
 ];
 

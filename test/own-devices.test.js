@@ -28,6 +28,6 @@ describe("messages from your own devices", () => {
     assert.match(app, /function makeMsgEl\(msg\) \{\s+const self = isOwnId\(msg\.sender\);/);
     assert.match(app, /room\.name = isOwnId\(peerId\) \? "You" : username;/);
     // Not unread, and no sound, for what you wrote elsewhere.
-    assert.match(app, /if \(!isSystem && !isOwnId\(msg\.sender\)\) \{\s+if \(rk !== S\.activeRoom\) \{\s+room\.unreadCount/);
+    assert.match(app, /if \(!isSystem && !isOwnId\(msg\.sender\)\) \{\s+if \(rk !== S\.activeRoom \|\| document\.visibilityState !== "visible"\) \{\s+room\.unreadCount/);
   });
 });

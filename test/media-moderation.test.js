@@ -230,7 +230,7 @@ describe("media moderation", () => {
     // There is no directory upload. A dropped folder arrives as a 0-byte
     // pseudo-file, not its contents, so it is filtered out and named as such.
     assert.match(fn, /filter\(\(file\) => file && file\.size > 0\)/);
-    assert.match(fn, /Folders cannot be sent/);
+    assert.match(fn, /Empty files and folders cannot be sent/);
   });
 
   it("keeps what renders and what is screened in step", async () => {

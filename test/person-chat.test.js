@@ -36,6 +36,6 @@ describe("messaging someone's other device", () => {
     assert.match(yours, /room\.isDM && room\.dmWith && isOwnId\(room\.dmWith\) &&\s+!room\.pendingAcceptance && Object\.keys\(room\.members \|\| \{\}\)\.some\(\(id\) => peerIdEq\(id, peerId\)\)/);
     const find = app.slice(app.indexOf("function chatWithPersonOf("), app.indexOf("async function openDM("));
     assert.match(find, /if \(isOwnId\(peerId\)\) return null;/);
-    assert.match(find, /!room\.pendingAcceptance && !room\.blockedByPeer && !isOwnId\(room\.dmWith\)/);
+    assert.match(find, /!room\.pendingAcceptance && !room\.rejected && !room\.blockedByPeer && !isOwnId\(room\.dmWith\)/);
   });
 });

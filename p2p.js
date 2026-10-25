@@ -52,6 +52,11 @@ const MEMBERS_LIST_MAX_BYTES = 192 * 1024;
 // included, on every connection grew with the room until a big one was hundreds
 // of MB per connection.
 const MAX_SHARED_MEMBERS = 100;
+// Rooms have no member limit, but the list of names kept for one does. Someone
+// else's list is only their word, and without this a peer could send made-up
+// people until the disk was full. A peer shares at most MAX_SHARED_MEMBERS, so
+// that is all one list may add.
+const MAX_STORED_MEMBERS = 10000;
 // And this much of a room's log goes to a peer when it connects, newest last,
 // as on the phone. Every entry from the start used to be read and sent.
 const MAX_SYNC_ENTRIES = 200;
@@ -304,10 +309,17 @@ function normPeerId(id) {
 }
 
 // Blocking closes direct messages only. A blocked peer stays visible in any
-// room you share, the same as every other messenger.
+// room you share, the same as every other messenger. A block covers every
+// device of the person, once a device proves whose it is: blocked on one, their
+// other desktop sent the request straight back.
 function isPeerBlocked(peerId) {
   const id = normPeerId(peerId);
-  return !!id && !!savedData.blockedPeers?.[id];
+  if (!id) return false;
+  if (savedData.blockedPeers?.[id]) return true;
+  const persons = new Set(Object.values(savedData.blockedPeers || {}).map((entry) => entry.person).filter(Boolean));
+  if (!persons.size) return false;
+  const person = personOf(id);
+  return !!person && persons.has(person);
 }
 
 function listBlockedPeers() {
@@ -321,14 +333,24 @@ function sanitizeBlockedPeers(raw) {
   for (const entry of Object.values(raw)) {
     const peerId = normPeerId(entry?.peerId);
     if (!peerId || peerId === normPeerId(localId)) continue;
+    const person = typeof entry?.person === "string" && /^[0-9a-f]{64}$/.test(entry.person) ? entry.person : "";
     out[peerId] = {
       peerId,
       username: clamp(entry?.username, MAX_NAME_LEN) || peerId,
       blockedAt: Number.isFinite(entry?.blockedAt) ? entry.blockedAt : Date.now(),
+      ...(person && { person }),
     };
     if (Object.keys(out).length >= MAX_BLOCKED_PEERS) break;
   }
   return out;
+}
+
+// A list grown past the cap by an older version is cut back when it loads.
+function capStoredMembers(members) {
+  if (!members || typeof members !== "object") return members;
+  const ids = Object.keys(members);
+  if (ids.length <= MAX_STORED_MEMBERS) return members;
+  return Object.fromEntries(ids.slice(0, MAX_STORED_MEMBERS).map((id) => [id, members[id]]));
 }
 
 function normalizePersistedDmIds() {
@@ -584,6 +606,7 @@ function loadData() {
     // and unconfigurable at the same time.
     for (const room of Object.values(savedData.rooms)) {
       if (!room.moderation) room.moderation = { ...DEFAULT_ROOM_MODERATION };
+      room.members = capStoredMembers(room.members);
     }
 
     // A file from before the lock is locked now, not at its next change.
@@ -1680,6 +1703,7 @@ function roomUpdatePayload(roomKey) {
     isDM: !!room.isDM,
     dmWith: room.dmWith || null,
     pendingAcceptance: !!room.pendingAcceptance,
+    rejected: !!(room.isDM && room.rejected),
     blockedByPeer: !!room.blockedByPeer,
     rotates: !!roomChainFor(roomKey),
     createdBy: room.createdBy || "",
@@ -2893,9 +2917,10 @@ async function setUpFeed(sdk, roomKey) {
       if (room) {
         const isSystem = msg.type === "system";
         const isReaction = msg.type === "reaction";
-        if (!isSystem && !isReaction && room.isDM && room.pendingAcceptance && room.dmWith && msg.sender &&
+        if (!isSystem && !isReaction && room.isDM && (room.pendingAcceptance || room.rejected) && room.dmWith && msg.sender &&
             normPeerId(msg.sender) === normPeerId(room.dmWith)) {
           room.pendingAcceptance = false;
+          room.rejected = false;
           debouncePersist();
           emitRoomUpdate(roomKey);
         }
@@ -2911,6 +2936,12 @@ async function setUpFeed(sdk, roomKey) {
           };
         }
 
+        // A chat on screen is read as it arrives, as far as the message's own
+        // time, which a sender's clock can put a little ahead of ours.
+        if (!isSystem && shown === activeRoom) {
+          const at = Math.min(Number(msg.timestamp) || 0, Date.now() + 10 * 60_000);
+          room.lastReadTs = Math.max(room.lastReadTs || 0, Date.now(), at);
+        }
         // What you wrote on another of your devices is not news to you.
         if (!isSystem && !isReaction && shown !== activeRoom && !isOwnSender(msg.sender)) {
           room.unreadCount = (room.unreadCount || 0) + 1;
@@ -2934,13 +2965,13 @@ async function setUpFeed(sdk, roomKey) {
 
 // A room as another of this person's devices takes it, with its key. Null for
 // one not worth having there: one this device was removed from, and a direct
-// conversation the other person has not accepted or has blocked, which would
-// only send them a second request.
+// conversation the other person has not accepted, declined or blocked, which
+// would only send them a second request.
 function sharedRoomEntry(roomKey) {
   const room = savedData.rooms[roomKey];
   // A room that moved is where it went now.
   if (!room || room.movedTo || !isValidRoomKey(roomKey) || isRemovedFromRoom(roomKey)) return null;
-  if (room.isDM && (room.pendingAcceptance || room.blockedByPeer || !room.dmWith)) return null;
+  if (room.isDM && (room.pendingAcceptance || room.rejected || room.blockedByPeer || !room.dmWith)) return null;
   return {
     roomKey,
     name: room.name,
@@ -3723,6 +3754,7 @@ export function initChat(sdk, options = {}) {
             room.avatar = acceptAvatar;
             room.bio = acceptBio || "";
             room.pendingAcceptance = false;
+            room.rejected = false;
             room.blockedByPeer = false;
             room.leftByPeer = false;
             delete room.leftAt;
@@ -3749,10 +3781,16 @@ export function initChat(sdk, options = {}) {
             continue;
           }
 
+          // A decline stays: the request is no longer sent each time they
+          // connect, which made it come back after every restart. Asking
+          // again (join-dm) sends it once more, as on the phone.
           if (msg.type === "dm-reject") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!dmFromThem(room, remoteId, fullId)) continue;
+            room.pendingAcceptance = false;
+            room.rejected = true;
+            debouncePersist();
             broadcastGlobal("dm-rejected", {
               roomKey: msg.roomKey, fromId: remoteId,
               fromUsername: clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId,
@@ -4011,9 +4049,12 @@ export function initChat(sdk, options = {}) {
           if (msg.type === "members-list") {
             if (!msg.roomKey || !savedData.rooms[msg.roomKey]) continue;
             if (moderationIsKicked(remoteId, msg.roomKey)) continue;
+            if (!consumeControlRate(peer)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!room.members) room.members = {};
             const incoming = msg.members || {};
+            let stored = Object.keys(room.members).length;
+            let added = 0;
             // Only merge new member profiles, never blindly delete based on incomplete lists
             for (const [rawId, m] of Object.entries(incoming)) {
               const peerId = normPeerId(rawId);
@@ -4023,6 +4064,9 @@ export function initChat(sdk, options = {}) {
               if (isPeerBannedFromRoom(room.bans, { peerId })) continue;
               const username = clamp(m?.username, 50);
               if (!username || username === peerId) continue;
+              if (added >= MAX_SHARED_MEMBERS || stored >= MAX_STORED_MEMBERS) break;
+              added++;
+              stored++;
               // A name and a bio, which is all anyone else can vouch for. Their
               // picture comes from them when this device meets them, and when
               // they joined only ever from their own join. Kept from every list,
@@ -4279,9 +4323,10 @@ export async function handleChatRequest(req, sdk) {
         // Asking again clears it. A block that could never be retried would
         // make the other side's unblock meaningless, and if they are still
         // blocking us the answer comes straight back.
-        if (existing?.blockedByPeer || existing?.leftByPeer) {
+        if (existing?.blockedByPeer || existing?.leftByPeer || existing?.rejected) {
           existing.blockedByPeer = false;
           existing.leftByPeer = false;
+          existing.rejected = false;
           delete existing.leftAt;
           delete existing.leftByName;
           existing.backAt = Date.now();
@@ -4330,18 +4375,22 @@ export async function handleChatRequest(req, sdk) {
 
         if (!savedData.blockedPeers) savedData.blockedPeers = {};
         const existing = savedData.blockedPeers[peerId];
+        // Not one of your own devices: that is not somebody else.
+        const found = personOf(peerId) || existing?.person || "";
+        const person = found && found !== ownPersonKey() ? found : "";
         savedData.blockedPeers[peerId] = {
           peerId,
           username: clamp(body.username, MAX_NAME_LEN) || existing?.username || peerId,
           blockedAt: existing?.blockedAt ?? Date.now(),
+          ...(person && { person }),
         };
         const ids = Object.keys(savedData.blockedPeers);
         while (ids.length > MAX_BLOCKED_PEERS) delete savedData.blockedPeers[ids.shift()];
 
-        // Drop any request they already had waiting.
+        // Drop any request they already had waiting, from any of their devices.
         if (savedData.pendingDMs) {
           for (const [key, pending] of Object.entries(savedData.pendingDMs)) {
-            if (normPeerId(pending.fromId) === peerId) delete savedData.pendingDMs[key];
+            if (normPeerId(pending.fromId) === peerId || (person && personOf(pending.fromId) === person)) delete savedData.pendingDMs[key];
           }
         }
         persistData();
@@ -4538,6 +4587,9 @@ export async function handleChatRequest(req, sdk) {
         if (_sendRoom?.isDM && _sendRoom.leftByPeer) {
           return respond(403, { error: "This person left the chat." });
         }
+        if (_sendRoom?.isDM && _sendRoom.rejected) {
+          return respond(403, { error: "This person declined your message request." });
+        }
         if (_sendRoom?.isDM && isPeerBlocked(_sendRoom.dmWith)) {
           return respond(403, { error: "Unblock this person before messaging them." });
         }
@@ -4676,6 +4728,7 @@ export async function handleChatRequest(req, sdk) {
           createdAt: savedData.profile?.createdAt || Date.now(),
           notifications: body.notifications !== undefined ? !!body.notifications : (savedData.profile?.notifications ?? true),
           linkPreview: body.linkPreview !== undefined ? !!body.linkPreview : (savedData.profile?.linkPreview ?? true),
+          sounds: body.sounds !== undefined ? !!body.sounds : (savedData.profile?.sounds ?? true),
         };
         savedData.peerProfiles[localId] = {
           username: myName(),
@@ -4756,11 +4809,15 @@ export async function handleChatRequest(req, sdk) {
       }
 
       if (action === "set-active") {
-        activeRoom = roomKey && isValidRoomKey(roomKey) ? roomKey : null;
-        if (activeRoom) {
-          const room = savedData.rooms[activeRoom];
-          if (room) { room.unreadCount = 0; room.unreadMentions = 0; persistData(); }
-        }
+        // The chat being left was read up to now, not only up to when it was
+        // opened, so its New Messages line goes after what was on screen.
+        const next = roomKey && isValidRoomKey(roomKey) ? roomKey : null;
+        const leaving = activeRoom && activeRoom !== next ? savedData.rooms[activeRoom] : null;
+        if (leaving) leaving.lastReadTs = Date.now();
+        activeRoom = next;
+        const room = activeRoom ? savedData.rooms[activeRoom] : null;
+        if (room) { room.unreadCount = 0; room.unreadMentions = 0; }
+        if (room || leaving) persistData();
         return respond(200, { ok: true });
       }
 
@@ -4801,6 +4858,7 @@ export async function handleChatRequest(req, sdk) {
           createdAt: savedData.profile?.createdAt || 0,
           notifications: savedData.profile?.notifications ?? true,
           linkPreview: savedData.profile?.linkPreview ?? true,
+          sounds: savedData.profile?.sounds ?? true,
           blockedPeers: listBlockedPeers(),
           // This person's other devices, whose messages are theirs too.
           siblings: [...siblingIds],
@@ -4843,6 +4901,7 @@ export async function handleChatRequest(req, sdk) {
             dmWithKey: r.dmWithKey || null,
             rotates: !!roomChainFor(k),
             pendingAcceptance: !!r.pendingAcceptance,
+            rejected: !!(r.isDM && r.rejected),
             blockedByPeer: !!r.blockedByPeer,
             leftByPeer: !!(r.isDM && r.leftByPeer),
             ...(r.isDM && r.leftByPeer && { leftByName: r.leftByName || "" }),

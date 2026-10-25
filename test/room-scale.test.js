@@ -132,6 +132,16 @@ describe("a big room", () => {
     assert.equal(members["not an id"], undefined);
   });
 
+  it("takes at most a hundred new people from one list, so made-up ones cannot fill the disk", async () => {
+    const before = Object.keys((await roomOf()).members).length;
+    const madeUp = {};
+    for (let i = 0; i < 500; i++) madeUp[(0xf0000000 + i).toString(16)] = { username: `Made Up ${i}`, bio: "" };
+    send({ type: "members-list", room: wireRoom(ROOM), members: madeUp });
+    await eventually(async () => Object.keys((await roomOf()).members).length > before, "the list taken");
+    await sleep(200);
+    assert.equal(Object.keys((await roomOf()).members).length, before + 100);
+  });
+
   it("sends the last of the room's log to a newcomer, without the joins it saw", async () => {
     // Joined, by their own word, before any of it: everything is theirs to have.
     const doneBefore = frames.filter((frame) => frame.type === "sync-done").length;

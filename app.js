@@ -1017,9 +1017,14 @@ function avatar(name, sz, customUrl) {
     : "";
 }
 
+// A picture is made small here (369px, about 27 KB), so a photo straight off a
+// phone is fine: refusing anything over 1 MB turned most of them away. The cap
+// only keeps a huge file from being decoded at all.
+const MAX_PICTURE_FILE_BYTES = 30 * 1024 * 1024;
+
 function resizeImage(file, maxPx = 369) {
   return new Promise((resolve, reject) => {
-    if (file.size > 1024 * 1024) { reject(new Error("Image must be under 1 MB")); return; }
+    if (file.size > MAX_PICTURE_FILE_BYTES) { reject(new Error("Pick a picture under 30 MB")); return; }
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
@@ -1030,7 +1035,7 @@ function resizeImage(file, maxPx = 369) {
         c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
         resolve(c.toDataURL("image/jpeg", 0.8));
       };
-      img.onerror = reject;
+      img.onerror = () => reject(new Error("This picture could not be opened. Try a JPEG or PNG."));
       img.src = reader.result;
     };
     reader.onerror = reject;
@@ -1253,6 +1258,7 @@ async function init() {
     hideBoot();
     if (!profile.username) { showOnboarding(); return; }
     S.profile = profile;
+    S.settings.sounds = profile.sounds ?? true;
     S.settings.notifications = profile.notifications ?? true;
     S.settings.linkPreview = profile.linkPreview ?? true;
     await loadRooms();
@@ -1356,7 +1362,7 @@ $("onboard-submit")?.addEventListener("click", async () => {
     }
     const { profile } = await chat.saveProfile({ username, bio: $("onboard-bio").value.trim() });
     S.profile = profile;
-    S.settings.sounds = true;
+    S.settings.sounds = profile.sounds ?? true;
     S.settings.notifications = profile.notifications ?? true;
     S.settings.linkPreview = profile.linkPreview ?? true;
     await loadRooms();
@@ -1658,12 +1664,13 @@ function applyDMComposerGate(roomKey) {
   // The other person left the chat, so nothing sent here would reach them.
   const leftByPeer = !!(room.isDM && room.leftByPeer && !blockedByPeer && !blockedByMe);
   const leftName = room.leftByName || room.name || "This person";
+  const declined = !!(room.isDM && room.rejected && !blockedByPeer && !blockedByMe && !leftByPeer);
 
   // Messaging someone offline is allowed. There is no server holding the
   // message, so it only moves while both sides are running.
   const offlineNote = $("dm-offline-note");
   if (offlineNote) {
-    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe && !leftByPeer &&
+    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe && !leftByPeer && !declined &&
       !S.onlinePeers.has(room.dmWith));
     offlineNote.style.display = peerOffline ? "" : "none";
     if (peerOffline) {
@@ -1677,14 +1684,16 @@ function applyDMComposerGate(roomKey) {
   // than letting messages go nowhere.
   const removed = !!room.removedByCreator;
   if (banner) {
-    banner.style.display = removed || blockedByPeer || blockedByMe || leftByPeer ? "" : "none";
+    banner.style.display = removed || blockedByPeer || blockedByMe || leftByPeer || declined ? "" : "none";
     banner.textContent = removed
       ? `You were removed from this room by ${room.createdByName || "whoever made it"}.`
       : blockedByMe
         ? "You blocked this person. Unblock them in Settings to message them again."
         : leftByPeer
           ? `${leftName} left this chat.`
-          : "This person blocked your direct messages. Open their profile and press Message to ask again.";
+          : declined
+            ? `${room.name || "This person"} declined your message request. Open their profile and press Message to ask again.`
+            : "This person blocked your direct messages. Open their profile and press Message to ask again.";
   }
   if (removed) {
     messageInput.disabled = true;
@@ -1697,6 +1706,10 @@ function applyDMComposerGate(roomKey) {
   } else if (leftByPeer) {
     messageInput.disabled = true;
     messageInput.placeholder = `${leftName} left this chat.`;
+    sendBtn.disabled = true;
+  } else if (declined) {
+    messageInput.disabled = true;
+    messageInput.placeholder = `${room.name || "This person"} declined your message request.`;
     sendBtn.disabled = true;
   } else if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
     messageInput.disabled = true;
@@ -1862,6 +1875,14 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
   const q = messageSearchQuery.trim().toLowerCase();
   let msgs = S.messages[roomKey] || [];
   if (q) msgs = msgs.filter((m) => messageMatchesSearch(m, q));
+  // A search that finds nothing says so, rather than leaving the chat looking
+  // empty.
+  if (q && !msgs.length) {
+    const none = document.createElement("div");
+    none.className = "system-msg";
+    none.textContent = "No messages found";
+    container.appendChild(none);
+  }
   let lastDateLabel = "";
   let unreadDividerInserted = false;
   for (const m of msgs) {
@@ -2617,9 +2638,10 @@ function connectGlobalSSE() {
       const room = S.rooms[rk];
       if (!room) return;
       const isSystem = msg.type === "system";
-      if (room.isDM && room.pendingAcceptance && room.dmWith && msg.sender && !isSystem &&
+      if (room.isDM && (room.pendingAcceptance || room.rejected) && room.dmWith && msg.sender && !isSystem &&
           peerIdEq(msg.sender, room.dmWith)) {
         room.pendingAcceptance = false;
+        room.rejected = false;
         delete S.pendingDMs?.[rk];
         applyDMComposerGate(rk);
       }
@@ -2629,7 +2651,7 @@ function connectGlobalSSE() {
 
       // What you wrote on another of your devices is not news to you.
       if (!isSystem && !isOwnId(msg.sender)) {
-        if (rk !== S.activeRoom) {
+        if (rk !== S.activeRoom || document.visibilityState !== "visible") {
           room.unreadCount = (room.unreadCount || 0) + 1;
           if (msgText && isMentioned(msgText, rk)) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
@@ -2785,7 +2807,9 @@ function connectGlobalSSE() {
       const peerAvatar = data.avatar || null;
       const peerRooms = Array.isArray(data.rooms) ? data.rooms : null;
       if (!username) return;
-      S.peerProfiles[peerId] = { username, bio, avatar: peerAvatar, updatedAt: Date.now() };
+      // Keeps what the update does not carry, such as the person key that ties
+      // someone's devices together.
+      S.peerProfiles[peerId] = { ...S.peerProfiles[peerId], username, bio, avatar: peerAvatar, updatedAt: Date.now() };
       if (isOnline) S.onlinePeers.add(peerId);
       patchRoomsForPeer(peerId, username, bio, peerAvatar, peerRooms);
       refreshActiveChatForPeer(peerId, username, peerAvatar);
@@ -2810,7 +2834,7 @@ function connectGlobalSSE() {
     try {
       const { peerId, username, bio, avatar: profileAvatar } = JSON.parse(ev.data);
       const peerAvatar = profileAvatar || null;
-      S.peerProfiles[peerId] = { username, bio, avatar: peerAvatar, updatedAt: Date.now() };
+      S.peerProfiles[peerId] = { ...S.peerProfiles[peerId], username, bio, avatar: peerAvatar, updatedAt: Date.now() };
       patchRoomsForPeer(peerId, username, bio, peerAvatar, null);
       refreshActiveChatForPeer(peerId, username, peerAvatar);
       updateRoomPeerCount(S.activeRoom);
@@ -2877,6 +2901,7 @@ function connectGlobalSSE() {
         room.avatar = fromAvatar || null;
         room.bio = fromBio || "";
         room.pendingAcceptance = false;
+        room.rejected = false;
         delete S.pendingDMs?.[roomKey];
         renderRoomList();
         if (roomKey === S.activeRoom) {
@@ -2950,6 +2975,13 @@ function connectGlobalSSE() {
     touch();
     try {
       const { roomKey, fromUsername } = JSON.parse(ev.data);
+      const room = S.rooms[roomKey];
+      if (room?.isDM) {
+        room.pendingAcceptance = false;
+        room.rejected = true;
+        renderRoomList();
+        applyDMComposerGate(roomKey);
+      }
       if (S.settings.notifications) {
         try { new Notification(`${fromUsername || "Peer"} declined your message request`); } catch {}
       }
@@ -3117,6 +3149,24 @@ $("message-form")?.addEventListener("submit", async (e) => {
   }
 });
 
+// Who @ offers in a room: never you, on this device or another of yours. A
+// direct chat is with one person, so it offers their devices only: the one it
+// is with, and any that proved they are that person. Its member list could hold
+// your own devices and leave the other person out.
+function mentionPeople(room) {
+  const people = Object.entries(room.members || {}).map(([id, m]) => ({ id, username: m.username || id }));
+  if (!room.isDM) return people.filter((m) => !isOwnId(m.id));
+  const partner = room.dmWith;
+  if (!partner || isOwnId(partner)) return [];
+  const person = S.peerProfiles[partner]?.person || "";
+  const theirs = people.filter((m) => !isOwnId(m.id) &&
+    (peerIdEq(m.id, partner) || (!!person && S.peerProfiles[m.id]?.person === person)));
+  if (!theirs.some((m) => peerIdEq(m.id, partner))) {
+    theirs.unshift({ id: partner, username: S.peerProfiles[partner]?.username || room.name || partner });
+  }
+  return theirs;
+}
+
 function buildMentionPopup() {
   const input = $("message-input");
   const popup = $("mention-popup");
@@ -3133,9 +3183,12 @@ function buildMentionPopup() {
   const room = S.rooms[S.activeRoom];
   if (!room) { popup.classList.remove("open"); mentionIdx = -1; return; }
 
-  const candidates = Object.entries(room.members || {})
-    .map(([id, m]) => ({ id, username: m.username || id }))
-    .filter((m) => m.id !== S.profile?.id && m.username.toLowerCase().startsWith(query));
+  // Any word of a name, so "@Ana" finds "Test Ana"; whole names first.
+  const startsName = (m) => m.username.toLowerCase().startsWith(query);
+  const startsWord = (m) => m.username.toLowerCase().split(/\s+/).some((word) => word.startsWith(query));
+  const candidates = mentionPeople(room)
+    .filter((m) => startsName(m) || startsWord(m))
+    .sort((a, b) => Number(startsName(b)) - Number(startsName(a)));
 
   if (candidates.length === 0) { popup.classList.remove("open"); mentionIdx = -1; return; }
 
@@ -3701,7 +3754,7 @@ function chatWithYourself(peerId) {
 function chatWithPersonOf(peerId, peerName) {
   if (isOwnId(peerId)) return null;
   const chats = Object.values(S.rooms)
-    .filter((room) => room.isDM && room.dmWith && !room.pendingAcceptance && !room.blockedByPeer && !isOwnId(room.dmWith))
+    .filter((room) => room.isDM && room.dmWith && !room.pendingAcceptance && !room.rejected && !room.blockedByPeer && !isOwnId(room.dmWith))
     .map((room) => ({
       room,
       dmWith: room.dmWith,
@@ -3722,13 +3775,14 @@ async function openDM(peerId, peerUsername, peerKey = "") {
     const existing = directRoomWith(peerId, peerKey) ||
       (peerKey ? null : isOwnId(peerId) ? chatWithYourself(peerId) : chatWithPersonOf(peerId, peerUsername));
     closeAllModals();
-    if (existing && !existing.blockedByPeer) {
+    if (existing && !existing.blockedByPeer && !existing.rejected) {
       await openRoom(existing.roomKey);
       return;
     }
-    // A room they blocked goes back through join-dm, which clears the flag and
-    // re-sends the request. Otherwise their unblock would never reach us.
-    if (existing?.blockedByPeer) {
+    // A room they blocked or declined goes back through join-dm, which clears
+    // the flag and re-sends the request. Otherwise their unblock would never
+    // reach us, and a declined request could never be asked again.
+    if (existing?.blockedByPeer || existing?.rejected) {
       await chat.joinDM({ toId: peerId, toKey: peerKey, toUsername: peerUsername });
       await loadRooms();
       renderRoomList();
@@ -3777,10 +3831,9 @@ async function removeRoomMember(peerId, memberName) {
   const movesKey = roomKey !== PRE_JOINED_ROOM_KEY;
   const confirmed = confirm(
     `Remove ${memberName} from this room?\n\n` +
-    "They will not be able to come back. Everyone running PeerChat will stop passing their messages on." +
+    "They will not be able to come back, and their other devices go with them. Everyone running PeerChat will stop passing their messages on." +
     (movesKey
-      ? " The room also moves to a new key for the people still in it, so invites from before stop working." +
-        " If they use PeerChat on another device too, remove that one as well."
+      ? " The room also moves to a new key for the people still in it, so invites from before stop working."
       : ""),
   );
   if (!confirmed) return;
@@ -4095,7 +4148,7 @@ $("settings-form")?.addEventListener("submit", async (e) => {
     const sounds = $("set-sounds").checked;
     const notifications = $("set-notifications").checked;
     const linkPreview = $("set-linkpreview").checked;
-    const body = { username, bio: $("set-bio").value.trim(), notifications, linkPreview };
+    const body = { username, bio: $("set-bio").value.trim(), notifications, linkPreview, sounds };
     if (pendingAvatar) body.avatar = pendingAvatar;
     const { profile } = await chat.saveProfile(body);
     S.profile = profile;
@@ -4128,6 +4181,9 @@ function showCtxMenu(e, roomKey) {
   const room = S.rooms[roomKey];
   menu.querySelector('[data-action="pin"]').textContent = room?.isPinned ? "Unpin" : "Pin";
   menu.querySelector('[data-action="mute"]').textContent = room?.isMuted ? "Unmute" : "Mute";
+  // A direct chat has no key to rejoin with, so it is a chat you leave.
+  const leaveBtn = menu.querySelector('[data-action="delete"]');
+  if (leaveBtn) leaveBtn.textContent = room?.isDM ? "Leave Chat" : "Leave Room";
   const copyBtn = menu.querySelector('[data-action="copy"]');
   if (copyBtn) {
     const isDM = room?.isDM;
@@ -4175,7 +4231,10 @@ $("room-menu")?.addEventListener("click", async (e) => {
   } else if (action === "copy") {
     copyText(ctxTarget);
   } else if (action === "delete") {
-    if (!confirm("Leave this room? You can rejoin with the room key.")) return;
+    const question = room.isDM
+      ? `Leave your chat with ${room.name || "this person"}? They are told you left.`
+      : "Leave this room? You can rejoin with the room key.";
+    if (!confirm(question)) return;
     await chat.deleteRoom(ctxTarget);
     delete S.rooms[ctxTarget];
     if (S.activeRoom === ctxTarget) {
@@ -4314,7 +4373,8 @@ async function screenAndUploadFiles(selected, { roomKey = S.activeRoom, forwarde
   // is no directory upload here; refuse it rather than upload an empty entry.
   const files = (selected || []).filter((file) => file && file.size > 0);
   if (files.length === 0) {
-    if ((selected || []).length > 0) alert("Folders cannot be sent. Pick the files inside it instead.");
+    // An empty file is 0 bytes too, and was called a folder.
+    if ((selected || []).length > 0) alert("Empty files and folders cannot be sent. For a folder, pick the files inside it.");
     return false;
   }
 
@@ -4453,9 +4513,23 @@ $("new-room-avatar-input")?.addEventListener("change", async (e) => {
   } catch (err) { alert(err.message); }
 });
 
+// A chat on screen is read as it arrives. One left open in a hidden tab, or in
+// a tab that was closed, is not on screen: its messages count as unread, as in
+// any other chat, instead of passing as read with nobody looking.
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     connectGlobalSSE();
+    const roomKey = S.activeRoom;
+    const room = roomKey && S.rooms[roomKey];
+    if (room) {
+      room.unreadCount = 0;
+      room.unreadMentions = 0;
+      renderRoomList();
+      updateTabTitle();
+      chat.setActive(roomKey).then(() => chat.markRead(roomKey)).catch(() => {});
+    }
+  } else if (S.activeRoom) {
+    chat.setActive(null).catch(() => {});
   }
 });
 
