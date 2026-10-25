@@ -309,10 +309,17 @@ function normPeerId(id) {
 }
 
 // Blocking closes direct messages only. A blocked peer stays visible in any
-// room you share, the same as every other messenger.
+// room you share, the same as every other messenger. A block covers every
+// device of the person, once a device proves whose it is: blocked on one, their
+// other desktop sent the request straight back.
 function isPeerBlocked(peerId) {
   const id = normPeerId(peerId);
-  return !!id && !!savedData.blockedPeers?.[id];
+  if (!id) return false;
+  if (savedData.blockedPeers?.[id]) return true;
+  const persons = new Set(Object.values(savedData.blockedPeers || {}).map((entry) => entry.person).filter(Boolean));
+  if (!persons.size) return false;
+  const person = personOf(id);
+  return !!person && persons.has(person);
 }
 
 function listBlockedPeers() {
@@ -326,10 +333,12 @@ function sanitizeBlockedPeers(raw) {
   for (const entry of Object.values(raw)) {
     const peerId = normPeerId(entry?.peerId);
     if (!peerId || peerId === normPeerId(localId)) continue;
+    const person = typeof entry?.person === "string" && /^[0-9a-f]{64}$/.test(entry.person) ? entry.person : "";
     out[peerId] = {
       peerId,
       username: clamp(entry?.username, MAX_NAME_LEN) || peerId,
       blockedAt: Number.isFinite(entry?.blockedAt) ? entry.blockedAt : Date.now(),
+      ...(person && { person }),
     };
     if (Object.keys(out).length >= MAX_BLOCKED_PEERS) break;
   }
@@ -4366,18 +4375,22 @@ export async function handleChatRequest(req, sdk) {
 
         if (!savedData.blockedPeers) savedData.blockedPeers = {};
         const existing = savedData.blockedPeers[peerId];
+        // Not one of your own devices: that is not somebody else.
+        const found = personOf(peerId) || existing?.person || "";
+        const person = found && found !== ownPersonKey() ? found : "";
         savedData.blockedPeers[peerId] = {
           peerId,
           username: clamp(body.username, MAX_NAME_LEN) || existing?.username || peerId,
           blockedAt: existing?.blockedAt ?? Date.now(),
+          ...(person && { person }),
         };
         const ids = Object.keys(savedData.blockedPeers);
         while (ids.length > MAX_BLOCKED_PEERS) delete savedData.blockedPeers[ids.shift()];
 
-        // Drop any request they already had waiting.
+        // Drop any request they already had waiting, from any of their devices.
         if (savedData.pendingDMs) {
           for (const [key, pending] of Object.entries(savedData.pendingDMs)) {
-            if (normPeerId(pending.fromId) === peerId) delete savedData.pendingDMs[key];
+            if (normPeerId(pending.fromId) === peerId || (person && personOf(pending.fromId) === person)) delete savedData.pendingDMs[key];
           }
         }
         persistData();
