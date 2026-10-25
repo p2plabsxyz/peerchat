@@ -1017,9 +1017,14 @@ function avatar(name, sz, customUrl) {
     : "";
 }
 
+// A picture is made small here (369px, about 27 KB), so a photo straight off a
+// phone is fine: refusing anything over 1 MB turned most of them away. The cap
+// only keeps a huge file from being decoded at all.
+const MAX_PICTURE_FILE_BYTES = 30 * 1024 * 1024;
+
 function resizeImage(file, maxPx = 369) {
   return new Promise((resolve, reject) => {
-    if (file.size > 1024 * 1024) { reject(new Error("Image must be under 1 MB")); return; }
+    if (file.size > MAX_PICTURE_FILE_BYTES) { reject(new Error("Pick a picture under 30 MB")); return; }
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
@@ -1030,7 +1035,7 @@ function resizeImage(file, maxPx = 369) {
         c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
         resolve(c.toDataURL("image/jpeg", 0.8));
       };
-      img.onerror = reject;
+      img.onerror = () => reject(new Error("This picture could not be opened. Try a JPEG or PNG."));
       img.src = reader.result;
     };
     reader.onerror = reject;
