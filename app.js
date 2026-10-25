@@ -1659,12 +1659,13 @@ function applyDMComposerGate(roomKey) {
   // The other person left the chat, so nothing sent here would reach them.
   const leftByPeer = !!(room.isDM && room.leftByPeer && !blockedByPeer && !blockedByMe);
   const leftName = room.leftByName || room.name || "This person";
+  const declined = !!(room.isDM && room.rejected && !blockedByPeer && !blockedByMe && !leftByPeer);
 
   // Messaging someone offline is allowed. There is no server holding the
   // message, so it only moves while both sides are running.
   const offlineNote = $("dm-offline-note");
   if (offlineNote) {
-    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe && !leftByPeer &&
+    const peerOffline = !!(room.isDM && room.dmWith && !blockedByPeer && !blockedByMe && !leftByPeer && !declined &&
       !S.onlinePeers.has(room.dmWith));
     offlineNote.style.display = peerOffline ? "" : "none";
     if (peerOffline) {
@@ -1678,14 +1679,16 @@ function applyDMComposerGate(roomKey) {
   // than letting messages go nowhere.
   const removed = !!room.removedByCreator;
   if (banner) {
-    banner.style.display = removed || blockedByPeer || blockedByMe || leftByPeer ? "" : "none";
+    banner.style.display = removed || blockedByPeer || blockedByMe || leftByPeer || declined ? "" : "none";
     banner.textContent = removed
       ? `You were removed from this room by ${room.createdByName || "whoever made it"}.`
       : blockedByMe
         ? "You blocked this person. Unblock them in Settings to message them again."
         : leftByPeer
           ? `${leftName} left this chat.`
-          : "This person blocked your direct messages. Open their profile and press Message to ask again.";
+          : declined
+            ? `${room.name || "This person"} declined your message request. Open their profile and press Message to ask again.`
+            : "This person blocked your direct messages. Open their profile and press Message to ask again.";
   }
   if (removed) {
     messageInput.disabled = true;
@@ -1698,6 +1701,10 @@ function applyDMComposerGate(roomKey) {
   } else if (leftByPeer) {
     messageInput.disabled = true;
     messageInput.placeholder = `${leftName} left this chat.`;
+    sendBtn.disabled = true;
+  } else if (declined) {
+    messageInput.disabled = true;
+    messageInput.placeholder = `${room.name || "This person"} declined your message request.`;
     sendBtn.disabled = true;
   } else if (room.isDM && (S.pendingDMs?.[roomKey] || room.pendingAcceptance)) {
     messageInput.disabled = true;
@@ -2618,9 +2625,10 @@ function connectGlobalSSE() {
       const room = S.rooms[rk];
       if (!room) return;
       const isSystem = msg.type === "system";
-      if (room.isDM && room.pendingAcceptance && room.dmWith && msg.sender && !isSystem &&
+      if (room.isDM && (room.pendingAcceptance || room.rejected) && room.dmWith && msg.sender && !isSystem &&
           peerIdEq(msg.sender, room.dmWith)) {
         room.pendingAcceptance = false;
+        room.rejected = false;
         delete S.pendingDMs?.[rk];
         applyDMComposerGate(rk);
       }
@@ -2878,6 +2886,7 @@ function connectGlobalSSE() {
         room.avatar = fromAvatar || null;
         room.bio = fromBio || "";
         room.pendingAcceptance = false;
+        room.rejected = false;
         delete S.pendingDMs?.[roomKey];
         renderRoomList();
         if (roomKey === S.activeRoom) {
@@ -2951,6 +2960,13 @@ function connectGlobalSSE() {
     touch();
     try {
       const { roomKey, fromUsername } = JSON.parse(ev.data);
+      const room = S.rooms[roomKey];
+      if (room?.isDM) {
+        room.pendingAcceptance = false;
+        room.rejected = true;
+        renderRoomList();
+        applyDMComposerGate(roomKey);
+      }
       if (S.settings.notifications) {
         try { new Notification(`${fromUsername || "Peer"} declined your message request`); } catch {}
       }
@@ -3702,7 +3718,7 @@ function chatWithYourself(peerId) {
 function chatWithPersonOf(peerId, peerName) {
   if (isOwnId(peerId)) return null;
   const chats = Object.values(S.rooms)
-    .filter((room) => room.isDM && room.dmWith && !room.pendingAcceptance && !room.blockedByPeer && !isOwnId(room.dmWith))
+    .filter((room) => room.isDM && room.dmWith && !room.pendingAcceptance && !room.rejected && !room.blockedByPeer && !isOwnId(room.dmWith))
     .map((room) => ({
       room,
       dmWith: room.dmWith,
@@ -3723,13 +3739,14 @@ async function openDM(peerId, peerUsername, peerKey = "") {
     const existing = directRoomWith(peerId, peerKey) ||
       (peerKey ? null : isOwnId(peerId) ? chatWithYourself(peerId) : chatWithPersonOf(peerId, peerUsername));
     closeAllModals();
-    if (existing && !existing.blockedByPeer) {
+    if (existing && !existing.blockedByPeer && !existing.rejected) {
       await openRoom(existing.roomKey);
       return;
     }
-    // A room they blocked goes back through join-dm, which clears the flag and
-    // re-sends the request. Otherwise their unblock would never reach us.
-    if (existing?.blockedByPeer) {
+    // A room they blocked or declined goes back through join-dm, which clears
+    // the flag and re-sends the request. Otherwise their unblock would never
+    // reach us, and a declined request could never be asked again.
+    if (existing?.blockedByPeer || existing?.rejected) {
       await chat.joinDM({ toId: peerId, toKey: peerKey, toUsername: peerUsername });
       await loadRooms();
       renderRoomList();

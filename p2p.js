@@ -1694,6 +1694,7 @@ function roomUpdatePayload(roomKey) {
     isDM: !!room.isDM,
     dmWith: room.dmWith || null,
     pendingAcceptance: !!room.pendingAcceptance,
+    rejected: !!(room.isDM && room.rejected),
     blockedByPeer: !!room.blockedByPeer,
     rotates: !!roomChainFor(roomKey),
     createdBy: room.createdBy || "",
@@ -2907,9 +2908,10 @@ async function setUpFeed(sdk, roomKey) {
       if (room) {
         const isSystem = msg.type === "system";
         const isReaction = msg.type === "reaction";
-        if (!isSystem && !isReaction && room.isDM && room.pendingAcceptance && room.dmWith && msg.sender &&
+        if (!isSystem && !isReaction && room.isDM && (room.pendingAcceptance || room.rejected) && room.dmWith && msg.sender &&
             normPeerId(msg.sender) === normPeerId(room.dmWith)) {
           room.pendingAcceptance = false;
+          room.rejected = false;
           debouncePersist();
           emitRoomUpdate(roomKey);
         }
@@ -2948,13 +2950,13 @@ async function setUpFeed(sdk, roomKey) {
 
 // A room as another of this person's devices takes it, with its key. Null for
 // one not worth having there: one this device was removed from, and a direct
-// conversation the other person has not accepted or has blocked, which would
-// only send them a second request.
+// conversation the other person has not accepted, declined or blocked, which
+// would only send them a second request.
 function sharedRoomEntry(roomKey) {
   const room = savedData.rooms[roomKey];
   // A room that moved is where it went now.
   if (!room || room.movedTo || !isValidRoomKey(roomKey) || isRemovedFromRoom(roomKey)) return null;
-  if (room.isDM && (room.pendingAcceptance || room.blockedByPeer || !room.dmWith)) return null;
+  if (room.isDM && (room.pendingAcceptance || room.rejected || room.blockedByPeer || !room.dmWith)) return null;
   return {
     roomKey,
     name: room.name,
@@ -3737,6 +3739,7 @@ export function initChat(sdk, options = {}) {
             room.avatar = acceptAvatar;
             room.bio = acceptBio || "";
             room.pendingAcceptance = false;
+            room.rejected = false;
             room.blockedByPeer = false;
             room.leftByPeer = false;
             delete room.leftAt;
@@ -3763,10 +3766,16 @@ export function initChat(sdk, options = {}) {
             continue;
           }
 
+          // A decline stays: the request is no longer sent each time they
+          // connect, which made it come back after every restart. Asking
+          // again (join-dm) sends it once more, as on the phone.
           if (msg.type === "dm-reject") {
             if (!msg.roomKey || !isValidRoomKey(msg.roomKey)) continue;
             const room = savedData.rooms[msg.roomKey];
             if (!dmFromThem(room, remoteId, fullId)) continue;
+            room.pendingAcceptance = false;
+            room.rejected = true;
+            debouncePersist();
             broadcastGlobal("dm-rejected", {
               roomKey: msg.roomKey, fromId: remoteId,
               fromUsername: clamp(msg.fromUsername, MAX_NAME_LEN) || remoteId,
@@ -4299,9 +4308,10 @@ export async function handleChatRequest(req, sdk) {
         // Asking again clears it. A block that could never be retried would
         // make the other side's unblock meaningless, and if they are still
         // blocking us the answer comes straight back.
-        if (existing?.blockedByPeer || existing?.leftByPeer) {
+        if (existing?.blockedByPeer || existing?.leftByPeer || existing?.rejected) {
           existing.blockedByPeer = false;
           existing.leftByPeer = false;
+          existing.rejected = false;
           delete existing.leftAt;
           delete existing.leftByName;
           existing.backAt = Date.now();
@@ -4557,6 +4567,9 @@ export async function handleChatRequest(req, sdk) {
         }
         if (_sendRoom?.isDM && _sendRoom.leftByPeer) {
           return respond(403, { error: "This person left the chat." });
+        }
+        if (_sendRoom?.isDM && _sendRoom.rejected) {
+          return respond(403, { error: "This person declined your message request." });
         }
         if (_sendRoom?.isDM && isPeerBlocked(_sendRoom.dmWith)) {
           return respond(403, { error: "Unblock this person before messaging them." });
@@ -4865,6 +4878,7 @@ export async function handleChatRequest(req, sdk) {
             dmWithKey: r.dmWithKey || null,
             rotates: !!roomChainFor(k),
             pendingAcceptance: !!r.pendingAcceptance,
+            rejected: !!(r.isDM && r.rejected),
             blockedByPeer: !!r.blockedByPeer,
             leftByPeer: !!(r.isDM && r.leftByPeer),
             ...(r.isDM && r.leftByPeer && { leftByName: r.leftByName || "" }),
