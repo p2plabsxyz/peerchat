@@ -1875,6 +1875,14 @@ function renderMessages(roomKey, scrollToBottom = true, lastReadTs = 0) {
   const q = messageSearchQuery.trim().toLowerCase();
   let msgs = S.messages[roomKey] || [];
   if (q) msgs = msgs.filter((m) => messageMatchesSearch(m, q));
+  // A search that finds nothing says so, rather than leaving the chat looking
+  // empty.
+  if (q && !msgs.length) {
+    const none = document.createElement("div");
+    none.className = "system-msg";
+    none.textContent = "No messages found";
+    container.appendChild(none);
+  }
   let lastDateLabel = "";
   let unreadDividerInserted = false;
   for (const m of msgs) {
@@ -3155,9 +3163,13 @@ function buildMentionPopup() {
   const room = S.rooms[S.activeRoom];
   if (!room) { popup.classList.remove("open"); mentionIdx = -1; return; }
 
+  // Any word of a name, so "@Ana" finds "Test Ana"; whole names first.
+  const startsName = (m) => m.username.toLowerCase().startsWith(query);
+  const startsWord = (m) => m.username.toLowerCase().split(/\s+/).some((word) => word.startsWith(query));
   const candidates = Object.entries(room.members || {})
     .map(([id, m]) => ({ id, username: m.username || id }))
-    .filter((m) => m.id !== S.profile?.id && m.username.toLowerCase().startsWith(query));
+    .filter((m) => m.id !== S.profile?.id && (startsName(m) || startsWord(m)))
+    .sort((a, b) => Number(startsName(b)) - Number(startsName(a)));
 
   if (candidates.length === 0) { popup.classList.remove("open"); mentionIdx = -1; return; }
 
@@ -4342,7 +4354,8 @@ async function screenAndUploadFiles(selected, { roomKey = S.activeRoom, forwarde
   // is no directory upload here; refuse it rather than upload an empty entry.
   const files = (selected || []).filter((file) => file && file.size > 0);
   if (files.length === 0) {
-    if ((selected || []).length > 0) alert("Folders cannot be sent. Pick the files inside it instead.");
+    // An empty file is 0 bytes too, and was called a folder.
+    if ((selected || []).length > 0) alert("Empty files and folders cannot be sent. For a folder, pick the files inside it.");
     return false;
   }
 
