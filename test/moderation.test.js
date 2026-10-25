@@ -10,6 +10,7 @@ import {
   TRACKER_IDLE_TTL_MS,
   checkSpam,
   checkAbuse,
+  checkThreats,
   checkNSFW,
   checkContent,
   checkAdultDomains,
@@ -120,6 +121,22 @@ describe("Moderation Engine", () => {
     it("should flag threat messages", () => {
       const result = checkAbuse("go die already");
       assert.equal(result.flagged, true);
+    });
+
+    it("flags a threat however the I is written", () => {
+      for (const text of [
+        "I'll murder you", "I’ll murder you", "Ill murder you", "I will stalk her",
+        "I'm going to murder you", "I’m going to murder you", "im going to stalk you",
+        "I am going to murder you", "I'm gonna stalk you",
+        "I am going to kill you", "I'm gonna kill u", "I’ll stab you", "I will hurt you",
+      ]) assert.equal(checkThreats(text).flagged, true, text);
+    });
+
+    it("leaves everyday sayings alone", () => {
+      for (const text of [
+        "I'll kill it at the gig tonight", "this traffic is going to kill me",
+        "I'm going to shoot you an email", "it won't hurt you to try", "I will kill some time",
+      ]) assert.equal(checkThreats(text).flagged, false, text);
     });
 
     it("should not flag normal messages", () => {
