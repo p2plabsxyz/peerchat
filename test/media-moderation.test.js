@@ -1,20 +1,26 @@
 // Photos and videos never reach the text filters, so this is what decides
-// whether explicit media gets into a room at all.
+// whether explicit, violent or graphic media gets into a room at all.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { stat } from "node:fs/promises";
 
 import {
+  combineMediaVerdicts,
+  describeBlockedUpload,
   describeTooManyFiles,
+  GRAPHIC_THRESHOLD,
+  isRefusedMedia,
   isTooManyFiles,
   MAX_UPLOAD_BATCH,
   MEDIA_ALLOWED,
   MEDIA_BLOCKED,
+  MEDIA_GRAPHIC,
   MEDIA_UNSCANNED,
   normalizeMediaVerdict,
   screenUploadBatch,
   verdictFromPredictions,
+  verdictFromSafety,
   videoSampleTimes,
 } from "../lib/media-moderation.js";
 
@@ -52,6 +58,36 @@ describe("media moderation", () => {
     assert.equal(verdictFromPredictions([]), MEDIA_UNSCANNED);
     assert.equal(verdictFromPredictions(null), MEDIA_UNSCANNED);
     assert.equal(normalizeMediaVerdict("clean"), MEDIA_UNSCANNED);
+  });
+
+  it("refuses a violent or graphic picture, in its own words", () => {
+    // The safety model's gore class decides it.
+    assert.equal(verdictFromSafety({ NSFL: 0.74, NSFW: 0.04, SFW: 0.22 }), MEDIA_GRAPHIC);
+    assert.equal(verdictFromSafety({ NSFL: GRAPHIC_THRESHOLD, NSFW: 0, SFW: 0.7 }), MEDIA_GRAPHIC);
+    assert.equal(verdictFromSafety({ NSFL: 0.17, NSFW: 0.03, SFW: 0.8 }), MEDIA_ALLOWED);
+    // A model that did not run says nothing, rather than clearing the picture.
+    assert.equal(verdictFromSafety(null), MEDIA_UNSCANNED);
+    assert.equal(verdictFromSafety({}), MEDIA_UNSCANNED);
+
+    // Either model refuses; explicit says more, so it wins the words.
+    assert.equal(combineMediaVerdicts(MEDIA_ALLOWED, MEDIA_GRAPHIC), MEDIA_GRAPHIC);
+    assert.equal(combineMediaVerdicts(MEDIA_BLOCKED, MEDIA_GRAPHIC), MEDIA_BLOCKED);
+    assert.equal(combineMediaVerdicts(MEDIA_ALLOWED, MEDIA_ALLOWED), MEDIA_ALLOWED);
+    // One model that could not judge leaves it to the other, as before.
+    assert.equal(combineMediaVerdicts(MEDIA_ALLOWED, MEDIA_UNSCANNED), MEDIA_ALLOWED);
+    assert.equal(combineMediaVerdicts(MEDIA_UNSCANNED, MEDIA_GRAPHIC), MEDIA_GRAPHIC);
+    assert.equal(combineMediaVerdicts(MEDIA_UNSCANNED, MEDIA_UNSCANNED), MEDIA_UNSCANNED);
+
+    assert.equal(isRefusedMedia(MEDIA_GRAPHIC), true);
+    assert.equal(isRefusedMedia(MEDIA_BLOCKED), true);
+    assert.equal(isRefusedMedia(MEDIA_UNSCANNED), false);
+    assert.equal(normalizeMediaVerdict(MEDIA_GRAPHIC), MEDIA_GRAPHIC);
+
+    assert.match(describeBlockedUpload("trip.jpg", MEDIA_GRAPHIC), /"trip\.jpg" looks violent or graphic, so it was not sent/);
+    assert.match(describeBlockedUpload("trip.jpg"), /looks explicit/);
+    const decision = screenUploadBatch([{ fileName: "a.png", verdict: MEDIA_ALLOWED }, { fileName: "b.png", verdict: MEDIA_GRAPHIC }]);
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason, /"b\.png" looks violent or graphic/);
   });
 
   it("stops the whole batch when one file is refused", () => {
@@ -96,12 +132,19 @@ describe("media moderation", () => {
     // decide what it accepts.
     assert.doesNotMatch(scanner, /https?:\/\//);
     assert.match(scanner, /nsfw-model\/model\.json/);
+    assert.match(scanner, /safety-model\/weights/);
+    assert.match(scanner, /\.\/tf-core\.min\.js/);
 
     // 5 MB has no business loading on a startup that never attaches a file.
     assert.match(scanner, /if \(!modelPromise\)/);
 
     const model = await stat(new URL("../lib/nsfw-model/group1-shard1of1", import.meta.url));
     assert.ok(model.size > 1_000_000, "the weights are missing");
+    const safety = await stat(new URL("../lib/safety-model/weights", import.meta.url));
+    assert.ok(safety.size > 1_000_000, "the safety model's weights are missing");
+    // Loaded with the first picture, after nsfwjs, whose engine it runs on.
+    assert.match(scanner, /if \(!safetyPromise\)/);
+    assert.match(scanner, /safetyPromise = loadMediaModel\(\)/);
   });
 
   it("checks every file before uploading any of them", async () => {
@@ -164,7 +207,7 @@ describe("media moderation", () => {
     // the check too, before they are even resized.
     for (const input of ["set-avatar-input", "new-room-avatar-input"]) {
       const handler = app.slice(app.indexOf(`$("${input}")?.addEventListener`));
-      const guard = handler.indexOf("await refuseIfExplicit(file)");
+      const guard = handler.indexOf("await refuseUnsafePicture(file)");
       const resize = handler.indexOf("await resizeImage(file)");
       assert.ok(guard > -1 && guard < resize, `${input} must be screened before it is resized`);
     }
@@ -175,7 +218,7 @@ describe("media moderation", () => {
   // mobile already sends those unscreened.
   it("screens a room upload and lets a direct message through, same as mobile", async () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
-    const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
+    const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseUnsafePicture"));
 
     // Asked of the chat the files go to, which for a forwarded file is not the
     // one on screen.
@@ -190,7 +233,7 @@ describe("media moderation", () => {
     assert.ok(fn.indexOf("isTooManyFiles(files.length)") < guard);
 
     // A profile or room picture goes to everyone, so that one is untouched.
-    assert.match(app, /async function refuseIfExplicit\(file\)/);
+    assert.match(app, /async function refuseUnsafePicture\(file\)/);
   });
 
   // Hiding a picture is a warning, not a verdict. The classifier is wrong often
@@ -201,6 +244,7 @@ describe("media moderation", () => {
 
     const fn = app.slice(app.indexOf("function hideMediaBehindNotice"), app.indexOf("// Your own upload was already screened"));
     assert.match(fn, /Hidden: this looks explicit/);
+    assert.match(fn, /verdict === MEDIA_GRAPHIC \? "Hidden: this looks violent or graphic"/);
     assert.match(fn, /Show anyway/);
     // Opening it puts the original element back with its real source, rather
     // than leaving a second copy behind.
@@ -225,7 +269,7 @@ describe("media moderation", () => {
 
   it("refuses a dropped folder instead of uploading an empty entry", async () => {
     const app = await readFile(new URL("../app.js", import.meta.url), "utf8");
-    const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseIfExplicit"));
+    const fn = app.slice(app.indexOf("async function screenAndUploadFiles"), app.indexOf("async function refuseUnsafePicture"));
 
     // There is no directory upload. A dropped folder arrives as a 0-byte
     // pseudo-file, not its contents, so it is filtered out and named as such.
@@ -287,7 +331,7 @@ describe("media moderation", () => {
     assert.match(hydrate, /if \(revealedMedia\.has\(src\)\) \{/);
     const unrevealed = hydrate.slice(hydrate.indexOf("const kind ="));
     assert.ok(unrevealed.indexOf("scanMediaUrl") < unrevealed.indexOf("el.src = src"));
-    assert.match(hydrate, /MEDIA_BLOCKED/);
+    assert.match(hydrate, /if \(isRefusedMedia\(verdict\)\) \{\s*\n\s*hideMediaBehindNotice\(el, src, verdict\);/);
 
     // Both the encrypted and the plain path go through it.
     const hydrateBody = app.slice(app.indexOf("function hydrateEncryptedMedia"), app.indexOf("function legacyAttachmentHtml"));
