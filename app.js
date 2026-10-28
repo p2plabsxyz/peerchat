@@ -34,7 +34,8 @@ import {
   describeTooManyFiles,
   isTooManyFiles,
   MAX_UPLOAD_BATCH,
-  MEDIA_BLOCKED,
+  MEDIA_GRAPHIC,
+  isRefusedMedia,
   screenUploadBatch,
 } from "./lib/media-moderation.js";
 import { scanMediaFile, scanMediaUrl } from "./lib/media-scanner.js";
@@ -712,8 +713,8 @@ async function screenIncomingMedia(el, src) {
   }
   const kind = el.tagName === "VIDEO" ? "video" : "image";
   const verdict = await scanMediaUrl(src, kind);
-  if (verdict === MEDIA_BLOCKED) {
-    hideMediaBehindNotice(el, src);
+  if (isRefusedMedia(verdict)) {
+    hideMediaBehindNotice(el, src, verdict);
     return;
   }
   el.src = src;
@@ -721,12 +722,12 @@ async function screenIncomingMedia(el, src) {
 
 // Hiding it is a warning, not a verdict. The classifier is wrong often enough
 // that whoever was sent the picture has to be able to look at it.
-function hideMediaBehindNotice(el, src) {
+function hideMediaBehindNotice(el, src, verdict) {
   const notice = document.createElement("div");
   notice.className = "msg-media-blocked";
 
   const label = document.createElement("span");
-  label.textContent = "Hidden: this looks explicit";
+  label.textContent = verdict === MEDIA_GRAPHIC ? "Hidden: this looks violent or graphic" : "Hidden: this looks explicit";
   notice.appendChild(label);
 
   const reveal = document.createElement("button");
@@ -3294,7 +3295,7 @@ function renderModerationInfo(container, moderation) {
   items.push(`<span class="mod-setting-item">Abuse filter: <strong>${abuse}</strong></span>`);
   items.push(`<span class="mod-setting-item">Profanity &amp; slurs: <strong>${nsfw}</strong></span>`);
   items.push(`<span class="mod-setting-item">Spam limit: <strong>${spamLimit}</strong> msgs/10s</span>`);
-  items.push(`<span class="mod-setting-item">Adult domain blocklist: <strong>always on</strong></span>`);
+  items.push(`<span class="mod-setting-item">Adult domains, NSFW, and violent/graphic: <strong>always blocked</strong></span>`);
   container.innerHTML = items.join("");
 }
 
@@ -3511,7 +3512,7 @@ $("edit-room-avatar-input")?.addEventListener("change", async (e) => {
   e.target.value = "";
   if (!file) return;
   try {
-    await refuseIfExplicit(file);
+    await refuseUnsafePicture(file);
     pendingEditAvatar = await resizeImage(file);
     $("edit-room-avatar-preview").src = pendingEditAvatar;
   } catch (err) { alert(err.message); }
@@ -4416,8 +4417,9 @@ async function screenAndUploadFiles(selected, { roomKey = S.activeRoom, forwarde
 }
 
 // A profile or room picture is broadcast to every peer, so it goes through the
-// same check as an attachment. Refused rather than uploaded, same as mobile.
-async function refuseIfExplicit(file) {
+// same check as an attachment, explicit and violent or graphic. Refused rather
+// than uploaded, same as mobile.
+async function refuseUnsafePicture(file) {
   const decision = screenUploadBatch([{ fileName: file.name, verdict: await scanMediaFile(file) }]);
   if (!decision.allowed) throw new Error(decision.reason);
 }
@@ -4497,7 +4499,7 @@ $("set-avatar-input")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
-    await refuseIfExplicit(file);
+    await refuseUnsafePicture(file);
     pendingAvatar = await resizeImage(file);
     $("set-avatar-preview").src = pendingAvatar;
   } catch (err) { alert(err.message); }
@@ -4507,7 +4509,7 @@ $("new-room-avatar-input")?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   try {
-    await refuseIfExplicit(file);
+    await refuseUnsafePicture(file);
     pendingRoomAvatar = await resizeImage(file);
     $("new-room-avatar-preview").src = pendingRoomAvatar;
   } catch (err) { alert(err.message); }
