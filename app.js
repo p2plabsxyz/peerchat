@@ -27,6 +27,7 @@ import { createPresenceHold, presenceWithHeld } from "./lib/presence.js";
 import { collectLoadedMedia, restoreLoadedMedia } from "./lib/kept-media.js";
 import { shouldRerenderMessages } from "./lib/message-sync.js";
 import { joinsGroup } from "./lib/message-groups.js";
+import { createSoundGate } from "./lib/sound-gate.js";
 import { attachmentKind } from "./lib/render-rules.js";
 import { applyInlineFormatting, readHeading, splitCodeFences } from "./lib/message-format.js";
 import { DecryptedUrlCache, RoomRefs } from "./lib/attachment-cache.js";
@@ -1146,6 +1147,9 @@ function initAudio() {
   });
 }
 
+// What arrives in a burst sounds once (lib/sound-gate.js); a send always does.
+const incomingSound = createSoundGate();
+
 function playSound(type) {
   if (type === "send" || type === "receive" || type === "pop") {
     if (!S.settings.sounds) return;
@@ -1154,6 +1158,7 @@ function playSound(type) {
   }
   const room = S.rooms[S.activeRoom];
   if (room?.isMuted && type !== "mention" && type !== "send") return;
+  if (type !== "send" && !incomingSound.allow()) return;
   const fileMap = { send: "send", receive: "receive", message: "notification", mention: "notification", pop: "pop" };
   const file = fileMap[type] || "receive";
   if (_audioCtx.state === "suspended") _audioCtx.resume();
