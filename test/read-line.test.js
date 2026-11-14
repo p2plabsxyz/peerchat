@@ -88,6 +88,26 @@ describe("the New Messages line", () => {
     const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
     assert.match(app, /\} else if \(S\.activeRoom\) \{\s+chat\.setActive\(null\)\.catch\(\(\) => \{\}\);/);
     assert.match(app, /chat\.setActive\(roomKey\)\.then\(\(\) => chat\.markRead\(roomKey\)\)/);
-    assert.match(app, /if \(rk !== S\.activeRoom \|\| document\.visibilityState !== "visible"\) \{/);
+    assert.match(app, /if \(rk !== S\.activeRoom \|\| !chatOnScreen\(\)\) \{/);
+  });
+
+  // In PeerSky Desktop a page behind another tab still reads "visible": a
+  // chat left open there took what came in as read, and the home page's count
+  // missed it. PeerSky marks such a page, and the chat goes by the mark too.
+  it("is not on screen behind another tab in PeerSky Desktop", () => {
+    const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+    assert.match(app, /return document\.visibilityState === "visible" && document\.documentElement\?\.dataset\.peerskyTab !== "hidden";/);
+    assert.match(app, /document\.addEventListener\("visibilitychange", chatShownOrHidden\);\ndocument\.addEventListener\("peersky-tab-visibility", chatShownOrHidden\);/);
+    // A tab switch does not open the message stream again.
+    assert.match(app, /if \(event\.type === "visibilitychange"\) connectGlobalSSE\(\);/);
+    const onScreen = (visibilityState, peerskyTab) => {
+      const document = { visibilityState, documentElement: { dataset: peerskyTab ? { peerskyTab } : {} } };
+      const body = app.slice(app.indexOf("function chatOnScreen()"), app.indexOf("// A chat on screen is read as it arrives."));
+      return new Function("document", `${body}; return chatOnScreen();`)(document);
+    };
+    assert.equal(onScreen("visible"), true, "the phone, which has no mark");
+    assert.equal(onScreen("visible", "shown"), true);
+    assert.equal(onScreen("visible", "hidden"), false, "a tab behind another");
+    assert.equal(onScreen("hidden", "shown"), false, "a window put away");
   });
 });

@@ -2657,7 +2657,7 @@ function connectGlobalSSE() {
 
       // What you wrote on another of your devices is not news to you.
       if (!isSystem && !isOwnId(msg.sender)) {
-        if (rk !== S.activeRoom || document.visibilityState !== "visible") {
+        if (rk !== S.activeRoom || !chatOnScreen()) {
           room.unreadCount = (room.unreadCount || 0) + 1;
           if (msgText && isMentioned(msgText, rk)) {
             room.unreadMentions = (room.unreadMentions || 0) + 1;
@@ -4520,12 +4520,22 @@ $("new-room-avatar-input")?.addEventListener("change", async (e) => {
   } catch (err) { alert(err.message); }
 });
 
+// Whether the page is in front of the person. In PeerSky Desktop a page behind
+// another tab still reads "visible", since a tab's page has its window's
+// visibility, so PeerSky marks it data-peersky-tab="hidden" and says when that
+// changes (peersky-tab-visibility). The phone has no such mark.
+function chatOnScreen() {
+  return document.visibilityState === "visible" && document.documentElement?.dataset.peerskyTab !== "hidden";
+}
+
 // A chat on screen is read as it arrives. One left open in a hidden tab, or in
 // a tab that was closed, is not on screen: its messages count as unread, as in
 // any other chat, instead of passing as read with nobody looking.
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
-    connectGlobalSSE();
+function chatShownOrHidden(event) {
+  if (chatOnScreen()) {
+    // Coming back from the background can find the stream gone; a tab switch
+    // in a window that stayed open cannot.
+    if (event.type === "visibilitychange") connectGlobalSSE();
     const roomKey = S.activeRoom;
     const room = roomKey && S.rooms[roomKey];
     if (room) {
@@ -4538,7 +4548,9 @@ document.addEventListener("visibilitychange", () => {
   } else if (S.activeRoom) {
     chat.setActive(null).catch(() => {});
   }
-});
+}
+document.addEventListener("visibilitychange", chatShownOrHidden);
+document.addEventListener("peersky-tab-visibility", chatShownOrHidden);
 
 // fileName: the name a picture or video from a message was sent with, which it
 // downloads as. A profile or room picture has none and goes by hint.
