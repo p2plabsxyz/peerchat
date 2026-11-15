@@ -3002,9 +3002,12 @@ function connectGlobalSSE() {
     }
   }, 5_000);
 
-  es.onopen = () => {
+  es.onopen = async () => {
     reconnectDelay = 1000;
     lastSseTime = Date.now();
+    // The backend lets go of this page's chat when its stream ends, so once
+    // the stream is back the page says again which chat is on screen.
+    if (S.activeRoom && chatOnScreen()) await chat.setActive(S.activeRoom).catch(() => {});
     refreshActiveRoom();
   };
   es.onerror = () => { es.close(); scheduleReconnect(); };
