@@ -1,11 +1,16 @@
 const API = "hyper://chat";
+// This page's own id, sent with its message stream and with the chat it shows,
+// so the backend lets go of that chat when the page goes, as when its tab is
+// closed.
+const PAGE = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 
 function chatUrl(action, roomKey) {
   return roomKey ? `${API}?action=${action}&roomKey=${roomKey}` : `${API}?action=${action}`;
 }
 
 async function apiRequest(action, opts = {}) {
-  const qs = opts.roomKey ? `?action=${action}&roomKey=${opts.roomKey}` : `?action=${action}`;
+  const qs = (opts.roomKey ? `?action=${action}&roomKey=${opts.roomKey}` : `?action=${action}`) +
+    (opts.page ? `&page=${PAGE}` : "");
   const init = {};
   if (opts.body) {
     init.method = "POST";
@@ -32,7 +37,7 @@ async function apiRequest(action, opts = {}) {
 }
 
 export const chat = {
-  receiveAllUrl: () => chatUrl("receive-all"),
+  receiveAllUrl: () => `${chatUrl("receive-all")}&page=${PAGE}`,
   getProfile: () => apiRequest("get-profile"),
   getRooms: () => apiRequest("get-rooms"),
   saveProfile: (body) => apiRequest("save-profile", { body }),
@@ -43,7 +48,7 @@ export const chat = {
   inviteLink: (roomKey) => apiRequest("invite-link", { roomKey }),
   getHistory: (roomKey) => apiRequest("get-history", { roomKey }),
   searchMessages: (query) => apiRequest("search-messages", { body: { q: query } }),
-  setActive: (roomKey) => apiRequest("set-active", { roomKey, post: true }),
+  setActive: (roomKey) => apiRequest("set-active", { roomKey, post: true, page: true }),
   markRead: (roomKey) => apiRequest("mark-read", { roomKey, post: true }),
   sendMessage: (roomKey, body) => apiRequest("send", { roomKey, body }),
   react: (roomKey, body) => apiRequest("react", { roomKey, body }),

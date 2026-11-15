@@ -40,6 +40,11 @@ const MAX_FILE_NAME_LEN = 200;
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 60;
 const KEEPALIVE_MS = 15_000;
+// PeerSky Desktop learns that a tab's page is gone only when it next writes to
+// it, so a page's stream gets a comment line, which the page never sees, this
+// often. Without it a closed tab's chat would stay on screen until the next
+// heartbeat.
+const PAGE_PROBE_MS = 2_000;
 const PING_MS = 25_000;
 const SEEN_CAP = 10_000;
 const PERSIST_DELAY_MS = 2_000;
@@ -263,6 +268,11 @@ let wantTimer = null;
 let safeStore = null;
 let dataPath = null;
 let activeRoom = null;
+// The page that has activeRoom on screen, by the id it sends, and how many
+// message streams each page has open. PeerSky Desktop can close a tab before
+// its page says it went, but the page's stream ends with it.
+let activePage = null;
+const pageStreams = new Map();
 let persistTimer = null;
 let peerCountTimer = null;
 
@@ -2575,7 +2585,10 @@ async function dropRoomLocally(sdk, roomKey, { keepTopic = false } = {}) {
     }
   }
   delete savedData.rooms[roomKey];
-  if (activeRoom === roomKey) activeRoom = null;
+  if (activeRoom === roomKey) {
+    activeRoom = null;
+    activePage = null;
+  }
   markRoomLeft(roomKey);
   persistData();
 
@@ -4242,6 +4255,40 @@ function respond(status, data) {
   });
 }
 
+// The id a PeerChat page sends with its message stream and with the chat it
+// shows, made once per page load. Anything else counts as no page, as from a
+// page older than this.
+function pageIdOf(urlObj) {
+  const page = urlObj.searchParams.get("page");
+  return page && /^[0-9a-f]{32}$/.test(page) ? page : null;
+}
+
+// The chat on screen changes. The one being left was read up to now, not only
+// up to when it was opened, so its New Messages line goes after what was on
+// screen.
+function showRoom(next, page) {
+  const leaving = activeRoom && activeRoom !== next ? savedData.rooms[activeRoom] : null;
+  if (leaving) leaving.lastReadTs = Date.now();
+  activeRoom = next;
+  activePage = next ? page : null;
+  const room = activeRoom ? savedData.rooms[activeRoom] : null;
+  if (room) { room.unreadCount = 0; room.unreadMentions = 0; }
+  if (room || leaving) persistData();
+}
+
+// A page's last stream ended, as when its tab was closed. A chat it had on
+// screen is not any more, and what comes in counts as unread. A page that is
+// still there opens its stream again and says which chat it shows.
+function pageStreamEnded(page) {
+  const open = (pageStreams.get(page) || 1) - 1;
+  if (open > 0) {
+    pageStreams.set(page, open);
+    return;
+  }
+  pageStreams.delete(page);
+  if (activePage === page) showRoom(null, null);
+}
+
 export async function handleChatRequest(req, sdk) {
   const urlObj = new URL(req.url);
   const action = urlObj.searchParams.get("action");
@@ -4809,15 +4856,12 @@ export async function handleChatRequest(req, sdk) {
       }
 
       if (action === "set-active") {
-        // The chat being left was read up to now, not only up to when it was
-        // opened, so its New Messages line goes after what was on screen.
         const next = roomKey && isValidRoomKey(roomKey) ? roomKey : null;
-        const leaving = activeRoom && activeRoom !== next ? savedData.rooms[activeRoom] : null;
-        if (leaving) leaving.lastReadTs = Date.now();
-        activeRoom = next;
-        const room = activeRoom ? savedData.rooms[activeRoom] : null;
-        if (room) { room.unreadCount = 0; room.unreadMentions = 0; }
-        if (room || leaving) persistData();
+        const page = pageIdOf(urlObj);
+        // A page that hides its chat lets go only of its own: another tab may
+        // have put a chat on screen since.
+        if (!next && page && activePage && activePage !== page) return respond(200, { ok: true });
+        showRoom(next, page);
         return respond(200, { ok: true });
       }
 
@@ -4995,10 +5039,15 @@ export async function handleChatRequest(req, sdk) {
 
         const hb = setInterval(() => { try { stream.write("event: heartbeat\ndata: {}\n\n"); } catch {} }, KEEPALIVE_MS);
         globalSseClients.push(stream);
+        const page = pageIdOf(urlObj);
+        if (page) pageStreams.set(page, (pageStreams.get(page) || 0) + 1);
+        const probe = page ? setInterval(() => { try { stream.write(":\n\n"); } catch {} }, PAGE_PROBE_MS) : null;
         stream.on("close", () => {
           clearInterval(hb);
+          clearInterval(probe);
           const idx = globalSseClients.indexOf(stream);
           if (idx !== -1) globalSseClients.splice(idx, 1);
+          if (page) pageStreamEnded(page);
         });
         return new Response(stream, {
           status: 200,
